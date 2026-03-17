@@ -1,0 +1,8 @@
+bin/
+*.zip
+*.txt
+__pycache__/
+.claude/
+.buildozer/
+build.sh
+azt_images
