@@ -263,6 +263,7 @@ KV_TEMPLATE = '''
             pos: self.pos
             size: self.size
     BoxLayout:
+        id: content_box
         orientation: 'vertical'
         # ── Top bar ──────────────────────────────────────────────────────────
         BoxLayout:
@@ -289,34 +290,35 @@ KV_TEMPLATE = '''
                 background_normal: ''
                 on_release: app.show_goto_dialog()
             Widget:
-            IconBtn:
-                text: 'Config'
+            Button:
                 size_hint_x: None
                 width: dp(44)
+                background_color: 0, 0, 0, 0
+                background_normal: ''
                 on_release: app.go_config()
-        # ── Image ─────────────────────────────────────────────────────────────
-        BoxLayout:
-            id: image_box
+                Image:
+                    source: 'fonts/gear.png'
+                    size: dp(28), dp(28)
+                    size_hint: None, None
+                    center: self.parent.center
+                    allow_stretch: True
+                    keep_ratio: True
+        # ── Image ────────────────────────────────────────────────────────────
+        AsyncImage:
+            id: entry_image
+            source: ''
             size_hint_y: None
             height: 0
             opacity: 0
-            padding: dp(8)
-            AsyncImage:
-                id: entry_image
-                source: ''
-                allow_stretch: True
-                keep_ratio: True
-        # ── Glosses (prominent, fill remaining space) ─────────────────────────
-        ScrollView:
+            allow_stretch: True
+            keep_ratio: True
+        # ── Glosses ──────────────────────────────────────────────────────────
+        BoxLayout:
+            id: gloss_box
+            orientation: 'vertical'
             size_hint_y: 1
-            do_scroll_x: False
-            BoxLayout:
-                id: gloss_box
-                orientation: 'vertical'
-                size_hint_y: None
-                height: self.minimum_height
-                padding: dp(12), dp(8)
-                spacing: dp(2)
+            padding: dp(4), 0
+            spacing: dp(2)
         # ── Status line ───────────────────────────────────────────────────────
         Label:
             id: status_label
@@ -334,21 +336,9 @@ KV_TEMPLATE = '''
             id: btn_area
             size_hint_y: None
             height: dp(100)
-            padding: dp(16), dp(8)
-            spacing: dp(12)
+            padding: dp(4), dp(4)
+            spacing: dp(4)
             # Populated dynamically by refresh_recorder_ui
-        # ── Nav arrows ────────────────────────────────────────────────────────
-        BoxLayout:
-            size_hint_y: None
-            height: dp(64)
-            padding: dp(12), dp(8)
-            spacing: dp(12)
-            NavBtn:
-                text: 'Prev'
-                on_release: app.nav_prev()
-            NavBtn:
-                text: 'Next'
-                on_release: app.nav_next()
 
 <ConfigScreen>:
     canvas.before:
@@ -474,34 +464,10 @@ KV_TEMPLATE = '''
 
                         font_name: FONT
                 # Only unrecorded — prominent toggle row
-                BoxLayout:
-                    size_hint_y: None
-                    height: dp(56)
-                    spacing: dp(12)
-                    padding: dp(12), dp(8)
-                    canvas.before:
-                        Color:
-                            rgba: (0.1647, 0.1373, 0.1255, 1) if not unrecorded_check.active else (0.15, 0.35, 0.22, 1)
-                        RoundedRectangle:
-                            pos: self.pos
-                            size: self.size
-                            radius: [dp(8)]
-                    CheckBox:
-                        id: unrecorded_check
-                        size_hint_x: None
-                        width: dp(48)
-                        active: False
-                        color: (0.7882, 0.4824, 0.2275, 1)
-                        on_active: root.toggle_unrecorded(self.active)
-                    Label:
-                        text: 'Only unrecorded'
-                        font_size: sp(16)
-                        font_name: FONT
-                        bold: True
-                        color: (0.9412, 0.9098, 0.8627, 1) if not unrecorded_check.active else (0.1529, 0.9, 0.3765, 1)
-                        halign: 'left'
-                        valign: 'middle'
-                        text_size: self.size
+                UnrecordedToggle:
+                    id: unrecorded_toggle
+                    active: False
+                    on_active: root.toggle_unrecorded(self.active)
                 # Apply button
                 Widget:
                     size_hint_y: None
@@ -514,7 +480,14 @@ KV_TEMPLATE = '''
                     size_hint_y: None
                     height: dp(8)
                 RecBtn:
-                    text: 'Collaboration...'
+                    text: 'Share this app'
+                    normal_color: (0.1529, 0.6824, 0.3765, 1)
+                    on_release: app.share_apk()
+                Widget:
+                    size_hint_y: None
+                    height: dp(8)
+                RecBtn:
+                    text: 'Data Collaboration...'
                     normal_color: (0.1647, 0.1373, 0.1255, 1)
                     on_release: app.go_collab()
                 Widget:
@@ -701,7 +674,6 @@ KV_TEMPLATE = '''
             size: (0, 0) if not self.recording else (dp(22), dp(22))
 
 <PlayButton>:
-    size_hint: 1, 1
     canvas:
         Color:
             rgba: (0.1529, 0.6824, 0.3765, 1)
@@ -716,7 +688,6 @@ KV_TEMPLATE = '''
             points: self.center_x - dp(12), self.center_y - dp(16), self.center_x - dp(12), self.center_y + dp(16), self.center_x + dp(16), self.center_y
 
 <RedoButton>:
-    size_hint: 1, 1
     canvas:
         Color:
             rgba: (0.1647, 0.1373, 0.1255, 1)
@@ -766,6 +737,36 @@ KV_TEMPLATE = '''
             font_name: FONT
             bold: True
             color: (0.9412, 0.9098, 0.8627, 1)
+            halign: 'left'
+            valign: 'middle'
+            text_size: self.size
+
+<UnrecordedToggle>:
+    size_hint_y: None
+    height: dp(56)
+    canvas.before:
+        Color:
+            rgba: (0.15, 0.35, 0.22, 1) if self.active else (0.1647, 0.1373, 0.1255, 1)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(8)]
+    BoxLayout:
+        spacing: dp(12)
+        padding: dp(12), dp(8)
+        CheckBox:
+            id: chk
+            size_hint_x: None
+            width: dp(48)
+            active: root.active
+            color: (0.7882, 0.4824, 0.2275, 1)
+            on_active: root.active = self.active
+        Label:
+            text: 'Only unrecorded'
+            font_size: sp(16)
+            font_name: FONT
+            bold: True
+            color: (0.1529, 0.9, 0.3765, 1) if root.active else (0.9412, 0.9098, 0.8627, 1)
             halign: 'left'
             valign: 'middle'
             text_size: self.size
@@ -869,6 +870,16 @@ class RedoButton(Widget):
     pass
 
 
+class UnrecordedToggle(BoxLayout):
+    active = BooleanProperty(False)
+
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos):
+            self.active = not self.active
+            return True
+        return super().on_touch_down(touch)
+
+
 class GlossRow(BoxLayout):
     lang = StringProperty('')
     gloss = StringProperty('')
@@ -895,7 +906,120 @@ class WelcomeScreen(Screen):
 
 
 class RecorderScreen(Screen):
-    pass
+    _touch_start_x = None
+    _swiping = False
+    _dragging = False          # True once finger moved past dead-zone
+    _swipe_touch = None        # the grabbed Touch object
+
+    # ── helpers ───────────────────────────────────────────────────────────
+    def _in_swipe_zone(self, touch):
+        """Return True if the touch lands on the image or gloss area."""
+        for wid_name in ('entry_image', 'gloss_box'):
+            w = self.ids.get(wid_name)
+            if w and w.collide_point(*touch.pos):
+                return True
+        return False
+
+    # ── touch dispatch ────────────────────────────────────────────────────
+    def on_touch_down(self, touch):
+        if self._swiping:
+            return super().on_touch_down(touch)
+        if self._in_swipe_zone(touch):
+            self._touch_start_x = touch.x
+            self._dragging = False
+            self._swipe_touch = touch
+        else:
+            self._touch_start_x = None
+            self._swipe_touch = None
+        return super().on_touch_down(touch)
+
+    def on_touch_move(self, touch):
+        if (self._swiping
+                or self._swipe_touch is not touch
+                or self._touch_start_x is None):
+            return super().on_touch_move(touch)
+
+        dx = touch.x - self._touch_start_x
+        dead_zone = self.width * 0.03          # ~10-15 px on most screens
+
+        if not self._dragging:
+            if abs(dx) < dead_zone:
+                return super().on_touch_move(touch)
+            # Past dead-zone → claim the touch so children stop receiving it
+            self._dragging = True
+            touch.grab(self)
+
+        content = self.ids.get('content_box')
+        if content:
+            content.x = dx                     # follow the finger
+        return True                            # consumed
+
+    def on_touch_up(self, touch):
+        # Ignore touches we didn't claim
+        if self._swipe_touch is not touch:
+            return super().on_touch_up(touch)
+
+        if touch.grab_current is self:
+            touch.ungrab(self)
+
+        start_x = self._touch_start_x
+        self._touch_start_x = None
+        self._swipe_touch = None
+
+        if self._swiping or not self._dragging:
+            self._dragging = False
+            return super().on_touch_up(touch)
+
+        self._dragging = False
+
+        content = self.ids.get('content_box')
+        if not content:
+            return super().on_touch_up(touch)
+
+        dx = touch.x - start_x if start_x is not None else 0.0
+        threshold = self.width * 0.2
+
+        if dx > threshold:
+            self._finish_swipe(content, 'prev')
+            return True
+        elif dx < -threshold:
+            self._finish_swipe(content, 'next')
+            return True
+        else:
+            # Snap back — abandoned swipe
+            self._snap_back(content)
+            return True
+
+    # ── animation ─────────────────────────────────────────────────────────
+    def _snap_back(self, content):
+        """Rubber-band back to x=0."""
+        from kivy.animation import Animation
+        Animation.cancel_all(content, 'x')
+        anim = Animation(x=0, duration=0.15, t='out_cubic')
+        anim.start(content)
+
+    def _finish_swipe(self, content, direction):
+        """Slide the rest of the way off-screen, navigate, slide new content in."""
+        from kivy.animation import Animation
+        Animation.cancel_all(content, 'x')
+        self._swiping = True
+        slide_out = self.width * (1 if direction == 'prev' else -1)
+
+        def _on_slide_out(anim, widget):
+            app = App.get_running_app()
+            if direction == 'prev':
+                app.nav_prev()
+            else:
+                app.nav_next()
+            # Jump to opposite side, slide back in
+            content.x = -slide_out
+            anim_in = Animation(x=0, duration=0.15, t='out_cubic')
+            anim_in.bind(on_complete=lambda *a: setattr(self, '_swiping', False))
+            anim_in.start(content)
+
+        anim_out = Animation(x=slide_out, duration=0.15, t='in_cubic')
+        anim_out.bind(on_complete=_on_slide_out)
+        anim_out.start(content)
 
 
 class ConfigScreen(Screen):
@@ -1111,6 +1235,7 @@ class RecorderController:
         self.gloss_search = ''
         self.only_unrecorded = False
         self._recording = False
+        self._playing = False
         self._pending_rerecord = False
         self._audio_path = None
         self._recorder = None
@@ -1175,12 +1300,14 @@ class RecorderController:
     def go_next(self):
         if self.index < len(self.queue) - 1:
             self._pending_rerecord = False
+            self._playing = False
             self.index += 1
             self._notify_ui()
 
     def go_prev(self):
         if self.index > 0:
             self._pending_rerecord = False
+            self._playing = False
             self.index -= 1
             self._notify_ui()
 
@@ -1270,6 +1397,8 @@ class RecorderController:
         Clock.schedule_once(lambda dt: self.play_audio(), 0.5)
 
     def play_audio(self):
+        if self._playing:
+            return
         e = self.current
         if not e or not e.get('audio_filename'):
             return
@@ -1284,6 +1413,8 @@ class RecorderController:
             print(f'Audio file not found: {filename}')
             return
 
+        self._playing = True
+
         if platform == 'android':
             try:
                 from jnius import autoclass
@@ -1293,7 +1424,17 @@ class RecorderController:
                 mp.prepare()
                 mp.start()
                 self._player = mp  # keep reference alive
+                # Clear _playing after duration elapses
+                duration_ms = mp.getDuration()
+                if duration_ms > 0:
+                    Clock.schedule_once(
+                        lambda dt: setattr(self, '_playing', False),
+                        duration_ms / 1000.0 + 0.1)
+                else:
+                    Clock.schedule_once(
+                        lambda dt: setattr(self, '_playing', False), 2.0)
             except Exception as ex:
+                self._playing = False
                 print(f'Android play error: {ex}')
         elif platform == 'ios':
             try:
@@ -1306,7 +1447,14 @@ class RecorderController:
                 player, _ = AVAudioPlayer.alloc().initWithContentsOfURL_error_(url, None)
                 player.play()
                 self._player = player  # keep reference alive
+                # Estimate duration and clear flag
+                duration = player.duration
+                if duration > 0:
+                    Clock.schedule_once(lambda dt: setattr(self, '_playing', False), duration + 0.1)
+                else:
+                    self._playing = False
             except Exception as ex:
+                self._playing = False
                 print(f'iOS play error: {ex}')
         else:
             try:
@@ -1322,22 +1470,18 @@ class RecorderController:
                 sound = SoundLoader.load(path)
                 if sound:
                     self._sound = sound  # must persist — GC stops SDL2 stream
-                    # SDL2 may load async; bind on_load to guarantee play
-                    # fires only after the buffer is ready
-                    def _play_when_ready(instance):
-                        instance.play()
+                    sound.bind(on_stop=lambda *a: setattr(self, '_playing', False))
                     if sound.state == 'stop' and sound.length > 0:
-                        # Already loaded synchronously
                         sound.play()
                     else:
                         sound.bind(on_load=lambda *a: sound.play())
-                        # Fallback: also schedule a direct play in case
-                        # on_load never fires (provider-dependent)
                         Clock.schedule_once(lambda dt: sound.play()
                             if sound.state == 'stop' else None, 0.3)
                 else:
+                    self._playing = False
                     print(f'SoundLoader could not load: {path}')
             except Exception as ex:
+                self._playing = False
                 print(f'Desktop play error: {ex}')
 
     def clear_audio(self):
@@ -1495,13 +1639,13 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-_APP_VERSION = '1.2.0'
+__version__ = '1.3.2'
 
 
 class LIFTRecorderApp(App):
     title = 'Record My Wordlist'
     icon = 'icon.png'
-    version_string = StringProperty(f'version {_APP_VERSION}')
+    version_string = StringProperty(f'version {__version__}')
     recorder: RecorderController = None
     config_screen: ConfigScreen = None
 
@@ -1782,6 +1926,50 @@ class LIFTRecorderApp(App):
         sm.transition = SlideTransition(direction='left')
         sm.current = 'collab'
 
+    def share_apk(self):
+        """Share the running APK via the OS share sheet."""
+        if platform == 'android':
+            try:
+                import shutil
+                from jnius import autoclass, cast
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                Intent = autoclass('android.content.Intent')
+                Uri = autoclass('android.net.Uri')
+                File = autoclass('java.io.File')
+                StrictMode = autoclass('android.os.StrictMode')
+                activity = PythonActivity.mActivity
+                pm = activity.getPackageManager()
+                pkg = activity.getPackageName()
+                app_info = pm.getApplicationInfo(pkg, 0)
+                apk_path = app_info.sourceDir
+                # Copy to external cache so other apps can read it
+                cache_dir = activity.getExternalCacheDir().getAbsolutePath()
+                dest = os.path.join(cache_dir, 'RecordMyWordlist.apk')
+                shutil.copy2(apk_path, dest)
+                dest_file = File(dest)
+                # Temporarily allow file:// URIs (no FileProvider in p4a)
+                old_policy = StrictMode.getVmPolicy()
+                builder = autoclass('android.os.StrictMode$VmPolicy$Builder')()
+                StrictMode.setVmPolicy(builder.build())
+                try:
+                    uri = Uri.fromFile(dest_file)
+                    intent = Intent(Intent.ACTION_SEND)
+                    intent.setType('application/vnd.android.package-archive')
+                    intent.putExtra(Intent.EXTRA_STREAM, cast(
+                        'android.os.Parcelable', uri))
+                    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    chooser = Intent.createChooser(intent, cast(
+                        'java.lang.CharSequence',
+                        autoclass('java.lang.String')('Share app')))
+                    activity.startActivity(chooser)
+                finally:
+                    StrictMode.setVmPolicy(old_policy)
+            except Exception as ex:
+                print(f'Share APK error: {ex}')
+                self._show_error(f'Could not share APK:\n{ex}')
+        else:
+            self._show_error('APK sharing is only available on Android.')
+
     def go_recorder(self):
         sm = self.root.ids.sm
         sm.transition = SlideTransition(direction='right')
@@ -1965,12 +2153,27 @@ class LIFTRecorderApp(App):
         if 'progress_label' in ids:
             ids.progress_label.text = r.progress_text
 
-        # Image
-        if 'image_box' in ids:
-            ids.image_box.height = dp(600) if r.has_image else 0
-            ids.image_box.opacity = 1 if r.has_image else 0
+        # Image — size to actual width, maintaining aspect ratio
         if 'entry_image' in ids:
-            ids.entry_image.source = r.image_path if r.has_image else ''
+            img = ids.entry_image
+            if r.has_image:
+                img.source = r.image_path
+                img.opacity = 1
+                # Bind texture size to compute correct height once loaded
+                def _resize_image(img_ref, *args):
+                    if img_ref.texture:
+                        tw, th = img_ref.texture.size
+                        if tw > 0:
+                            img_ref.height = img_ref.width * th / tw
+                    elif img_ref.height == 0:
+                        img_ref.height = img_ref.width  # fallback square
+                img.bind(texture=lambda *a: _resize_image(img))
+                img.bind(width=lambda *a: _resize_image(img))
+                _resize_image(img)
+            else:
+                img.source = ''
+                img.height = 0
+                img.opacity = 0
 
         # Glosses — one row per language, glosses joined with " / "
         if 'gloss_box' in ids:
@@ -1994,11 +2197,11 @@ class LIFTRecorderApp(App):
             btn_area = ids.btn_area
             btn_area.clear_widgets()
             if r.has_recording and not r._recording and not r._pending_rerecord:
-                # Show Play and Re-record side by side
-                play_btn = PlayButton()
+                # Show Play (2/3) and Re-record (1/3) side by side
+                play_btn = PlayButton(size_hint_x=2)
                 play_btn.bind(on_touch_up=lambda w, t:
                     self.play_audio() if w.collide_point(*t.pos) else None)
-                redo_btn = RedoButton()
+                redo_btn = RedoButton(size_hint_x=1)
                 redo_btn.bind(on_touch_up=lambda w, t:
                     self.redo_recording() if w.collide_point(*t.pos) else None)
                 btn_area.add_widget(play_btn)

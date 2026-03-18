@@ -13,9 +13,93 @@ Workflow
 
 import io
 import os
+import ssl
 import threading
 
 from kivy.clock import Clock
+
+# ── SSL fix for Android (missing CA bundle) ──────────────────────────────────
+# On Android, p4a doesn't ship system CA certs.  dulwich's
+# default_urllib3_manager passes ca_certs=None to urllib3.PoolManager, which
+# then tries system certs and fails.  We patch default_urllib3_manager itself
+# to inject the certifi CA bundle (or disable verification as a last resort).
+
+def _find_ca_bundle():
+    """Return path to a CA bundle, or None."""
+    # certifi (preferred — bundled via buildozer requirements)
+    try:
+        import certifi
+        ca = certifi.where()
+        if os.path.isfile(ca):
+            return ca
+    except ImportError:
+        pass
+    # On Android, certifi's cacert.pem may be inside a zip; extract it
+    try:
+        import certifi
+        import importlib.resources as _res
+        # Write the bundle to a writable location
+        priv = os.environ.get('ANDROID_PRIVATE', '')
+        if priv:
+            dest = os.path.join(priv, 'cacert.pem')
+            data = _res.read_binary('certifi', 'cacert.pem')
+            with open(dest, 'wb') as f:
+                f.write(data)
+            return dest
+    except Exception:
+        pass
+    # Common Linux / Android system locations
+    for path in ('/etc/ssl/certs/ca-certificates.crt',
+                 '/system/etc/security/cacerts'):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _patch_dulwich_ssl():
+    """Monkey-patch urllib3 and stdlib ssl so all HTTPS works on Android."""
+    ca = _find_ca_bundle()
+
+    # Patch urllib3.PoolManager (used by dulwich)
+    import urllib3
+    _orig_init = urllib3.PoolManager.__init__
+
+    def _patched_init(self, *a, **kw):
+        if ca:
+            if kw.get('ca_certs') is None:
+                kw['ca_certs'] = ca
+            kw.setdefault('cert_reqs', 'CERT_REQUIRED')
+        else:
+            kw['cert_reqs'] = 'CERT_NONE'
+            kw.pop('ca_certs', None)
+        _orig_init(self, *a, **kw)
+
+    urllib3.PoolManager.__init__ = _patched_init
+
+    # Patch ssl.create_default_context (used by urllib.request.urlopen)
+    if ca:
+        _orig_ctx = ssl.create_default_context
+        def _ctx_with_ca(*a, **kw):
+            kw.setdefault('cafile', ca)
+            return _orig_ctx(*a, **kw)
+        ssl.create_default_context = _ctx_with_ca
+        ssl._create_default_https_context = _ctx_with_ca
+    else:
+        def _unverified_ctx(*a, **kw):
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            return ctx
+        ssl._create_default_https_context = _unverified_ctx
+
+_dulwich_ssl_patched = False
+
+def _ensure_ssl():
+    """Call once before any dulwich network operation."""
+    global _dulwich_ssl_patched
+    if not _dulwich_ssl_patched:
+        _patch_dulwich_ssl()
+        _dulwich_ssl_patched = True
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +147,14 @@ def _stage_all(repo, project_dir):
         full = os.path.join(project_dir, rel)
         if os.path.isfile(full):
             paths.append(_bytes_path(rel))
+        elif os.path.isdir(full):
+            # dulwich reports untracked dirs as a single entry;
+            # walk them to find the actual files
+            for root, _dirs, files in os.walk(full):
+                for name in files:
+                    fp = os.path.join(root, name)
+                    rp = os.path.relpath(fp, project_dir)
+                    paths.append(_bytes_path(rp))
 
     if paths:
         porcelain.add(repo, paths=paths)
@@ -71,6 +163,64 @@ def _stage_all(repo, project_dir):
 def _default_author(contributor_name):
     safe = contributor_name.lower().replace(' ', '_')
     return _enc(f'{contributor_name} <{safe}@device>')
+
+
+def _ensure_remote_repo(remote_url, username, token):
+    """Create the remote repo on GitHub/GitLab if it doesn't exist yet.
+
+    Returns (ok, message).
+    """
+    import json
+    from urllib.request import Request, urlopen
+    from urllib.error import HTTPError, URLError
+
+    # Parse owner/repo from URL like https://github.com/owner/repo.git
+    from urllib.parse import urlparse
+    parsed = urlparse(remote_url)
+    host = parsed.hostname or ''
+    parts = parsed.path.strip('/').removesuffix('.git').split('/')
+    if len(parts) < 2:
+        return False, f'Cannot parse owner/repo from {remote_url}'
+    owner, repo_name = parts[0], parts[1]
+
+    if 'github.com' in host:
+        api_url = 'https://api.github.com/user/repos'
+        payload = json.dumps({
+            'name': repo_name,
+            'private': True,
+            'auto_init': False,
+        }).encode()
+        headers = {
+            'Authorization': f'token {token}',
+            'Accept': 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+        }
+    elif 'gitlab' in host:
+        api_url = f'https://{host}/api/v4/projects'
+        payload = json.dumps({
+            'name': repo_name,
+            'visibility': 'private',
+            'initialize_with_readme': False,
+        }).encode()
+        headers = {
+            'PRIVATE-TOKEN': token,
+            'Content-Type': 'application/json',
+        }
+    else:
+        return True, ''   # Unknown host — assume repo exists, let push fail
+
+    try:
+        req = Request(api_url, data=payload, headers=headers, method='POST')
+        resp = urlopen(req, timeout=30)
+        return True, f'Created remote repository {owner}/{repo_name}.'
+    except HTTPError as e:
+        body = e.read().decode('utf-8', errors='replace')
+        # 422 = already exists (GitHub), 400 = already exists (GitLab)
+        if e.code in (422, 400) and 'already' in body.lower():
+            return True, ''   # Already exists — fine
+        return False, f'Create repo failed ({e.code}): {body[:200]}'
+    except (URLError, OSError) as e:
+        return False, f'Create repo failed: {e}'
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +276,7 @@ def init_repo(project_dir, remote_url, username, token,
     Initialize a git repo in project_dir, commit everything, set remote, push.
     Returns a human-readable log string.
     """
+    _ensure_ssl()
     from dulwich import porcelain
     from dulwich.repo import Repo
     log = []
@@ -159,19 +310,43 @@ def init_repo(project_dir, remote_url, username, token,
     except Exception as exc:
         log.append(f'Commit: {exc}')
 
-    # Set remote origin
+    # Set or update remote origin
     try:
         existing = repo.get_config().get((b'remote', b'origin'), b'url').decode()
-        log.append(f'Remote already set: {existing}')
+        if existing != remote_url:
+            config = repo.get_config()
+            config.set((b'remote', b'origin'), b'url', _enc(remote_url))
+            config.write_to_path()
+            log.append(f'Remote updated to {remote_url}')
+        else:
+            log.append(f'Remote: {existing}')
     except KeyError:
         porcelain.remote_add(repo, 'origin', remote_url)
         log.append(f'Remote set to {remote_url}')
 
-    # Push
-    refspec = _enc(f'refs/heads/{branch}:refs/heads/{branch}')
+    # Ensure HEAD points to the desired branch
+    desired_ref = _enc(f'refs/heads/{branch}')
+    try:
+        head_ref = repo.refs.get_symrefs().get(b'HEAD', b'')
+        if head_ref != desired_ref:
+            # Rename the current branch to the desired name
+            head_sha = repo.head()
+            repo.refs[desired_ref] = head_sha
+            repo.refs.set_symbolic_ref(b'HEAD', desired_ref)
+    except Exception:
+        pass
+
+    # Ensure remote repo exists (create on GitHub/GitLab if needed)
+    ok, msg = _ensure_remote_repo(remote_url, username, token)
+    if msg:
+        log.append(msg)
+    if not ok:
+        return '\n'.join(log)
+
+    # Push — let dulwich resolve the active branch rather than a manual refspec
     try:
         porcelain.push(
-            repo, remote_url, refspec,
+            repo, remote_url,
             username=username, password=token,
             errstream=io.BytesIO(),
         )
@@ -187,6 +362,7 @@ def clone_repo(remote_url, dest_dir, username, token):
     Clone remote_url into dest_dir.
     Returns (lift_path_or_None, log_string).
     """
+    _ensure_ssl()
     from dulwich import porcelain
     log = []
     try:
@@ -213,6 +389,7 @@ def pull_repo(project_dir, username, token):
     """
     Pull (fetch + fast-forward) from origin. Returns log string.
     """
+    _ensure_ssl()
     from dulwich import porcelain
     log = []
     repo = _get_repo(project_dir)
@@ -242,6 +419,7 @@ def commit_and_push_branch(project_dir, username, token, contributor_name):
     The reviewer merges via a pull request on the hosting service.
     Returns log string.
     """
+    _ensure_ssl()
     from dulwich import porcelain
     log = []
     repo = _get_repo(project_dir)
@@ -310,6 +488,7 @@ def sync_repo(project_dir, username, token, contributor_name):
     Combines pull and push into a single operation for the Sync button.
     Returns log string.
     """
+    _ensure_ssl()
     from dulwich import porcelain
     log = []
     repo = _get_repo(project_dir)
