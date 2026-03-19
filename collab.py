@@ -93,6 +93,27 @@ def _patch_dulwich_ssl():
         ssl._create_default_https_context = _unverified_ctx
 
 _dulwich_ssl_patched = False
+_dulwich_env_patched = False
+
+def _ensure_gitconfig():
+    """Create an empty ~/.gitconfig so dulwich doesn't warn about missing files."""
+    global _dulwich_env_patched
+    if _dulwich_env_patched:
+        return
+    _dulwich_env_patched = True
+    home = os.environ.get('HOME', '')
+    if not home:
+        home = os.environ.get('ANDROID_PRIVATE', '')
+    if not home:
+        return
+    os.environ['HOME'] = home
+    gitconfig = os.path.join(home, '.gitconfig')
+    if not os.path.exists(gitconfig):
+        try:
+            with open(gitconfig, 'w') as f:
+                f.write('[core]\n')
+        except OSError:
+            pass
 
 def _ensure_ssl():
     """Call once before any dulwich network operation."""
@@ -100,6 +121,7 @@ def _ensure_ssl():
     if not _dulwich_ssl_patched:
         _patch_dulwich_ssl()
         _dulwich_ssl_patched = True
+    _ensure_gitconfig()
 
 
 # ---------------------------------------------------------------------------
@@ -515,21 +537,22 @@ def sync_repo(project_dir, username, token, contributor_name):
     # Stage all
     _stage_all(repo, project_dir)
 
-    # Commit
-    author = _default_author(contributor_name)
-    try:
-        porcelain.commit(
-            repo,
-            message=_enc(f'Audio recordings by {contributor_name}'),
-            author=author, committer=author,
-        )
-        log.append('Committed local changes.')
-    except Exception as exc:
-        msg = str(exc).lower()
-        if 'nothing' in msg or 'empty' in msg or 'no changes' in msg:
-            log.append('No local changes to commit.')
-        else:
+    # Commit only if there are staged changes
+    st = porcelain.status(repo)
+    has_staged = any(st.staged.get(k) for k in ('add', 'modify', 'delete'))
+    if has_staged:
+        author = _default_author(contributor_name)
+        try:
+            porcelain.commit(
+                repo,
+                message=_enc(f'Audio recordings by {contributor_name}'),
+                author=author, committer=author,
+            )
+            log.append('Committed local changes.')
+        except Exception as exc:
             log.append(f'Commit: {exc}')
+    else:
+        log.append('No local changes to commit.')
 
     # Push
     try:
@@ -548,6 +571,117 @@ def sync_repo(project_dir, username, token, contributor_name):
         log.append(f'Push failed: {exc}')
 
     return '\n'.join(log)
+
+
+def _stage_audio(repo, project_dir):
+    """Stage only new/modified audio files (audio/ dir and .lift file changes)."""
+    from dulwich import porcelain
+    status = porcelain.status(repo)
+    paths = []
+
+    def _is_audio_or_lift(p):
+        s = p if isinstance(p, str) else p.decode('utf-8', errors='replace')
+        return s.startswith('audio/') or s.endswith('.lift')
+
+    for f in status.unstaged:
+        if _is_audio_or_lift(f):
+            paths.append(_bytes_path(f))
+
+    for f in status.untracked:
+        rel = f if isinstance(f, str) else f.decode('utf-8', errors='replace')
+        if not _is_audio_or_lift(rel):
+            continue
+        full = os.path.join(project_dir, rel)
+        if os.path.isfile(full):
+            paths.append(_bytes_path(rel))
+        elif os.path.isdir(full):
+            for root, _dirs, files in os.walk(full):
+                for name in files:
+                    fp = os.path.join(root, name)
+                    rp = os.path.relpath(fp, project_dir)
+                    paths.append(_bytes_path(rp))
+
+    if paths:
+        porcelain.add(repo, paths=paths)
+    return len(paths)
+
+
+def _has_internet():
+    """Quick check for internet connectivity."""
+    import socket
+    for host in ('github.com', 'gitlab.com'):
+        try:
+            socket.create_connection((host, 443), timeout=3).close()
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def commit_audio_and_sync(project_dir, contributor_name, username, token):
+    """Stage + commit audio files, then sync if internet is available.
+
+    Designed to be called in a background thread on page transitions.
+    Returns log string (for debugging; not shown to user).
+    """
+    from dulwich import porcelain
+    repo = _get_repo(project_dir)
+    if repo is None:
+        return 'No repo'
+
+    # Stage audio and .lift changes only
+    n = _stage_audio(repo, project_dir)
+    if n == 0:
+        # Nothing new to commit; still try to sync if online
+        if _has_internet():
+            try:
+                _ensure_ssl()
+                remote_url = repo.get_config().get(
+                    (b'remote', b'origin'), b'url'
+                ).decode('utf-8')
+                return sync_repo(project_dir, username, token, contributor_name)
+            except Exception:
+                pass
+        return 'No new audio'
+
+    # Commit
+    author = _default_author(contributor_name)
+    try:
+        porcelain.commit(
+            repo,
+            message=_enc(f'Audio recordings by {contributor_name}'),
+            author=author, committer=author,
+        )
+    except Exception as exc:
+        return f'Commit failed: {exc}'
+
+    # Sync if there's internet
+    if not _has_internet():
+        return 'Committed locally (offline)'
+
+    try:
+        _ensure_ssl()
+        remote_url = repo.get_config().get(
+            (b'remote', b'origin'), b'url'
+        ).decode('utf-8')
+    except KeyError:
+        return 'Committed (no remote configured)'
+
+    # Push
+    try:
+        branch = porcelain.active_branch(repo).decode('utf-8', errors='replace')
+    except Exception:
+        branch = 'main'
+    refspec = _enc(f'refs/heads/{branch}:refs/heads/{branch}')
+    try:
+        porcelain.push(
+            repo, remote_url, refspec,
+            username=username, password=token,
+            errstream=io.BytesIO(),
+        )
+        return f'Committed and pushed {n} file(s)'
+    except Exception as exc:
+        return f'Committed locally, push failed: {exc}'
 
 
 # ---------------------------------------------------------------------------

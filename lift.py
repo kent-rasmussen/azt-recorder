@@ -91,7 +91,9 @@ class _CAWLImageResolver:
                     if item['type'] != 'blob':
                         continue
                     path = item['path']
-                    if not path.lower().endswith('.png'):
+                    low = path.lower()
+                    if not (low.endswith('.png') or low.endswith('.jpg')
+                            or low.endswith('.jpeg')):
                         continue
                     parts = path.split('/')
                     if len(parts) != 2:
@@ -159,6 +161,11 @@ class LIFTDatabase:
         self.entries = []
 
         self._parse()
+
+    def set_vernlang(self, code: str):
+        """Set vernacular language code externally (e.g. from language picker)."""
+        self.vernlang = code
+        self.audiolang = code + '-Zxxx-x-audio'
 
     # ── Parsing ───────────────────────────────────────────────────────────────
 
@@ -282,6 +289,43 @@ class LIFTDatabase:
         if text_el is not None:
             return (text_el.text or '').strip()
         return (el.text or '').strip()
+
+    # ── Template cleaning ────────────────────────────────────────────────────
+
+    def clean_template(self):
+        """Remove empty non-vernlang forms from citation/definition; ensure vernlang form exists.
+
+        Called once after setting vernlang on a newly-created-from-template file.
+        """
+        if not self.vernlang:
+            return
+        for entry_el in self._root.findall('entry'):
+            for parent_tag in ('citation', 'sense/definition'):
+                for parent_el in entry_el.findall(parent_tag):
+                    self._clean_forms(parent_el)
+        self._save()
+        # Re-parse so in-memory entries reflect the cleaned XML
+        self.entries = []
+        self._parse()
+
+    def _clean_forms(self, parent_el):
+        """In *parent_el*, remove empty forms whose lang != vernlang,
+        and ensure a <form lang=vernlang><text/></form> exists."""
+        has_vern = False
+        to_remove = []
+        for form in parent_el.findall('form'):
+            lang = form.get('lang', '')
+            text = self._text(form)
+            if lang == self.vernlang:
+                has_vern = True
+            elif not text and not _is_audio_lang(lang):
+                to_remove.append(form)
+        for form in to_remove:
+            parent_el.remove(form)
+        if not has_vern:
+            vern_form = ET.SubElement(parent_el, 'form')
+            vern_form.set('lang', self.vernlang)
+            ET.SubElement(vern_form, 'text')
 
     # ── Writing audio filename back to LIFT (Entry.lc.textvaluebylang) ────────
 

@@ -11,8 +11,10 @@ Runs on Android (primary) and iOS/desktop (secondary) via Kivy.
 import os
 import sys
 import traceback
+import warnings
 
 os.environ.setdefault('KIVY_NO_ENV_CONFIG', '1')
+warnings.filterwarnings('ignore', message='.*olefile.*')
 
 # ── Crash logging — runs before any Kivy import ────────────────────────────────
 # On Android: p4a sets $ANDROID_PRIVATE to the app's private files dir (always writable).
@@ -174,6 +176,8 @@ KV_TEMPLATE = '''
             name: 'config'
         CollabScreen:
             name: 'collab'
+        LangPickerScreen:
+            name: 'langpicker'
 
 # ── Colour palette (dark, warm) ────────────────────────────────────────────────
 #   bg      #1a1612
@@ -198,7 +202,7 @@ KV_TEMPLATE = '''
         Widget:
             size_hint_y: 0.05
         Image:
-            source: 'icon.png'
+            source: 'icons/icon.png'
             size_hint: None, None
             size: dp(120), dp(120)
             pos_hint: {{'center_x': 0.5}}
@@ -237,14 +241,13 @@ KV_TEMPLATE = '''
             text: 'Start New'
             normal_color: (0.3922, 0.3137, 0.2353, 1)
             on_release: app.new_from_template()
-        RecBtn:
-            text: 'Return to my dictionary'
-            normal_color: (0.1529, 0.6824, 0.3765, 1)
+        # ── Existing projects ─────────────────────────────────────
+        BoxLayout:
+            id: project_list
+            orientation: 'vertical'
             size_hint_y: None
-            height: dp(52) if app.recorder else 0
-            opacity: 1 if app.recorder else 0
-            disabled: not app.recorder
-            on_release: app.go_recorder()
+            height: self.minimum_height
+            spacing: dp(6)
         Widget:
             size_hint_y: 1
         Label:
@@ -254,6 +257,8 @@ KV_TEMPLATE = '''
             color: (0.2902, 0.2275, 0.1647, 1)
             size_hint_y: None
             height: dp(20)
+            halign: 'center'
+            text_size: self.size
 
 <RecorderScreen>:
     canvas.before:
@@ -289,7 +294,22 @@ KV_TEMPLATE = '''
                 background_color: 0, 0, 0, 0
                 background_normal: ''
                 on_release: app.show_goto_dialog()
-            Widget:
+                size_hint_x: 1
+            Button:
+                size_hint_x: None
+                width: dp(44)
+                background_color: 0, 0, 0, 0
+                background_normal: ''
+                on_release: app.do_sync()
+                Image:
+                    source: 'icons/sync_dark.png'
+                    size: dp(28), dp(28)
+                    size_hint: None, None
+                    center: self.parent.center
+                    allow_stretch: True
+                    keep_ratio: True
+            BoxLayout:
+                size_hint_x: 1
             Button:
                 size_hint_x: None
                 width: dp(44)
@@ -297,7 +317,7 @@ KV_TEMPLATE = '''
                 background_normal: ''
                 on_release: app.go_config()
                 Image:
-                    source: 'fonts/gear.png'
+                    source: 'icons/gear.png'
                     size: dp(28), dp(28)
                     size_hint: None, None
                     center: self.parent.center
@@ -361,20 +381,30 @@ KV_TEMPLATE = '''
                     pos: self.pos
                     size: self.size
             Label:
-                text: 'Configuration'
-                font_size: sp(17)
+                text: app.version_string
+                font_size: sp(11)
                 font_name: FONT
-                bold: True
-                color: (0.7882, 0.4824, 0.2275, 1)
+                color: (0.5412, 0.4784, 0.4157, 1)
                 halign: 'left'
                 valign: 'middle'
                 text_size: self.size
                 padding_x: dp(8)
-            IconBtn:
-                text: 'Open'
+                size_hint_x: 1
+            Button:
                 size_hint_x: None
-                width: dp(54)
-                on_release: app.go_welcome()
+                width: dp(44)
+                background_color: 0, 0, 0, 0
+                background_normal: ''
+                on_release: app.share_apk()
+                Image:
+                    source: 'icons/share_dark.png'
+                    size: dp(28), dp(28)
+                    size_hint: None, None
+                    center: self.parent.center
+                    allow_stretch: True
+                    keep_ratio: True
+            BoxLayout:
+                size_hint_x: 1
             IconBtn:
                 text: 'X'
                 size_hint_x: None
@@ -387,29 +417,15 @@ KV_TEMPLATE = '''
                 height: self.minimum_height
                 padding: dp(20)
                 spacing: dp(20)
-                # Current file
-                SectionLabel:
-                    text: 'Current file'
-                Label:
-                    id: current_file_label
-                    text: ''
-                    font_size: sp(12)
-                    font_name: FONT
-                    color: (0.5412, 0.4784, 0.4157, 1)
-                    size_hint_y: None
-                    height: dp(32)
-                    halign: 'left'
-                    valign: 'middle'
-                    text_size: self.width, None
-                # Gloss languages
+                # Gloss languages — 3-column grid
                 SectionLabel:
                     text: 'Gloss languages'
-                BoxLayout:
+                GridLayout:
                     id: lang_box
-                    orientation: 'vertical'
+                    cols: 3
                     size_hint_y: None
                     height: self.minimum_height
-                    spacing: dp(8)
+                    spacing: dp(6)
                 # CAWL filter
                 SectionLabel:
                     text: 'Word filter'
@@ -438,8 +454,6 @@ KV_TEMPLATE = '''
                         foreground_color: (0.9412, 0.9098, 0.8627, 1)
                         cursor_color: (0.7882, 0.4824, 0.2275, 1)
                         multiline: False
-
-                        font_name: FONT
                         on_text_validate: root.apply_cawl(self.text)
                     Label:
                         text: 'Gloss search (filter by gloss text)'
@@ -461,35 +475,33 @@ KV_TEMPLATE = '''
                         foreground_color: (0.9412, 0.9098, 0.8627, 1)
                         cursor_color: (0.7882, 0.4824, 0.2275, 1)
                         multiline: False
-
-                        font_name: FONT
-                # Only unrecorded — prominent toggle row
+                # Show past work — toggle (logically reversed from only_unrecorded)
                 UnrecordedToggle:
                     id: unrecorded_toggle
-                    active: False
-                    on_active: root.toggle_unrecorded(self.active)
+                    active: True
+                    on_active: root.toggle_show_past(self.active)
                 # Apply button
                 Widget:
                     size_hint_y: None
                     height: dp(16)
                 RecBtn:
-                    text: 'Apply & Go'
+                    text: 'Use these Settings'
                     normal_color: (0.7882, 0.4824, 0.2275, 1)
                     on_release: root.apply_and_go()
                 Widget:
                     size_hint_y: None
                     height: dp(8)
                 RecBtn:
-                    text: 'Share this app'
-                    normal_color: (0.1529, 0.6824, 0.3765, 1)
-                    on_release: app.share_apk()
+                    text: 'Setup Collaboration'
+                    normal_color: (0.1647, 0.1373, 0.1255, 1)
+                    on_release: app.go_collab()
                 Widget:
                     size_hint_y: None
                     height: dp(8)
                 RecBtn:
-                    text: 'Data Collaboration...'
-                    normal_color: (0.1647, 0.1373, 0.1255, 1)
-                    on_release: app.go_collab()
+                    text: 'Start over'
+                    normal_color: (0.3922, 0.3137, 0.2353, 1)
+                    on_release: app.go_welcome()
                 Widget:
                     size_hint_y: None
                     height: dp(40)
@@ -515,7 +527,7 @@ KV_TEMPLATE = '''
                     pos: self.pos
                     size: self.size
             Label:
-                text: 'Collaboration'
+                text: 'Setup'
                 font_size: sp(17)
                 font_name: FONT
                 bold: True
@@ -536,25 +548,6 @@ KV_TEMPLATE = '''
                 height: self.minimum_height
                 padding: dp(20)
                 spacing: dp(14)
-                # ── Status ────────────────────────────────────────────────
-                SectionLabel:
-                    text: 'Repository status'
-                Label:
-                    id: status_label
-                    text: 'No project loaded'
-                    font_size: sp(13)
-                    font_name: FONT
-                    color: (0.5412, 0.4784, 0.4157, 1)
-                    size_hint_y: None
-                    height: dp(44)
-                    halign: 'left'
-                    valign: 'middle'
-                    text_size: self.width, None
-                # ── Sync ──────────────────────────────────────────────────
-                RecBtn:
-                    text: 'Sync'
-                    normal_color: (0.1529, 0.6824, 0.3765, 1)
-                    on_release: root.do_sync()
                 # ── Credentials ───────────────────────────────────────────
                 SectionLabel:
                     text: 'Your identity'
@@ -708,6 +701,143 @@ KV_TEMPLATE = '''
         color: (0.7882, 0.4824, 0.2275, 1)
         center: root.center
 
+<LangPickerScreen>:
+    canvas.before:
+        Color:
+            rgba: (0.102, 0.0863, 0.0706, 1)
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    BoxLayout:
+        orientation: 'vertical'
+        padding: dp(16)
+        spacing: dp(10)
+        # ── Title ─────────────────────────────────────────────────────────
+        Label:
+            text: 'Choose your language'
+            font_size: sp(22)
+            font_name: FONT
+            bold: True
+            color: (0.7882, 0.4824, 0.2275, 1)
+            size_hint_y: None
+            height: dp(44)
+        # ── Search ────────────────────────────────────────────────────────
+        TextInput:
+            id: lang_search
+            hint_text: 'Type a language name...'
+            font_size: sp(16)
+            font_name: FONT
+            multiline: False
+            size_hint_y: None
+            height: dp(44)
+            background_color: (0.1647, 0.1373, 0.1255, 1)
+            foreground_color: (0.9412, 0.9098, 0.8627, 1)
+            hint_text_color: (0.5412, 0.4784, 0.4157, 0.6)
+            cursor_color: (0.7882, 0.4824, 0.2275, 1)
+            padding: [dp(10), dp(10)]
+            on_text: root._on_search_text(self.text)
+        # ── Results ───────────────────────────────────────────────────────
+        ScrollView:
+            id: results_scroll
+            BoxLayout:
+                id: results_box
+                orientation: 'vertical'
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: dp(4)
+        # ── Selection details (hidden until a language is picked) ─────────
+        BoxLayout:
+            id: selection_box
+            orientation: 'vertical'
+            size_hint_y: None
+            height: self.minimum_height
+            opacity: 0
+            spacing: dp(6)
+            Label:
+                id: selected_label
+                text: ''
+                font_size: sp(15)
+                font_name: FONT
+                color: (0.9412, 0.9098, 0.8627, 1)
+                size_hint_y: None
+                height: dp(32)
+                halign: 'left'
+                text_size: self.width, None
+            # Region picker (shown if >1 region)
+            Label:
+                id: region_title
+                text: 'Select region:'
+                font_size: sp(14)
+                font_name: FONT
+                color: (0.5412, 0.4784, 0.4157, 1)
+                size_hint_y: None
+                height: 0
+                opacity: 0
+                halign: 'left'
+                text_size: self.width, None
+            BoxLayout:
+                id: region_box
+                orientation: 'vertical'
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: dp(4)
+            # Dialect toggle
+            BoxLayout:
+                size_hint_y: None
+                height: dp(40)
+                spacing: dp(8)
+                CheckBox:
+                    id: dialect_check
+                    size_hint_x: None
+                    width: dp(40)
+                    active: False
+                    on_active: root._toggle_dialect(self.active)
+                Label:
+                    text: "I'm working on a dialect"
+                    font_size: sp(14)
+                    font_name: FONT
+                    color: (0.9412, 0.9098, 0.8627, 1)
+                    halign: 'left'
+                    valign: 'middle'
+                    text_size: self.size
+            TextInput:
+                id: dialect_input
+                hint_text: 'Variant code (2-8 chars)'
+                font_size: sp(14)
+                font_name: FONT
+                multiline: False
+                size_hint_y: None
+                height: 0
+                opacity: 0
+                background_color: (0.1647, 0.1373, 0.1255, 1)
+                foreground_color: (0.9412, 0.9098, 0.8627, 1)
+                hint_text_color: (0.5412, 0.4784, 0.4157, 0.6)
+                cursor_color: (0.7882, 0.4824, 0.2275, 1)
+                padding: [dp(10), dp(10)]
+                on_text: root._update_code()
+            # Assembled code display
+            Label:
+                id: code_label
+                text: ''
+                font_size: sp(16)
+                font_name: FONT
+                bold: True
+                color: (0.1529, 0.6824, 0.3765, 1)
+                size_hint_y: None
+                height: dp(28)
+                halign: 'left'
+                text_size: self.width, None
+        # ── Continue button ───────────────────────────────────────────────
+        RecBtn:
+            id: continue_btn
+            text: 'Continue'
+            normal_color: (0.1529, 0.6824, 0.3765, 1)
+            size_hint_y: None
+            height: dp(52)
+            opacity: 0.3
+            disabled: True
+            on_release: root._on_continue()
+
 <GlossRow>:
     size_hint_y: None
     height: dp(70)
@@ -762,7 +892,7 @@ KV_TEMPLATE = '''
             color: (0.7882, 0.4824, 0.2275, 1)
             on_active: root.active = self.active
         Label:
-            text: 'Only unrecorded'
+            text: 'Show past work'
             font_size: sp(16)
             font_name: FONT
             bold: True
@@ -831,21 +961,23 @@ KV_TEMPLATE = '''
 
 <LangToggle>:
     size_hint_y: None
-    height: dp(48)
-    BoxLayout:
-        spacing: dp(12)
-        padding: dp(4), 0
-        CheckboxStyled:
-            id: chk
-            active: root.active
-            on_active: root.on_toggle(self.active)
-        Label:
-            text: root.lang
-            font_size: sp(16)
-            font_name: FONT
-            color: (0.9412, 0.9098, 0.8627, 1)
-            halign: 'left'
-            text_size: self.size
+    height: dp(44)
+    canvas.before:
+        Color:
+            rgba: (0.15, 0.35, 0.22, 1) if root.active else (0.1647, 0.1373, 0.1255, 1)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(6)]
+    Label:
+        text: root.lang
+        font_size: sp(15)
+        font_name: FONT
+        bold: root.active
+        color: (0.1529, 0.9, 0.3765, 1) if root.active else (0.9412, 0.9098, 0.8627, 1)
+        halign: 'center'
+        valign: 'middle'
+        text_size: self.size
 '''
 
 KV = KV_TEMPLATE.format(font_name=_FONT_NAME)
@@ -890,9 +1022,13 @@ class LangToggle(BoxLayout):
     active = BooleanProperty(True)
     callback = ObjectProperty(None)
 
-    def on_toggle(self, value):
-        if self.callback:
-            self.callback(self.lang, value)
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos):
+            self.active = not self.active
+            if self.callback:
+                self.callback(self.lang, self.active)
+            return True
+        return super().on_touch_down(touch)
 
 
 # ── Screens ────────────────────────────────────────────────────────────────────
@@ -902,7 +1038,301 @@ class RootScreen(Screen):
 
 
 class WelcomeScreen(Screen):
-    pass
+
+    def on_enter(self):
+        self._populate_projects()
+
+    def _populate_projects(self):
+        box = self.ids.get('project_list')
+        if not box:
+            return
+        box.clear_widgets()
+        app = App.get_running_app()
+        projects = app.list_projects()
+        if not projects:
+            return
+        for name, path in projects:
+            btn = Builder.load_string(
+                'RecBtn:\n'
+                f'    text: {name!r}\n'
+                '    normal_color: (0.1529, 0.6824, 0.3765, 1)\n'
+            )
+            btn.lift_path = path
+            btn.bind(on_release=lambda b: app.load_lift(b.lift_path))
+            box.add_widget(btn)
+
+
+class LangPickerScreen(Screen):
+    """Language code picker shown when creating a new project."""
+    _langtags = None        # class-level cache: list of dicts
+    _search_index = None    # parallel list of lowered searchable strings
+    _region_names = None    # region code -> name mapping
+
+    _selected = None        # chosen langtag entry dict
+    _selected_region = ''   # chosen region code (or '')
+    _dialect_code = ''      # user-entered variant
+
+    def on_enter(self):
+        self._selected = None
+        self._selected_region = ''
+        self._dialect_code = ''
+        si = self.ids.get('lang_search')
+        if si:
+            si.text = ''
+        self._hide_selection()
+        if LangPickerScreen._langtags is None:
+            self._load_langtags()
+
+    @classmethod
+    def _load_langtags(cls):
+        import gzip, json
+        gz_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'langtags_mini.json.gz')
+        with open(gz_path, 'rb') as f:
+            blob = json.loads(gzip.decompress(f.read()))
+        cls._langtags = blob['langs']
+        cls._region_names = blob.get('region_names', {})
+        # Build search index once
+        idx = []
+        for entry in cls._langtags:
+            parts = [entry.get('n', '').lower()]
+            if 'ln' in entry:
+                parts.append(entry['ln'].lower())
+            if 'ns' in entry:
+                parts.extend(n.lower() for n in entry['ns'])
+            if 'lns' in entry:
+                parts.extend(n.lower() for n in entry['lns'])
+            if 't' in entry:
+                parts.append(entry['t'].lower())
+            if 'i' in entry:
+                parts.append(entry['i'].lower())
+            idx.append(' '.join(parts))
+        cls._search_index = idx
+
+    def _on_search_text(self, text):
+        # Debounce: cancel previous, schedule new
+        from kivy.clock import Clock
+        if hasattr(self, '_search_ev') and self._search_ev:
+            self._search_ev.cancel()
+        self._search_ev = Clock.schedule_once(
+            lambda dt: self._do_search(text), 0.25)
+
+    def _do_search(self, text):
+        box = self.ids.get('results_box')
+        if not box:
+            return
+        box.clear_widgets()
+        if not text or len(text) < 2 or self._langtags is None:
+            return
+        q = text.lower()
+        matches = []
+        for i, searchable in enumerate(self._search_index):
+            if q in searchable:
+                matches.append(self._langtags[i])
+                if len(matches) >= 50:
+                    break
+        for entry in matches:
+            self._add_result_row(box, entry)
+
+    def _add_result_row(self, box, entry):
+        from kivy.metrics import dp, sp
+        from kivy.uix.button import Button
+        btn = Button(
+            text=self._format_entry(entry),
+            font_size=sp(13),
+            font_name=_FONT_NAME,
+            size_hint_y=None,
+            height=dp(48),
+            halign='left',
+            valign='middle',
+            background_color=(0.1647, 0.1373, 0.1255, 1),
+            background_normal='',
+            color=(0.9412, 0.9098, 0.8627, 1),
+            padding=(dp(10), dp(4)),
+        )
+        btn.text_size = (None, None)
+        btn.bind(size=lambda w, s: setattr(w, 'text_size', s))
+        btn.bind(on_release=lambda w: self._select_language(entry))
+        box.add_widget(btn)
+
+    @staticmethod
+    def _format_entry(entry):
+        name = entry.get('n', '')
+        local = entry.get('ln', '')
+        tag = entry.get('t', '')
+        region = entry.get('rn', '')
+        parts = [name]
+        if local and local != name:
+            parts[0] += f'  ({local})'
+        parts.append(f'[{tag}]')
+        if region:
+            parts.append(f'- {region}')
+        return '  '.join(parts)
+
+    def _select_language(self, entry):
+        from kivy.metrics import dp, sp
+        from kivy.uix.button import Button
+        self._selected = entry
+        self._selected_region = ''
+        sel_box = self.ids.get('selection_box')
+        if sel_box:
+            sel_box.opacity = 1
+        lbl = self.ids.get('selected_label')
+        if lbl:
+            lbl.text = self._format_entry(entry)
+        # Clear results and search
+        box = self.ids.get('results_box')
+        if box:
+            box.clear_widgets()
+        si = self.ids.get('lang_search')
+        if si:
+            si.text = ''
+
+        # Region picker
+        regions = entry.get('rs', [])
+        primary = entry.get('r', '')
+        all_regions = []
+        if primary:
+            all_regions.append(primary)
+        for r in regions:
+            if r not in all_regions:
+                all_regions.append(r)
+
+        region_box = self.ids.get('region_box')
+        region_title = self.ids.get('region_title')
+        if region_box:
+            region_box.clear_widgets()
+        if len(all_regions) > 1:
+            if region_title:
+                region_title.height = dp(20)
+                region_title.opacity = 1
+            rnames = self._region_names or {}
+            # "All/multiple" option
+            btn = Button(
+                text='Multiple / all regions',
+                font_size=sp(13),
+                font_name=_FONT_NAME,
+                size_hint_y=None,
+                height=dp(38),
+                background_color=(0.2353, 0.1961, 0.1647, 1),
+                background_normal='',
+                color=(0.9412, 0.9098, 0.8627, 1),
+            )
+            btn.bind(on_release=lambda w: self._select_region(''))
+            region_box.add_widget(btn)
+            for rc in all_regions:
+                rn = rnames.get(rc, rc)
+                btn = Button(
+                    text=f'{rn} ({rc})',
+                    font_size=sp(13),
+                    font_name=_FONT_NAME,
+                    size_hint_y=None,
+                    height=dp(38),
+                    background_color=(0.2353, 0.1961, 0.1647, 1),
+                    background_normal='',
+                    color=(0.9412, 0.9098, 0.8627, 1),
+                )
+                btn.bind(on_release=lambda w, c=rc: self._select_region(c))
+                region_box.add_widget(btn)
+        else:
+            if region_title:
+                region_title.height = 0
+                region_title.opacity = 0
+
+        self._update_code()
+        cb = self.ids.get('continue_btn')
+        if cb:
+            cb.disabled = False
+            cb.opacity = 1
+
+    def _select_region(self, region_code):
+        from kivy.metrics import dp
+        self._selected_region = region_code
+        # Highlight selected region in the region box
+        region_box = self.ids.get('region_box')
+        if region_box:
+            for child in region_box.children:
+                if region_code and region_code in child.text:
+                    child.background_color = (0.7882, 0.4824, 0.2275, 1)
+                elif not region_code and 'Multiple' in child.text:
+                    child.background_color = (0.7882, 0.4824, 0.2275, 1)
+                else:
+                    child.background_color = (0.2353, 0.1961, 0.1647, 1)
+        self._update_code()
+
+    def _toggle_dialect(self, active):
+        from kivy.metrics import dp
+        di = self.ids.get('dialect_input')
+        if di:
+            di.height = dp(44) if active else 0
+            di.opacity = 1 if active else 0
+            if not active:
+                di.text = ''
+                self._dialect_code = ''
+        self._update_code()
+
+    def _hide_selection(self):
+        from kivy.metrics import dp
+        sel_box = self.ids.get('selection_box')
+        if sel_box:
+            sel_box.opacity = 0
+        region_title = self.ids.get('region_title')
+        if region_title:
+            region_title.height = 0
+            region_title.opacity = 0
+        region_box = self.ids.get('region_box')
+        if region_box:
+            region_box.clear_widgets()
+        di = self.ids.get('dialect_input')
+        if di:
+            di.height = 0
+            di.opacity = 0
+            di.text = ''
+        dc = self.ids.get('dialect_check')
+        if dc:
+            dc.active = False
+        cl = self.ids.get('code_label')
+        if cl:
+            cl.text = ''
+        cb = self.ids.get('continue_btn')
+        if cb:
+            cb.disabled = True
+            cb.opacity = 0.3
+
+    def _update_code(self):
+        if not self._selected:
+            return
+        code = self._selected.get('t', '')
+        if self._selected_region:
+            code += '-' + self._selected_region
+        di = self.ids.get('dialect_input')
+        if di and di.text.strip():
+            variant = di.text.strip().lower()
+            # Clamp to 2-8 alphanumeric chars
+            variant = ''.join(c for c in variant if c.isalnum())[:8]
+            self._dialect_code = variant
+            if len(variant) >= 2:
+                code += '-x-' + variant
+        else:
+            self._dialect_code = ''
+        cl = self.ids.get('code_label')
+        if cl:
+            cl.text = f'Language code: {code}'
+
+    def _assembled_code(self):
+        if not self._selected:
+            return ''
+        code = self._selected.get('t', '')
+        if self._selected_region:
+            code += '-' + self._selected_region
+        if self._dialect_code and len(self._dialect_code) >= 2:
+            code += '-x-' + self._dialect_code
+        return code
+
+    def _on_continue(self):
+        app = App.get_running_app()
+        app._pending_vernlang = self._assembled_code()
+        app.new_from_template()
 
 
 class RecorderScreen(Screen):
@@ -1027,9 +1457,6 @@ class ConfigScreen(Screen):
 
     def on_enter(self):
         app = App.get_running_app()
-        lbl = self.ids.get('current_file_label')
-        if lbl:
-            lbl.text = os.path.basename(app.recorder.db.path) if app.recorder else 'No file loaded'
         if not app.recorder:
             return
         self.build_lang_toggles()
@@ -1066,9 +1493,11 @@ class ConfigScreen(Screen):
     def apply_cawl(self, text):
         App.get_running_app().recorder.cawl_filter = text.strip()
 
-    def toggle_unrecorded(self, value):
-        self.only_unrecorded = value
-        App.get_running_app().recorder.only_unrecorded = value
+    def toggle_show_past(self, show_past):
+        self.only_unrecorded = not show_past
+        app = App.get_running_app()
+        if app.recorder:
+            app.recorder.only_unrecorded = not show_past
 
     def apply_and_go(self):
         app = App.get_running_app()
@@ -1102,28 +1531,9 @@ class CollabScreen(Screen):
         w = self.ids.get('host_spinner')
         if w:
             w.text = host
-        self._refresh_status()
         self.update_publish_url()
 
     # ── Internal helpers ───────────────────────────────────────────────────
-
-    def _refresh_status(self):
-        lbl = self.ids.get('status_label')
-        if not lbl:
-            return
-        app = App.get_running_app()
-        if not app.recorder:
-            lbl.text = 'No project loaded'
-            return
-        from collab import repo_status_summary
-        info = repo_status_summary(app.recorder.db.dir)
-        if info is None:
-            lbl.text = 'Not a git repository'
-        else:
-            branch, remote, n = info
-            remote_short = remote.split('/')[-1] if remote else '(no remote set)'
-            lbl.text = (f'Branch: {branch}  ·  Remote: {remote_short}\n'
-                        f'{n} local change(s) since last commit')
 
     def _save_creds(self):
         app = App.get_running_app()
@@ -1159,7 +1569,6 @@ class CollabScreen(Screen):
         from collab import run_async
         run_async(func, *args, on_done=lambda result: (
             self._set_log(result or ''),
-            self._refresh_status(),
         ))
 
     # ── Button handlers ────────────────────────────────────────────────────
@@ -1200,23 +1609,6 @@ class CollabScreen(Screen):
                   app.recorder.db.dir, remote_url, user, token,
                   'main', name)
 
-    def do_sync(self):
-        app = App.get_running_app()
-        if not app.recorder:
-            self._set_log('No project loaded.')
-            return
-        self._save_creds()
-        name, user, token = self._creds()
-        from collab import sync_repo
-
-        def _sync_and_reload(project_dir, username, pw, contributor):
-            result = sync_repo(project_dir, username, pw, contributor)
-            Clock.schedule_once(
-                lambda dt: app.load_lift(app.recorder.db.path), 0)
-            return result
-
-        self._run('Syncing...', _sync_and_reload,
-                  app.recorder.db.dir, user, token, name)
 
 
 # ── Recorder controller ────────────────────────────────────────────────────────
@@ -1639,15 +2031,44 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.3.2'
+__version__ = '1.6.0'
 
 
 class LIFTRecorderApp(App):
     title = 'Record My Wordlist'
-    icon = 'icon.png'
+    icon = 'icons/icon.png'
     version_string = StringProperty(f'version {__version__}')
     recorder: RecorderController = None
     config_screen: ConfigScreen = None
+
+    # ── Project discovery ────────────────────────────────────────────────────
+
+    def list_projects(self):
+        """Return [(display_name, lift_path), ...] for all projects."""
+        projects_dir = os.path.join(self.user_data_dir, 'projects')
+        results = []
+        if os.path.isdir(projects_dir):
+            for name in sorted(os.listdir(projects_dir)):
+                d = os.path.join(projects_dir, name)
+                if not os.path.isdir(d):
+                    continue
+                # Find .lift files in this project dir
+                lifts = [f for f in os.listdir(d) if f.endswith('.lift')]
+                if lifts:
+                    # Prefer file matching dir name, else first alphabetically
+                    match = f'{name}.lift'
+                    lift = match if match in lifts else sorted(lifts)[0]
+                    path = os.path.join(d, lift)
+                    if os.path.getsize(path) > 50:
+                        results.append((name, path))
+        # Also check last_lift if it's outside projects/
+        prefs = self._load_prefs()
+        last = prefs.get('last_lift', '')
+        if last and os.path.isfile(last) and os.path.getsize(last) > 50:
+            if not any(p == last for _, p in results):
+                display = os.path.basename(os.path.dirname(last)) or os.path.basename(last)
+                results.append((display, last))
+        return results
 
     # ── Preferences (last used file) ──────────────────────────────────────────
 
@@ -1695,7 +2116,7 @@ class LIFTRecorderApp(App):
             # Auto-load last used LIFT file if it still exists
             prefs = self._load_prefs()
             last = prefs.get('last_lift', '')
-            if last and os.path.exists(last):
+            if last and os.path.isfile(last) and os.path.getsize(last) > 50:
                 Clock.schedule_once(lambda dt: self.load_lift(last), 0.3)
         except Exception:
             traceback.print_exc()
@@ -1763,36 +2184,107 @@ class LIFTRecorderApp(App):
     def _ssl_context():
         """Return an SSL context that works on Android (missing CA bundle)."""
         import ssl
+        # Try certifi — extract cacert.pem if needed (Android zip bundle)
+        ca = None
         try:
             import certifi
-            return ssl.create_default_context(cafile=certifi.where())
+            ca = certifi.where()
+            if not os.path.isfile(ca):
+                ca = None
         except ImportError:
             pass
-        try:
-            ctx = ssl.create_default_context()
-            # Quick test — if the default bundle is usable, keep verification
-            ctx.check_hostname = True
-            return ctx
-        except Exception:
-            pass
-        # Last resort: unverified (Android p4a often lacks CA certs)
-        ctx = ssl.create_default_context()
+        if ca is None:
+            try:
+                import certifi
+                import importlib.resources as _res
+                priv = os.environ.get('ANDROID_PRIVATE', '')
+                if priv:
+                    dest = os.path.join(priv, 'cacert.pem')
+                    data = _res.read_binary('certifi', 'cacert.pem')
+                    with open(dest, 'wb') as f:
+                        f.write(data)
+                    ca = dest
+            except Exception:
+                pass
+        if ca:
+            return ssl.create_default_context(cafile=ca)
+        # Last resort: unverified
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
 
+    @staticmethod
+    def _parse_git_url(url):
+        """If url is a raw GitHub/GitLab file URL, return (clone_url, None).
+        Returns (None, None) if not recognisable as a git-hosted file."""
+        import re
+        # GitHub raw: https://raw.githubusercontent.com/OWNER/REPO/BRANCH/path
+        m = re.match(
+            r'https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/', url)
+        if m:
+            return f'https://github.com/{m.group(1)}/{m.group(2)}.git', None
+        # GitHub blob: https://github.com/OWNER/REPO/blob/BRANCH/path
+        m = re.match(
+            r'https://github\.com/([^/]+)/([^/]+)/blob/', url)
+        if m:
+            return f'https://github.com/{m.group(1)}/{m.group(2)}.git', None
+        # GitLab raw: https://gitlab.com/OWNER/REPO/-/raw/BRANCH/path
+        m = re.match(
+            r'https://gitlab\.com/([^/]+)/([^/]+)/-/raw/', url)
+        if m:
+            return f'https://gitlab.com/{m.group(1)}/{m.group(2)}.git', None
+        return None, None
+
     def _download_and_open(self, url):
-        """Background: download a .lift file and schedule load on main thread."""
+        """Background: download a .lift file and schedule load on main thread.
+        If the URL points to a file inside a git repo, clone the repo instead."""
         import urllib.request
         try:
-            filename = url.rstrip('/').split('/')[-1]
-            if not filename.endswith('.lift'):
-                filename = 'downloaded.lift'
-            dest = os.path.join(self.user_data_dir, filename)
+            # When creating from template with a vernlang, use it as dir and filename
+            vernlang = getattr(self, '_pending_vernlang', '')
+
+            # Check if URL is from a git repo — clone instead of downloading
+            clone_url, _ = self._parse_git_url(url)
+            if clone_url and not vernlang:
+                # Clone the whole repo
+                repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')
+                dest = os.path.join(self.user_data_dir, 'projects', repo_name)
+                prefs = self._load_prefs()
+                user = prefs.get('collab_username', '')
+                token = prefs.get('collab_token', '')
+                from collab import clone_repo
+                lift_path, log = clone_repo(clone_url, dest, user, token)
+                if lift_path:
+                    Clock.schedule_once(lambda dt: self.load_lift(lift_path), 0)
+                else:
+                    Clock.schedule_once(
+                        lambda dt: self._show_error(log), 0)
+                return
+
+            if vernlang:
+                project_dir = os.path.join(self.user_data_dir, 'projects', vernlang)
+                os.makedirs(project_dir, exist_ok=True)
+                dest = os.path.join(project_dir, f'{vernlang}.lift')
+                # Pre-fill the language code for publish
+                prefs = self._load_prefs()
+                prefs['collab_langcode'] = vernlang
+                self._save_prefs_dict(prefs)
+            else:
+                filename = url.rstrip('/').split('/')[-1]
+                if not filename.endswith('.lift'):
+                    filename = 'downloaded.lift'
+                name = filename.replace('.lift', '')
+                project_dir = os.path.join(self.user_data_dir, 'projects', name)
+                os.makedirs(project_dir, exist_ok=True)
+                dest = os.path.join(project_dir, filename)
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, context=self._ssl_context()) as resp:
-                with open(dest, 'wb') as f:
-                    f.write(resp.read())
+                content = resp.read()
+            if not content or len(content) < 50:
+                raise RuntimeError(f'Download returned {len(content)} bytes')
+            with open(dest, 'wb') as f:
+                f.write(content)
             Clock.schedule_once(lambda dt: self.load_lift(dest), 0)
         except Exception as ex:
             msg = f'Could not download:\n{ex}'
@@ -1805,7 +2297,14 @@ class LIFTRecorderApp(App):
                     'kent-rasmussen/lift_templates/main/SILCAWL.lift')
 
     def new_from_template(self):
-        """Download the SILCAWL template and open it as a new project."""
+        """Show language picker first, then download the SILCAWL template."""
+        if not getattr(self, '_pending_vernlang', ''):
+            # First call: navigate to language picker
+            sm = self.root.ids.sm
+            sm.transition = SlideTransition(direction='left')
+            sm.current = 'langpicker'
+            return
+        # Called from LangPickerScreen._on_continue with code set
         import threading
         threading.Thread(
             target=self._download_and_open,
@@ -1903,25 +2402,124 @@ class LIFTRecorderApp(App):
 
     def load_lift(self, path):
         path = os.path.abspath(path)
+        try:
+            db = LIFTDatabase(path)
+        except Exception as ex:
+            self._show_error(f'Could not open file:\n{ex}')
+            return
         self._save_prefs(path)
-        db = LIFTDatabase(path)
+        # Apply language code: from picker, from prefs, or from filename
+        pending = getattr(self, '_pending_vernlang', '')
+        if pending:
+            db.set_vernlang(pending)
+            db.clean_template()
+            self._pending_vernlang = ''
+            prefs = self._load_prefs()
+            prefs['vernlang'] = pending
+            self._save_prefs_dict(prefs)
+        else:
+            prefs = self._load_prefs()
+            saved_vern = prefs.get('vernlang', '')
+            if saved_vern:
+                db.set_vernlang(saved_vern)
         self.recorder = RecorderController(db)
         sm = self.root.ids.sm
         sm.transition = SlideTransition(direction='left')
         sm.current = 'recorder'
         Clock.schedule_once(lambda dt: self.refresh_recorder_ui(), 0.1)
+        # Auto-publish new project if credentials are already configured
+        if pending:
+            self._try_auto_publish()
+
+    def _reload_and_restore(self, guid):
+        """Reload the LIFT file and restore position to the entry with *guid*."""
+        if not self.recorder:
+            return
+        path = self.recorder.db.path
+        try:
+            db = LIFTDatabase(path)
+        except Exception as ex:
+            print(f'Reload failed: {ex}')
+            return
+        # Re-apply saved vernlang
+        prefs = self._load_prefs()
+        saved_vern = prefs.get('vernlang', '')
+        if saved_vern:
+            db.set_vernlang(saved_vern)
+        old_settings = (
+            self.recorder.cawl_filter,
+            self.recorder.gloss_search,
+            self.recorder.only_unrecorded,
+            self.recorder.active_gloss_langs[:],
+        )
+        self.recorder = RecorderController(db)
+        self.recorder.cawl_filter, self.recorder.gloss_search, \
+            self.recorder.only_unrecorded, self.recorder.active_gloss_langs = old_settings
+        self.recorder.rebuild_queue()
+        # Restore position by guid
+        if guid:
+            for i, e in enumerate(self.recorder.queue):
+                if e.get('guid') == guid:
+                    self.recorder.index = i
+                    break
+        self.refresh_recorder_ui()
+
+    def _try_auto_publish(self):
+        """If git credentials and langcode are configured, publish automatically."""
+        prefs = self._load_prefs()
+        user = prefs.get('collab_username', '')
+        token = prefs.get('collab_token', '')
+        langcode = prefs.get('collab_langcode', '')
+        host = prefs.get('collab_host', 'GitHub')
+        if not (user and token and langcode and self.recorder):
+            return
+        domain = 'gitlab.com' if host == 'GitLab' else 'github.com'
+        remote_url = f'https://{domain}/{user}/{langcode}.git'
+        name = prefs.get('collab_name', '') or 'Recorder'
+        import threading
+        def _worker():
+            try:
+                from collab import init_repo
+                result = init_repo(self.recorder.db.dir, remote_url,
+                                   user, token, 'main', name)
+                print(f'[auto-publish] {result}')
+            except Exception as ex:
+                print(f'[auto-publish] error: {ex}')
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _auto_commit_sync(self):
+        """Background: commit new audio and .lift changes, sync if online."""
+        if not self.recorder:
+            return
+        prefs = self._load_prefs()
+        name = prefs.get('collab_name', '') or 'Recorder'
+        user = prefs.get('collab_username', '')
+        token = prefs.get('collab_token', '')
+        project_dir = self.recorder.db.dir
+        import threading
+        def _worker():
+            try:
+                from collab import commit_audio_and_sync
+                result = commit_audio_and_sync(project_dir, name, user, token)
+                print(f'[auto-sync] {result}')
+            except Exception as ex:
+                print(f'[auto-sync] error: {ex}')
+        threading.Thread(target=_worker, daemon=True).start()
 
     def go_welcome(self):
+        self._auto_commit_sync()
         sm = self.root.ids.sm
         sm.transition = SlideTransition(direction='right')
         sm.current = 'welcome'
 
     def go_config(self):
+        self._auto_commit_sync()
         sm = self.root.ids.sm
         sm.transition = SlideTransition(direction='left')
         sm.current = 'config'
 
     def go_collab(self):
+        self._auto_commit_sync()
         sm = self.root.ids.sm
         sm.transition = SlideTransition(direction='left')
         sm.current = 'collab'
@@ -1969,6 +2567,26 @@ class LIFTRecorderApp(App):
                 self._show_error(f'Could not share APK:\n{ex}')
         else:
             self._show_error('APK sharing is only available on Android.')
+
+    def do_sync(self):
+        if not self.recorder:
+            return
+        prefs = self._load_prefs()
+        name = prefs.get('collab_name', '') or 'Recorder'
+        user = prefs.get('collab_username', '')
+        token = prefs.get('collab_token', '')
+        from collab import sync_repo, run_async
+
+        saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''
+        def _sync_and_reload(project_dir, username, pw, contributor):
+            result = sync_repo(project_dir, username, pw, contributor)
+            Clock.schedule_once(
+                lambda dt: self._reload_and_restore(saved_guid), 0)
+            return result
+
+        run_async(_sync_and_reload,
+                  self.recorder.db.dir, user, token, name,
+                  on_done=lambda result: print(f'Sync: {result}'))
 
     def go_recorder(self):
         sm = self.root.ids.sm
@@ -2060,12 +2678,13 @@ class LIFTRecorderApp(App):
         popup.open()
 
     def clone_dialog(self):
-        """Popup with URL/username/token inputs for cloning a repository."""
+        """Popup with host/owner/repo component inputs for cloning."""
         from kivy.uix.popup import Popup
         from kivy.uix.boxlayout import BoxLayout
         from kivy.uix.textinput import TextInput
         from kivy.uix.button import Button
         from kivy.uix.label import Label
+        from kivy.uix.spinner import Spinner
 
         prefs = self._load_prefs()
         content = BoxLayout(orientation='vertical', spacing=dp(10), padding=dp(12))
@@ -2074,13 +2693,58 @@ class LIFTRecorderApp(App):
             size_hint_y=None, height=dp(30),
             font_size=sp(13), color=(0.94, 0.91, 0.86, 1),
         ))
-        url_input = TextInput(
-            text='', hint_text='https://github.com/user/repo.git',
+
+        # Host + owner row
+        host_row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
+        host_spinner = Spinner(
+            text=prefs.get('clone_host', 'GitHub'),
+            values=['GitHub', 'GitLab'],
+            size_hint_x=0.35, font_size=sp(14),
+        )
+        owner_input = TextInput(
+            text=prefs.get('clone_owner', ''),
+            hint_text='Owner (username)',
+            multiline=False, size_hint_x=0.65, font_size=sp(14),
+        )
+        host_row.add_widget(host_spinner)
+        host_row.add_widget(owner_input)
+        content.add_widget(host_row)
+
+        # Repo name
+        repo_input = TextInput(
+            text='', hint_text='Repository name',
             multiline=False, size_hint_y=None, height=dp(44), font_size=sp(14),
         )
+        content.add_widget(repo_input)
+
+        # Live URL preview
+        url_label = Label(
+            text='', font_size=sp(12),
+            color=(0.5412, 0.4784, 0.4157, 1),
+            size_hint_y=None, height=dp(24),
+            halign='left',
+        )
+        url_label.bind(size=lambda w, s: setattr(w, 'text_size', s))
+        content.add_widget(url_label)
+
+        def _update_url(*args):
+            host = host_spinner.text
+            owner = owner_input.text.strip()
+            repo = repo_input.text.strip()
+            if not owner or not repo:
+                url_label.text = ''
+                return
+            domain = 'gitlab.com' if host == 'GitLab' else 'github.com'
+            url_label.text = f'https://{domain}/{owner}/{repo}.git'
+
+        host_spinner.bind(text=_update_url)
+        owner_input.bind(text=_update_url)
+        repo_input.bind(text=_update_url)
+
+        # Auth credentials
         user_input = TextInput(
             text=prefs.get('collab_username', ''),
-            hint_text='Git username',
+            hint_text='Your git username',
             multiline=False, size_hint_y=None, height=dp(44), font_size=sp(14),
         )
         token_input = TextInput(
@@ -2088,7 +2752,6 @@ class LIFTRecorderApp(App):
             hint_text='Personal access token', password=True,
             multiline=False, size_hint_y=None, height=dp(44), font_size=sp(14),
         )
-        content.add_widget(url_input)
         content.add_widget(user_input)
         content.add_widget(token_input)
 
@@ -2103,21 +2766,23 @@ class LIFTRecorderApp(App):
         popup = Popup(
             title='Clone Repository',
             content=content,
-            size_hint=(0.9, None), height=dp(340),
+            size_hint=(0.9, None), height=dp(440),
             auto_dismiss=True,
         )
 
         def _do_clone(*args):
-            clone_url = url_input.text.strip()
+            clone_url = url_label.text.strip()
             user = user_input.text.strip()
             token = token_input.text.strip()
             popup.dismiss()
             if not clone_url:
                 return
-            # Save credentials for future use
+            # Save credentials and clone prefs for future use
             prefs = self._load_prefs()
             prefs['collab_username'] = user
             prefs['collab_token'] = token
+            prefs['clone_host'] = host_spinner.text
+            prefs['clone_owner'] = owner_input.text.strip()
             self._save_prefs_dict(prefs)
 
             repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')

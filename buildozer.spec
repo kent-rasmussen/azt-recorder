@@ -3,7 +3,7 @@ title = Record My Wordlist
 package.name = liftrecorder
 package.domain = org.liftrecorder
 source.dir = .
-source.include_exts = py,png,jpg,kv,atlas,lift,ttf
+source.include_exts = py,png,jpg,kv,atlas,lift,ttf,gz
 # azt_images/ is 320 MB — too large to bundle in the APK (causes OOM on device).
 # Images are accessed from external storage via lift.py's bundled_images_dir logic.
 source.exclude_dirs = azt_images,env,.venv,venv,__pycache__
@@ -28,12 +28,12 @@ android.ndk = 29
 android.allow_backup = False
 
 # Legacy icon (pre-API 26 fallback)
-icon.filename = %(source.dir)s/icon.png
+icon.filename = %(source.dir)s/icons/icon.png
 # Adaptive icon layers (API 26+)
-icon.adaptive_foreground.filename = %(source.dir)s/icon_dark.png
-icon.adaptive_background.filename = %(source.dir)s/icon_bg.png
+icon.adaptive_foreground.filename = %(source.dir)s/icons/icon_dark.png
+icon.adaptive_background.filename = %(source.dir)s/icons/icon_bg.png
 
-presplash.filename = %(source.dir)s/icon.png
+presplash.filename = %(source.dir)s/icons/icon.png
 android.presplash_color = #1a1612
 
 [buildozer]
