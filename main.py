@@ -178,6 +178,8 @@ KV_TEMPLATE = '''
             name: 'collab'
         LangPickerScreen:
             name: 'langpicker'
+        ImagePickerScreen:
+            name: 'imagepicker'
 
 # ── Colour palette (dark, warm) ────────────────────────────────────────────────
 #   bg      #1a1612
@@ -296,20 +298,30 @@ KV_TEMPLATE = '''
                 on_release: app.show_goto_dialog()
                 size_hint_x: 1
             Button:
-                size_hint_x: None
-                width: dp(44)
+                size_hint_x: 1
                 background_color: 0, 0, 0, 0
                 background_normal: ''
                 on_release: app.do_sync()
-                Image:
-                    source: 'icons/sync_dark.png'
-                    size: dp(28), dp(28)
-                    size_hint: None, None
+                BoxLayout:
                     center: self.parent.center
-                    allow_stretch: True
-                    keep_ratio: True
-            BoxLayout:
-                size_hint_x: 1
+                    size_hint: None, 1
+                    width: dp(100)
+                    spacing: dp(4)
+                    Image:
+                        source: 'icons/sync_dark.png'
+                        size_hint_x: None
+                        width: dp(28)
+                        allow_stretch: True
+                        keep_ratio: True
+                    Label:
+                        id: sync_status_label
+                        text: ''
+                        font_size: sp(20)
+                        font_name: FONT
+                        color: (0.7, 0.62, 0.55, 1)
+                        halign: 'left'
+                        valign: 'middle'
+                        text_size: self.size
             Button:
                 size_hint_x: None
                 width: dp(44)
@@ -324,14 +336,35 @@ KV_TEMPLATE = '''
                     allow_stretch: True
                     keep_ratio: True
         # ── Image ────────────────────────────────────────────────────────────
-        AsyncImage:
-            id: entry_image
-            source: ''
+        FloatLayout:
+            id: image_container
             size_hint_y: None
-            height: 0
-            opacity: 0
-            allow_stretch: True
-            keep_ratio: True
+            height: entry_image.height
+            AsyncImage:
+                id: entry_image
+                source: ''
+                size_hint: 1, None
+                height: 0
+                opacity: 0
+                allow_stretch: True
+                keep_ratio: True
+                pos: self.parent.pos
+            ImageRedoBtn:
+                id: image_redo_btn
+                size_hint: None, None
+                size: dp(80), dp(80)
+                pos: image_container.x + image_container.width - self.width - dp(4), image_container.y + dp(4)
+                background_color: 0, 0, 0, 0
+                background_normal: ''
+                opacity: 1 if entry_image.opacity > 0 else 0
+                disabled: entry_image.opacity == 0
+                Image:
+                    source: 'icons/redo.png'
+                    size: dp(64), dp(64)
+                    size_hint: None, None
+                    center: self.parent.center
+                    allow_stretch: True
+                    keep_ratio: True
         # ── Glosses ──────────────────────────────────────────────────────────
         BoxLayout:
             id: gloss_box
@@ -480,6 +513,37 @@ KV_TEMPLATE = '''
                     id: unrecorded_toggle
                     active: True
                     on_active: root.toggle_show_past(self.active)
+                # Recording options
+                SectionLabel:
+                    text: 'Recording'
+                BoxLayout:
+                    orientation: 'vertical'
+                    size_hint_y: None
+                    height: self.minimum_height
+                    spacing: dp(4)
+                    RecordingOption:
+                        id: rec_citation
+                        text: 'Citation forms'
+                        active: True
+                        on_active: root.toggle_rec_option('citation', self.active)
+                    RecordingOption:
+                        id: rec_noun
+                        text: 'Second forms (nouns)'
+                        active: False
+                        disabled: True
+                        on_active: root.toggle_rec_option('noun', self.active)
+                    RecordingOption:
+                        id: rec_verb
+                        text: 'Second forms (verbs)'
+                        active: False
+                        disabled: True
+                        on_active: root.toggle_rec_option('verb', self.active)
+                    RecordingOption:
+                        id: rec_example
+                        text: 'Examples'
+                        active: False
+                        disabled: True
+                        on_active: root.toggle_rec_option('example', self.active)
                 # Apply button
                 Widget:
                     size_hint_y: None
@@ -497,11 +561,27 @@ KV_TEMPLATE = '''
                     on_release: app.go_collab()
                 Widget:
                     size_hint_y: None
+                    height: dp(16)
+                SectionLabel:
+                    text: 'Image repository'
+                TextInput:
+                    id: image_repo_input
+                    hint_text: 'https://github.com/kent-rasmussen/images_CAWL'
+                    font_size: sp(12)
+                    font_name: FONT
+                    size_hint_y: None
+                    height: dp(48)
+                    background_color: (0.1647, 0.1373, 0.1255, 1)
+                    foreground_color: (0.9412, 0.9098, 0.8627, 1)
+                    cursor_color: (0.7882, 0.4824, 0.2275, 1)
+                    multiline: False
+                Widget:
+                    size_hint_y: None
                     height: dp(8)
                 RecBtn:
                     text: 'Start over'
                     normal_color: (0.3922, 0.3137, 0.2353, 1)
-                    on_release: app.go_welcome()
+                    on_release: app.show_start_over()
                 Widget:
                     size_hint_y: None
                     height: dp(40)
@@ -548,12 +628,12 @@ KV_TEMPLATE = '''
                 height: self.minimum_height
                 padding: dp(20)
                 spacing: dp(14)
-                # ── Credentials ───────────────────────────────────────────
+                # ── Your name ─────────────────────────────────────────────
                 SectionLabel:
-                    text: 'Your identity'
+                    text: 'Your name'
                 TextInput:
                     id: name_input
-                    hint_text: 'Your name'
+                    hint_text: 'Your name (for commit attribution)'
                     font_size: sp(15)
                     font_name: FONT
                     size_hint_y: None
@@ -562,55 +642,76 @@ KV_TEMPLATE = '''
                     foreground_color: (0.9412, 0.9098, 0.8627, 1)
                     cursor_color: (0.7882, 0.4824, 0.2275, 1)
                     multiline: False
-                TextInput:
-                    id: username_input
-                    hint_text: 'Git username'
-                    font_size: sp(15)
+                # ── GitHub connection ─────────────────────────────────────
+                SectionLabel:
+                    text: 'GitHub account'
+                Label:
+                    id: gh_status_label
+                    text: 'Not connected'
+                    font_size: sp(14)
                     font_name: FONT
+                    color: (0.5412, 0.4784, 0.4157, 1)
                     size_hint_y: None
-                    height: dp(48)
-                    background_color: (0.1647, 0.1373, 0.1255, 1)
-                    foreground_color: (0.9412, 0.9098, 0.8627, 1)
-                    cursor_color: (0.7882, 0.4824, 0.2275, 1)
-                    multiline: False
-                TextInput:
-                    id: token_input
-                    hint_text: 'Personal access token'
-                    password: True
-                    font_size: sp(15)
+                    height: dp(28)
+                    halign: 'left'
+                    text_size: self.width, None
+                RecBtn:
+                    id: gh_connect_btn
+                    text: 'Connect to GitHub'
+                    normal_color: (0.1529, 0.6824, 0.3765, 1)
+                    on_release: root.start_device_flow()
+                Label:
+                    id: device_instructions_label
+                    text: ''
+                    font_size: sp(13)
                     font_name: FONT
+                    markup: True
+                    color: (0.5412, 0.4784, 0.4157, 1)
                     size_hint_y: None
-                    height: dp(48)
-                    background_color: (0.1647, 0.1373, 0.1255, 1)
-                    foreground_color: (0.9412, 0.9098, 0.8627, 1)
-                    cursor_color: (0.7882, 0.4824, 0.2275, 1)
-                    multiline: False
+                    height: dp(0)
+                    halign: 'center'
+                    text_size: self.width, None
+                    on_ref_press: root.open_link(args[1])
+                BoxLayout:
+                    id: device_code_box
+                    size_hint_y: None
+                    height: dp(0)
+                    opacity: 0
+                    spacing: dp(8)
+                    padding: dp(20), 0
+                    Label:
+                        id: device_code_label
+                        text: ''
+                        font_size: sp(28)
+                        font_name: FONT
+                        bold: True
+                        color: (0.9412, 0.9098, 0.8627, 1)
+                        halign: 'center'
+                        valign: 'middle'
+                        text_size: self.size
+                    RecBtn:
+                        id: copy_code_btn
+                        text: 'Copy'
+                        size_hint_x: None
+                        width: dp(64)
+                        font_size: sp(13)
+                        normal_color: (0.3922, 0.3137, 0.2353, 1)
+                        on_release: root.copy_code()
                 # ── Publish ───────────────────────────────────────────────
                 SectionLabel:
                     text: 'Publish this project'
-                BoxLayout:
+                TextInput:
+                    id: langcode_input
+                    hint_text: 'Language code (repo name)'
+                    font_size: sp(14)
+                    font_name: FONT
                     size_hint_y: None
                     height: dp(48)
-                    spacing: dp(8)
-                    Spinner:
-                        id: host_spinner
-                        text: 'GitHub'
-                        values: ['GitHub', 'GitLab']
-                        size_hint_x: 0.35
-                        font_size: sp(14)
-                        font_name: FONT
-                        on_text: root.update_publish_url()
-                    TextInput:
-                        id: langcode_input
-                        hint_text: 'Language code'
-                        font_size: sp(14)
-                        font_name: FONT
-                        size_hint_x: 0.65
-                        background_color: (0.1647, 0.1373, 0.1255, 1)
-                        foreground_color: (0.9412, 0.9098, 0.8627, 1)
-                        cursor_color: (0.7882, 0.4824, 0.2275, 1)
-                        multiline: False
-                        on_text: root.update_publish_url()
+                    background_color: (0.1647, 0.1373, 0.1255, 1)
+                    foreground_color: (0.9412, 0.9098, 0.8627, 1)
+                    cursor_color: (0.7882, 0.4824, 0.2275, 1)
+                    multiline: False
+                    on_text: root.update_publish_url()
                 Label:
                     id: publish_url_label
                     text: ''
@@ -642,6 +743,64 @@ KV_TEMPLATE = '''
                 Widget:
                     size_hint_y: None
                     height: dp(40)
+
+<ImagePickerScreen>:
+    canvas.before:
+        Color:
+            rgba: (0.102, 0.0863, 0.0706, 1)
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    BoxLayout:
+        orientation: 'vertical'
+        # Prompt (fixed, doesn't scroll)
+        Label:
+            id: prompt_label
+            text: ''
+            font_size: sp(30)
+            font_name: FONT
+            color: (0.7882, 0.4824, 0.2275, 1)
+            size_hint_y: None
+            height: dp(72)
+            halign: 'center'
+            valign: 'middle'
+            text_size: self.width, None
+            padding: dp(12), dp(8)
+        # Scrollable image grid
+        ScrollView:
+            GridLayout:
+                id: image_grid
+                cols: 2
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: dp(8)
+                padding: dp(8)
+        # Bottom buttons
+        BoxLayout:
+            size_hint_y: None
+            height: dp(56)
+            padding: dp(12), dp(4)
+            spacing: dp(8)
+            RecBtn:
+                text: 'openclipart'
+                normal_color: (0.1529, 0.6824, 0.3765, 1)
+                font_size: sp(13)
+                on_release: root.fetch_openclipart()
+            RecBtn:
+                text: 'Photo'
+                normal_color: (0.3922, 0.3137, 0.2353, 1)
+                font_size: sp(13)
+                on_release: root.take_photo()
+            RecBtn:
+                text: 'File'
+                normal_color: (0.3922, 0.3137, 0.2353, 1)
+                font_size: sp(13)
+                on_release: root.pick_from_file()
+            RecBtn:
+                text: 'Cancel'
+                normal_color: (0.1647, 0.1373, 0.1255, 1)
+                font_size: sp(13)
+                on_release: app.go_recorder()
 
 # ── Reusable widgets ──────────────────────────────────────────────────────────
 
@@ -901,6 +1060,35 @@ KV_TEMPLATE = '''
             valign: 'middle'
             text_size: self.size
 
+<RecordingOption>:
+    size_hint_y: None
+    height: dp(44)
+    canvas.before:
+        Color:
+            rgba: (0.15, 0.35, 0.22, 1) if (self.active and not self.disabled) else (0.1647, 0.1373, 0.1255, 1)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(6)]
+    BoxLayout:
+        spacing: dp(10)
+        padding: dp(10), dp(4)
+        CheckBox:
+            size_hint_x: None
+            width: dp(40)
+            active: root.active
+            disabled: root.disabled
+            color: (0.7882, 0.4824, 0.2275, 1)
+            on_active: root.active = self.active
+        Label:
+            text: root.text
+            font_size: sp(14)
+            font_name: FONT
+            color: (0.4, 0.38, 0.35, 1) if root.disabled else ((0.1529, 0.9, 0.3765, 1) if root.active else (0.9412, 0.9098, 0.8627, 1))
+            halign: 'left'
+            valign: 'middle'
+            text_size: self.size
+
 <RecBtn@Button>:
     normal_color: (0.7882, 0.4824, 0.2275, 1)
     size_hint_y: None
@@ -990,6 +1178,34 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
 
 
+class ImageRedoBtn(Widget):
+    """Tap-only button over the entry image. Ignores touches that become swipes."""
+    _touch_id = None
+
+    def on_touch_down(self, touch):
+        if self.disabled or self.opacity == 0:
+            return False
+        if self.collide_point(*touch.pos):
+            self._touch_id = touch.uid
+            return True           # claim but wait for up
+        return False
+
+    def on_touch_move(self, touch):
+        if touch.uid == self._touch_id:
+            # Any movement cancels the tap
+            self._touch_id = None
+        return False
+
+    def on_touch_up(self, touch):
+        if touch.uid == self._touch_id:
+            self._touch_id = None
+            if self.collide_point(*touch.pos):
+                app = App.get_running_app()
+                app.show_image_picker()
+                return True
+        return False
+
+
 class RecordButton(Widget):
     recording = BooleanProperty(False)
 
@@ -1006,6 +1222,19 @@ class UnrecordedToggle(BoxLayout):
     active = BooleanProperty(False)
 
     def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos):
+            self.active = not self.active
+            return True
+        return super().on_touch_down(touch)
+
+
+class RecordingOption(BoxLayout):
+    text = StringProperty('')
+    active = BooleanProperty(False)
+
+    def on_touch_down(self, touch):
+        if self.disabled:
+            return False
         if self.collide_point(*touch.pos):
             self.active = not self.active
             return True
@@ -1335,6 +1564,322 @@ class LangPickerScreen(Screen):
         app.new_from_template()
 
 
+class ImagePickerScreen(Screen):
+    """Image selection screen — shows all available images for the current entry."""
+    _entry = None
+    _shown_urls = None  # set of URLs already in the grid
+    _openclipart_page = 1
+
+    def populate(self, entry):
+        self._entry = entry
+        # Prompt with selected glosses
+        app = App.get_running_app()
+        self._glosses = []
+        if entry and app.recorder:
+            for lang in app.recorder.active_gloss_langs:
+                for g in entry.get('glosses', {}).get(lang, []):
+                    self._glosses.append(g)
+        prompt = f"Which image for {', '.join(self._glosses)}?" if self._glosses else 'Select an image'
+        lbl = self.ids.get('prompt_label')
+        if lbl:
+            lbl.text = prompt
+
+        grid = self.ids.get('image_grid')
+        if not grid:
+            return
+        grid.clear_widgets()
+        self._shown_urls = set()
+        self._openclipart_page = 1
+
+        # Gather URLs from CAWL image repo
+        db = app.recorder.db if app.recorder else None
+        urls = db.all_image_urls(entry) if db else []
+
+        # Each image = ~1/4 of screen in a 2x2 grid
+        # Use dp-based size: half screen height minus chrome
+        screen_h = Window.height
+        self._cell_h = max(int(screen_h / 2.5), dp(200))
+
+        # Use 1 column if ≤2 images, else 2
+        grid.cols = 1 if len(urls) <= 2 else 2
+
+        self._add_image_buttons(grid, urls, self._cell_h)
+
+        # Auto-fetch from openclipart if internet available and few images
+        if len(urls) < 10 and self._glosses:
+            import threading
+            threading.Thread(
+                target=self._auto_openclipart, args=(self._cell_h,), daemon=True).start()
+
+    def _add_image_buttons(self, grid, urls, cell_h):
+        from kivy.uix.image import AsyncImage
+        from kivy.uix.behaviors import ButtonBehavior
+
+        class _ImageBtn(ButtonBehavior, AsyncImage):
+            pass
+
+        if self._shown_urls is None:
+            self._shown_urls = set()
+        for url in urls:
+            if url in self._shown_urls:
+                continue
+            self._shown_urls.add(url)
+            btn = _ImageBtn(
+                source=url,
+                allow_stretch=True,
+                keep_ratio=True,
+                size_hint_y=None,
+                height=cell_h,
+            )
+            btn._image_url = url
+            btn.bind(on_release=lambda b: self._select_url(b._image_url))
+            grid.add_widget(btn)
+
+    def _select_url(self, url):
+        """Download the selected image, scale it, save to images/, update LIFT."""
+        app = App.get_running_app()
+        if not app.recorder or not self._entry:
+            return
+        import threading
+        threading.Thread(
+            target=self._download_and_set, args=(url,), daemon=True).start()
+        app.go_recorder()
+
+    def _download_and_set(self, url):
+        """Background: download image, scale, save, update LIFT XML."""
+        import urllib.request
+        app = App.get_running_app()
+        entry = self._entry
+        db = app.recorder.db
+
+        try:
+            ctx = app._ssl_context()
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+                data = resp.read()
+
+            # Determine filename from azt convention
+            filename = db.imagename(entry)
+            images_dir = db.images_dir
+            os.makedirs(images_dir, exist_ok=True)
+            dest = os.path.join(images_dir, filename)
+
+            # Scale down if larger than 1284px in either dimension
+            from PIL import Image as PILImage
+            import io
+            img = PILImage.open(io.BytesIO(data))
+            max_dim = 1284
+            w, h = img.size
+            if w > max_dim or h > max_dim:
+                ratio = min(max_dim / w, max_dim / h)
+                img = img.resize((int(w * ratio), int(h * ratio)),
+                                 PILImage.LANCZOS)
+            img.save(dest, 'PNG')
+
+            # Update LIFT XML
+            guid = entry.get('guid', '')
+            db.set_illustration(guid, filename)
+
+            # Update in-memory entry
+            entry['image_path'] = dest
+            entry['illustration_href'] = filename
+
+            Clock.schedule_once(lambda dt: app.refresh_recorder_ui(), 0)
+        except Exception as ex:
+            print(f'[image-picker] download error: {ex}')
+
+    def pick_from_file(self):
+        """Let user pick an image from device storage or camera."""
+        app = App.get_running_app()
+        if platform == 'android':
+            self._pick_from_file_android()
+        else:
+            self._pick_from_file_desktop()
+
+    def _pick_from_file_desktop(self):
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root_tk = tk.Tk()
+            root_tk.withdraw()
+            path = filedialog.askopenfilename(
+                title='Select image',
+                filetypes=[('Images', '*.png *.jpg *.jpeg *.bmp *.gif'),
+                           ('All files', '*.*')],
+            )
+            root_tk.destroy()
+            if path:
+                self._set_local_image(path)
+        except Exception as ex:
+            print(f'Desktop image picker error: {ex}')
+
+    def _pick_from_file_android(self):
+        try:
+            from jnius import autoclass
+            Intent = autoclass('android.content.Intent')
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            intent.setType('image/*')
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            chooser = Intent.createChooser(intent, autoclass('java.lang.String')('Select image'))
+            PythonActivity.mActivity.startActivityForResult(chooser, 1002)
+        except Exception as ex:
+            print(f'Android image picker error: {ex}')
+
+    def _set_local_image(self, source_path):
+        """Copy and scale a local image file into images/."""
+        app = App.get_running_app()
+        if not app.recorder or not self._entry:
+            return
+        import threading
+        threading.Thread(
+            target=self._copy_and_set, args=(source_path,), daemon=True).start()
+        Clock.schedule_once(lambda dt: app.go_recorder(), 0)
+
+    def _copy_and_set(self, source_path):
+        app = App.get_running_app()
+        entry = self._entry
+        db = app.recorder.db
+        try:
+            from PIL import Image as PILImage
+            filename = db.imagename(entry)
+            images_dir = db.images_dir
+            os.makedirs(images_dir, exist_ok=True)
+            dest = os.path.join(images_dir, filename)
+
+            img = PILImage.open(source_path)
+            max_dim = 1284
+            w, h = img.size
+            if w > max_dim or h > max_dim:
+                ratio = min(max_dim / w, max_dim / h)
+                img = img.resize((int(w * ratio), int(h * ratio)),
+                                 PILImage.LANCZOS)
+            img.save(dest, 'PNG')
+            print(f'[image-picker] saved {img.size[0]}x{img.size[1]} to {dest}')
+
+            guid = entry.get('guid', '')
+            db.set_illustration(guid, filename)
+            # Bust Kivy image cache so the new file is reloaded
+            from kivy.cache import Cache
+            Cache.remove('kv.image', dest)
+            Cache.remove('kv.texture', dest)
+            entry['image_path'] = dest
+            entry['illustration_href'] = filename
+            def _update_ui(dt):
+                app.refresh_recorder_ui()
+                app._show_toast('Image updated')
+            Clock.schedule_once(_update_ui, 0)
+        except Exception as ex:
+            print(f'[image-picker] local image error: {ex}')
+            traceback.print_exc()
+
+    def fetch_openclipart(self):
+        """Fetch images from openclipart.org based on glosses."""
+        if not self._glosses:
+            return
+        import threading
+        cell_h = int(Window.height * 0.4)
+        threading.Thread(
+            target=self._do_openclipart, args=(cell_h,), daemon=True).start()
+
+    def _auto_openclipart(self, cell_h):
+        """Background auto-fetch from openclipart if internet available."""
+        try:
+            from collab import _has_internet
+            if not _has_internet():
+                return
+        except Exception:
+            return
+        self._do_openclipart(cell_h)
+
+    def _do_openclipart(self, cell_h):
+        """Background: query openclipart.org for images matching glosses."""
+        import urllib.request, urllib.parse, json, ssl, re
+        app = App.get_running_app()
+        query = ' '.join(self._glosses[:3])
+        try:
+            ctx = app._ssl_context()
+            encoded_q = urllib.parse.quote(query)
+            page = self._openclipart_page
+            api_url = f'https://openclipart.org/search/?query={encoded_q}&page={page}'
+            req = urllib.request.Request(api_url,
+                headers={'User-Agent': 'AZTRecorder/1.10'})
+            with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+                raw = resp.read()
+            if not raw:
+                print(f'[openclipart] empty response for "{query}"')
+                return
+            html = raw.decode('utf-8', errors='replace')
+            # Extract image URLs from HTML — openclipart serves images at
+            # /image/800px/{id} paths
+            urls = []
+            for m in re.finditer(r'src=["\'](/image/800px/\d+)["\']', html):
+                url = 'https://openclipart.org' + m.group(1)
+                if url not in urls:
+                    urls.append(url)
+                if len(urls) >= 6:
+                    break
+            n = len(urls)
+            print(f'[openclipart] found {n} images for "{query}" (page {page})')
+            app = App.get_running_app()
+            if urls:
+                self._openclipart_page = page + 1
+                Clock.schedule_once(
+                    lambda dt: self._append_openclipart(urls, cell_h), 0)
+                Clock.schedule_once(
+                    lambda dt: app._show_toast(f'{n} images from openclipart'), 0)
+            else:
+                Clock.schedule_once(
+                    lambda dt: app._show_toast('No images found on openclipart'), 0)
+        except Exception as ex:
+            print(f'[openclipart] fetch error: {ex}')
+
+    def _append_openclipart(self, urls, cell_h):
+        grid = self.ids.get('image_grid')
+        if not grid:
+            return
+        # Switch to 2 cols if we now have enough images
+        total = len(grid.children) + len(urls)
+        if total > 2:
+            grid.cols = 2
+        self._add_image_buttons(grid, urls, cell_h)
+
+    def take_photo(self):
+        """Launch camera to take a photo."""
+        if platform == 'android':
+            self._take_photo_android()
+        else:
+            # Desktop: no camera — use file picker instead
+            self.pick_from_file()
+
+    def _take_photo_android(self):
+        try:
+            from android.permissions import request_permissions, Permission, check_permission
+            if not check_permission(Permission.CAMERA):
+                request_permissions(
+                    [Permission.CAMERA],
+                    callback=lambda perms, grants: (
+                        self._launch_camera() if grants and grants[0] else None
+                    ),
+                )
+                return
+            self._launch_camera()
+        except Exception as ex:
+            print(f'Camera permission error: {ex}')
+
+    def _launch_camera(self):
+        try:
+            from jnius import autoclass
+            Intent = autoclass('android.content.Intent')
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            MediaStore = autoclass('android.provider.MediaStore')
+            intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+            PythonActivity.mActivity.startActivityForResult(intent, 1003)
+        except Exception as ex:
+            print(f'Camera launch error: {ex}')
+
+
 class RecorderScreen(Screen):
     _touch_start_x = None
     _swiping = False
@@ -1466,6 +2011,16 @@ class ConfigScreen(Screen):
         gs = self.ids.get('gloss_search_input')
         if gs:
             gs.text = app.recorder.gloss_search or ''
+        ir = self.ids.get('image_repo_input')
+        if ir:
+            ir.text = app._load_prefs().get('image_repo', '')
+        # Load recording options
+        prefs = app._load_prefs()
+        rec_opts = prefs.get('rec_options', {})
+        for key in ('citation', 'noun', 'verb', 'example'):
+            w = self.ids.get(f'rec_{key}')
+            if w:
+                w.active = rec_opts.get(key, key == 'citation')
 
     def build_lang_toggles(self):
         app = App.get_running_app()
@@ -1499,6 +2054,14 @@ class ConfigScreen(Screen):
         if app.recorder:
             app.recorder.only_unrecorded = not show_past
 
+    def toggle_rec_option(self, key, active):
+        app = App.get_running_app()
+        prefs = app._load_prefs()
+        rec_opts = prefs.get('rec_options', {})
+        rec_opts[key] = active
+        prefs['rec_options'] = rec_opts
+        app._save_prefs_dict(prefs)
+
     def apply_and_go(self):
         app = App.get_running_app()
         cawl_in = self.ids.get('cawl_input')
@@ -1507,6 +2070,11 @@ class ConfigScreen(Screen):
         gs = self.ids.get('gloss_search_input')
         if gs:
             app.recorder.gloss_search = gs.text.strip()
+        ir = self.ids.get('image_repo_input')
+        if ir:
+            prefs = app._load_prefs()
+            prefs['image_repo'] = ir.text.strip()
+            app._save_prefs_dict(prefs)
         app.recorder.only_unrecorded = self.only_unrecorded
         app.recorder.rebuild_queue()
         app.go_recorder()
@@ -1517,46 +2085,58 @@ class CollabScreen(Screen):
     def on_enter(self):
         app = App.get_running_app()
         prefs = app._load_prefs()
-        for field, key in [
-            ('name_input',       'collab_name'),
-            ('username_input',   'collab_username'),
-            ('token_input',      'collab_token'),
-            ('langcode_input',   'collab_langcode'),
-        ]:
-            w = self.ids.get(field)
-            if w and not w.text:
-                w.text = prefs.get(key, '')
-        # Restore host spinner
-        host = prefs.get('collab_host', 'GitHub')
-        w = self.ids.get('host_spinner')
-        if w:
-            w.text = host
+        w = self.ids.get('name_input')
+        if w and not w.text:
+            w.text = prefs.get('collab_name', '')
+        w = self.ids.get('langcode_input')
+        if w and not w.text:
+            w.text = prefs.get('collab_langcode', '')
+        self._update_gh_status()
         self.update_publish_url()
+
+    def _update_gh_status(self):
+        """Update the GitHub connection status label."""
+        app = App.get_running_app()
+        prefs = app._load_prefs()
+        username = prefs.get('gh_username', '')
+        token = prefs.get('gh_access_token', '')
+        lbl = self.ids.get('gh_status_label')
+        btn = self.ids.get('gh_connect_btn')
+        if lbl:
+            if username and token:
+                lbl.text = f'Connected as {username}'
+                lbl.color = (0.1529, 0.6824, 0.3765, 1)
+            else:
+                lbl.text = 'Not connected'
+                lbl.color = (0.5412, 0.4784, 0.4157, 1)
+        if btn:
+            btn.text = 'Reconnect' if (username and token) else 'Connect to GitHub'
 
     # ── Internal helpers ───────────────────────────────────────────────────
 
-    def _save_creds(self):
+    def open_link(self, url):
+        """Open a URL in the device browser."""
+        import webbrowser
+        webbrowser.open(str(url))
+
+    def copy_code(self):
+        """Copy the device code to clipboard."""
+        lbl = self.ids.get('device_code_label')
+        if lbl and lbl.text:
+            from kivy.core.clipboard import Clipboard
+            Clipboard.copy(lbl.text)
+            self._set_log('Code copied to clipboard')
+
+    def _save_settings(self):
         app = App.get_running_app()
         prefs = app._load_prefs()
-        for field, key in [
-            ('name_input',       'collab_name'),
-            ('username_input',   'collab_username'),
-            ('token_input',      'collab_token'),
-            ('langcode_input',   'collab_langcode'),
-        ]:
-            w = self.ids.get(field)
-            if w:
-                prefs[key] = w.text
-        w = self.ids.get('host_spinner')
+        w = self.ids.get('name_input')
         if w:
-            prefs['collab_host'] = w.text
+            prefs['collab_name'] = w.text
+        w = self.ids.get('langcode_input')
+        if w:
+            prefs['collab_langcode'] = w.text
         app._save_prefs_dict(prefs)
-
-    def _creds(self):
-        def _txt(field):
-            w = self.ids.get(field)
-            return w.text.strip() if w else ''
-        return _txt('name_input') or 'Recorder', _txt('username_input'), _txt('token_input')
 
     def _set_log(self, text):
         lbl = self.ids.get('log_label')
@@ -1571,42 +2151,156 @@ class CollabScreen(Screen):
             self._set_log(result or ''),
         ))
 
+    # ── Device flow ────────────────────────────────────────────────────────
+
+    def start_device_flow(self):
+        """Begin GitHub device flow authentication."""
+        from collab import GITHUB_APP_CLIENT_ID
+        if not GITHUB_APP_CLIENT_ID:
+            self._set_log('GitHub App client_id not configured.')
+            return
+        self._set_log('Starting GitHub authorization...')
+        import threading
+        threading.Thread(target=self._device_flow_worker, daemon=True).start()
+
+    def _device_flow_worker(self):
+        from collab import device_flow_start, device_flow_poll, \
+            get_github_username, save_tokens, check_app_installed, \
+            app_install_url, GITHUB_APP_INSTALL_URL
+        app = App.get_running_app()
+        try:
+            resp = device_flow_start()
+            user_code = resp['user_code']
+            device_code = resp['device_code']
+            verification_uri = resp.get('verification_uri', 'https://github.com/login/device')
+            interval = resp.get('interval', 5)
+            expires_in = resp.get('expires_in', 900)
+
+            def _show_code(dt):
+                inst = self.ids.get('device_instructions_label')
+                if inst:
+                    inst.text = (f'Go to [color=5cb3ff][ref={verification_uri}]'
+                                 f'{verification_uri}[/ref][/color]\n'
+                                 f'and enter this code:')
+                    inst.height = dp(40)
+                lbl = self.ids.get('device_code_label')
+                if lbl:
+                    lbl.text = user_code
+                box = self.ids.get('device_code_box')
+                if box:
+                    box.height = dp(48)
+                    box.opacity = 1
+                from kivy.core.clipboard import Clipboard
+                Clipboard.copy(user_code)
+                self._set_log('Code copied to clipboard — paste it on the GitHub page')
+            Clock.schedule_once(_show_code, 0)
+
+            # Poll until authorized
+            token_data = device_flow_poll(device_code, interval, expires_in)
+            access_token = token_data['access_token']
+
+            # Get the GitHub username
+            username = get_github_username(access_token)
+
+            # Save tokens
+            save_tokens(app._prefs_path, token_data, username)
+
+            # Also save username in old pref keys for backward compat
+            prefs = app._load_prefs()
+            prefs['collab_username'] = username
+            prefs['collab_token'] = access_token
+            app._save_prefs_dict(prefs)
+
+            # Check if the app is installed (required for repo access)
+            install_info = check_app_installed(access_token)
+            installed = install_info['installed']
+            install_id = install_info['installation_id']
+            url = app_install_url(install_id)
+
+            def _done(dt):
+                lbl = self.ids.get('device_code_label')
+                if lbl:
+                    lbl.text = ''
+                box = self.ids.get('device_code_box')
+                if box:
+                    box.height = 0
+                    box.opacity = 0
+                inst = self.ids.get('device_instructions_label')
+                if inst:
+                    if not installed:
+                        inst.text = (
+                            'Now install the app to grant repository access.\n'
+                            'Tap [color=5cb3ff][ref='
+                            f'{url}]Install[/ref][/color]'
+                            ' and select "All repositories".'
+                        )
+                        inst.height = dp(50)
+                    else:
+                        inst.text = ''
+                        inst.height = 0
+                self._update_gh_status()
+                if installed:
+                    self._set_log(f'Connected as {username}')
+                else:
+                    self._set_log(f'Connected as {username} — install app for repo access')
+                    import webbrowser
+                    webbrowser.open(url)
+            Clock.schedule_once(_done, 0)
+
+        except Exception as ex:
+            def _err(dt):
+                lbl = self.ids.get('device_code_label')
+                if lbl:
+                    lbl.text = ''
+                box = self.ids.get('device_code_box')
+                if box:
+                    box.height = 0
+                    box.opacity = 0
+                inst = self.ids.get('device_instructions_label')
+                if inst:
+                    inst.text = ''
+                    inst.height = 0
+                self._set_log(f'Authorization failed: {ex}')
+            Clock.schedule_once(_err, 0)
+
     # ── Button handlers ────────────────────────────────────────────────────
 
     def update_publish_url(self):
-        """Auto-generate the publish URL from host, username, and language code."""
+        """Auto-generate the publish URL from GitHub username and language code."""
         lbl = self.ids.get('publish_url_label')
         if not lbl:
             return
-        host_w = self.ids.get('host_spinner')
-        user_w = self.ids.get('username_input')
+        app = App.get_running_app()
+        prefs = app._load_prefs()
+        user = prefs.get('gh_username', '')
         lang_w = self.ids.get('langcode_input')
-        host = host_w.text if host_w else 'GitHub'
-        user = user_w.text.strip() if user_w else ''
         lang = lang_w.text.strip() if lang_w else ''
         if not user or not lang:
             lbl.text = ''
             return
-        if host == 'GitLab':
-            lbl.text = f'https://gitlab.com/{user}/{lang}.git'
-        else:
-            lbl.text = f'https://github.com/{user}/{lang}.git'
+        lbl.text = f'https://github.com/{user}/{lang}.git'
 
     def do_publish(self):
         app = App.get_running_app()
         if not app.recorder:
             self._set_log('No project loaded.')
             return
-        self._save_creds()
-        name, user, token = self._creds()
+        self._save_settings()
+        user, token = app._get_gh_credentials()
+        if not token:
+            self._set_log('Connect to GitHub first.')
+            return
+        name_w = self.ids.get('name_input')
+        name = (name_w.text.strip() if name_w else '') or 'Recorder'
         lbl = self.ids.get('publish_url_label')
         remote_url = lbl.text.strip() if lbl else ''
         if not remote_url:
-            self._set_log('Enter username and language code first.')
+            self._set_log('Enter a language code first.')
             return
         from collab import init_repo
         self._run('Publishing...', init_repo,
-                  app.recorder.db.dir, remote_url, user, token,
+                  app.recorder.db.dir, remote_url,
+                  'x-access-token', token,
                   'main', name)
 
 
@@ -1719,12 +2413,25 @@ class RecorderController:
         return e.get('headword', '')
 
     @property
+    def list_name(self):
+        """Short name for the wordlist, from field/@type (max 8 chars)."""
+        name = self.db.list_type
+        if not name:
+            name = os.path.splitext(os.path.basename(self.db.path))[0]
+        return name[:8]
+
+    @property
     def progress_text(self):
         if not self.queue:
             return 'No entries'
         cawl = self.current.get('cawl', '')
-        cawl_str = f'  ·  CAWL {cawl}' if cawl else ''
-        return f'{self.index + 1} / {len(self.queue)}{cawl_str}'
+        cawl_num = cawl.lstrip('0') or '0' if cawl else ''
+        total = len(self.queue)
+        parts = [self.list_name]
+        if cawl_num:
+            parts.append(cawl_num)
+        parts.append(f'/ {total}')
+        return ' '.join(parts)
 
     @property
     def has_image(self):
@@ -2031,7 +2738,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.6.0'
+__version__ = '1.11.0'
 
 
 class LIFTRecorderApp(App):
@@ -2113,6 +2820,15 @@ class LIFTRecorderApp(App):
         try:
             sm = self.root.ids.sm
             self.config_screen = sm.get_screen('config')
+            # Bind Android activity result listener
+            if platform == 'android':
+                try:
+                    from android import activity
+                    activity.bind(on_activity_result=self._on_activity_result_wrapper)
+                    print('[app] activity result listener bound')
+                except Exception as ex:
+                    print(f'[app] failed to bind activity result: {ex}')
+                    traceback.print_exc()
             # Auto-load last used LIFT file if it still exists
             prefs = self._load_prefs()
             last = prefs.get('last_lift', '')
@@ -2250,11 +2966,9 @@ class LIFTRecorderApp(App):
                 # Clone the whole repo
                 repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')
                 dest = os.path.join(self.user_data_dir, 'projects', repo_name)
-                prefs = self._load_prefs()
-                user = prefs.get('collab_username', '')
-                token = prefs.get('collab_token', '')
+                _, token = self._get_gh_credentials()
                 from collab import clone_repo
-                lift_path, log = clone_repo(clone_url, dest, user, token)
+                lift_path, log = clone_repo(clone_url, dest, 'x-access-token', token)
                 if lift_path:
                     Clock.schedule_once(lambda dt: self.load_lift(lift_path), 0)
                 else:
@@ -2310,6 +3024,22 @@ class LIFTRecorderApp(App):
             target=self._download_and_open,
             args=(self._SILCAWL_URL,), daemon=True).start()
 
+    def _show_toast(self, msg, duration=1.5):
+        """Show a brief overlay message that auto-dismisses."""
+        from kivy.uix.label import Label
+        from kivy.uix.modalview import ModalView
+        view = ModalView(
+            size_hint=(None, None), size=(dp(250), dp(50)),
+            background_color=(0, 0, 0, 0.7),
+            auto_dismiss=True,
+        )
+        view.add_widget(Label(
+            text=msg, font_size=sp(14), font_name=_FONT_NAME,
+            color=(0.94, 0.91, 0.86, 1),
+        ))
+        view.open()
+        Clock.schedule_once(lambda dt: view.dismiss(), duration)
+
     def _show_error(self, msg):
         from kivy.uix.popup import Popup
         from kivy.uix.label import Label
@@ -2337,17 +3067,104 @@ class LIFTRecorderApp(App):
         except Exception as ex:
             print(f'Android file picker error: {ex}')
 
-    def on_activity_result(self, request_code, result_code, intent):
-        """Called by Kivy Android bridge when file picker returns."""
-        if request_code == 1001 and result_code == -1:  # RESULT_OK
+    def _on_activity_result_wrapper(self, request_code, result_code, intent):
+        """Wrapper for android.activity.bind — runs off main thread.
+        Extract data from intent here (Java refs may not survive thread hop),
+        then schedule UI work on main thread."""
+        print(f'[activity-result] code={request_code} result={result_code}')
+        if result_code != -1:  # not RESULT_OK
+            print(f'[activity-result] not RESULT_OK, ignoring')
+            return
+        if request_code == 1001:
             try:
-                from jnius import autoclass
                 uri = intent.getData()
                 path = self._uri_to_path(uri)
                 if path:
-                    self.load_lift(path)
+                    Clock.schedule_once(lambda dt: self.load_lift(path), 0)
             except Exception as ex:
                 print(f'Activity result error: {ex}')
+        elif request_code == 1002:
+            try:
+                uri = intent.getData()
+                path = self._uri_to_image_path(uri)
+                print(f'[activity-result] image path: {path}')
+                if path:
+                    Clock.schedule_once(
+                        lambda dt: self._deliver_image_to_picker(path), 0)
+            except Exception as ex:
+                print(f'Image picker result error: {ex}')
+                traceback.print_exc()
+        elif request_code == 1003:
+            try:
+                from jnius import autoclass
+                extras = intent.getExtras()
+                if extras:
+                    bitmap = extras.get('data')
+                    if bitmap:
+                        path = self._save_bitmap(bitmap)
+                        print(f'[activity-result] camera saved to: {path}')
+                        if path:
+                            Clock.schedule_once(
+                                lambda dt: self._deliver_image_to_picker(path), 0)
+                    else:
+                        print('[activity-result] no bitmap in extras')
+                else:
+                    print('[activity-result] no extras in camera result')
+            except Exception as ex:
+                print(f'Camera result error: {ex}')
+                traceback.print_exc()
+
+    def _deliver_image_to_picker(self, path):
+        """Pass a local image path to the image picker screen (main thread)."""
+        sm = self.root.ids.sm
+        picker = sm.get_screen('imagepicker')
+        picker._set_local_image(path)
+
+    def _uri_to_image_path(self, uri):
+        """Copy image content from URI to a temp file and return the path."""
+        try:
+            from jnius import autoclass
+            context = autoclass('org.kivy.android.PythonActivity').mActivity
+            resolver = context.getContentResolver()
+            # Use ParcelFileDescriptor to get a native fd — avoids Java
+            # byte array bridging issues through pyjnius
+            pfd = resolver.openFileDescriptor(uri, autoclass('java.lang.String')('r'))
+            fd = pfd.detachFd()
+            with os.fdopen(fd, 'rb') as f:
+                data = f.read()
+            print(f'[uri-to-image] read {len(data)} bytes from URI')
+            if not data:
+                print('[uri-to-image] empty data from URI')
+                return None
+            tmp_dir = os.path.join(self.user_data_dir, 'tmp')
+            os.makedirs(tmp_dir, exist_ok=True)
+            tmp_path = os.path.join(tmp_dir, 'picked_image.png')
+            with open(tmp_path, 'wb') as f:
+                f.write(data)
+            return tmp_path
+        except Exception as ex:
+            print(f'URI to image error: {ex}')
+            traceback.print_exc()
+            return None
+
+    def _save_bitmap(self, bitmap):
+        """Save an Android Bitmap to a temp PNG file."""
+        try:
+            from jnius import autoclass
+            ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
+            CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
+            baos = ByteArrayOutputStream()
+            bitmap.compress(CompressFormat.PNG, 100, baos)
+            data = bytes(baos.toByteArray())
+            tmp_dir = os.path.join(self.user_data_dir, 'tmp')
+            os.makedirs(tmp_dir, exist_ok=True)
+            tmp_path = os.path.join(tmp_dir, 'camera_photo.png')
+            with open(tmp_path, 'wb') as f:
+                f.write(data)
+            return tmp_path
+        except Exception as ex:
+            print(f'Save bitmap error: {ex}')
+            return None
 
     def _uri_to_path(self, uri):
         try:
@@ -2400,10 +3217,70 @@ class LIFTRecorderApp(App):
         except Exception as ex:
             print(f'Desktop file dialog error: {ex}')
 
+    def _image_repo(self):
+        """Return the configured image repo, or default."""
+        return self._load_prefs().get('image_repo', '')
+
+    def _get_image_cache_dir(self):
+        """Return the image cache directory (not in git, for offline use)."""
+        return os.path.join(self.user_data_dir, 'image_cache')
+
+    def _start_image_prefetch(self):
+        """Silently pre-fetch all CAWL images to cache dir in background."""
+        if not self.recorder:
+            return
+        import threading
+        db = self.recorder.db
+        cache_dir = self._get_image_cache_dir()
+        os.makedirs(cache_dir, exist_ok=True)
+        threading.Thread(
+            target=self._prefetch_images_worker,
+            args=(db, cache_dir), daemon=True).start()
+
+    def _prefetch_images_worker(self, db, cache_dir):
+        """Download all CAWL images to cache_dir (skips existing)."""
+        try:
+            url_map = db.all_cawl_urls()
+        except Exception:
+            return  # no internet or resolver failed
+        if not url_map:
+            return
+        import urllib.request
+        ctx = self._ssl_context()
+        count = 0
+        for cawl, url in url_map.items():
+            # Skip if already cached
+            already = False
+            for ext in ('.png', '.jpg', '.jpeg'):
+                if os.path.exists(os.path.join(cache_dir, cawl + ext)):
+                    already = True
+                    break
+            if already:
+                continue
+            try:
+                req = urllib.request.Request(url)
+                with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+                    data = resp.read()
+                # Determine extension from URL
+                low = url.lower()
+                if low.endswith('.jpg') or low.endswith('.jpeg'):
+                    ext = '.jpg'
+                else:
+                    ext = '.png'
+                dest = os.path.join(cache_dir, cawl + ext)
+                with open(dest, 'wb') as f:
+                    f.write(data)
+                count += 1
+            except Exception:
+                pass  # silently skip — spotty internet is expected
+        if count:
+            print(f'[image-prefetch] cached {count} new images')
+
     def load_lift(self, path):
         path = os.path.abspath(path)
         try:
-            db = LIFTDatabase(path)
+            db = LIFTDatabase(path, image_repo=self._image_repo(),
+                              image_cache_dir=self._get_image_cache_dir())
         except Exception as ex:
             self._show_error(f'Could not open file:\n{ex}')
             return
@@ -2427,6 +3304,8 @@ class LIFTRecorderApp(App):
         sm.transition = SlideTransition(direction='left')
         sm.current = 'recorder'
         Clock.schedule_once(lambda dt: self.refresh_recorder_ui(), 0.1)
+        # Silently pre-fetch all CAWL images for offline use
+        Clock.schedule_once(lambda dt: self._start_image_prefetch(), 1.0)
         # Auto-publish new project if credentials are already configured
         if pending:
             self._try_auto_publish()
@@ -2437,7 +3316,8 @@ class LIFTRecorderApp(App):
             return
         path = self.recorder.db.path
         try:
-            db = LIFTDatabase(path)
+            db = LIFTDatabase(path, image_repo=self._image_repo(),
+                              image_cache_dir=self._get_image_cache_dir())
         except Exception as ex:
             print(f'Reload failed: {ex}')
             return
@@ -2464,28 +3344,66 @@ class LIFTRecorderApp(App):
                     break
         self.refresh_recorder_ui()
 
+    def _get_gh_credentials(self):
+        """Return (username, access_token) with auto-refresh. Uses device flow tokens."""
+        from collab import get_valid_token
+        return get_valid_token(self._prefs_path)
+
     def _try_auto_publish(self):
         """If git credentials and langcode are configured, publish automatically."""
+        user, token = self._get_gh_credentials()
         prefs = self._load_prefs()
-        user = prefs.get('collab_username', '')
-        token = prefs.get('collab_token', '')
         langcode = prefs.get('collab_langcode', '')
-        host = prefs.get('collab_host', 'GitHub')
-        if not (user and token and langcode and self.recorder):
+        if not (token and langcode and self.recorder):
             return
-        domain = 'gitlab.com' if host == 'GitLab' else 'github.com'
-        remote_url = f'https://{domain}/{user}/{langcode}.git'
+        remote_url = f'https://github.com/{user}/{langcode}.git'
         name = prefs.get('collab_name', '') or 'Recorder'
         import threading
         def _worker():
             try:
                 from collab import init_repo
                 result = init_repo(self.recorder.db.dir, remote_url,
-                                   user, token, 'main', name)
+                                   'x-access-token', token, 'main', name)
                 print(f'[auto-publish] {result}')
             except Exception as ex:
                 print(f'[auto-publish] error: {ex}')
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _record_sync_time(self):
+        """Save current time as last successful sync."""
+        import time
+        prefs = self._load_prefs()
+        prefs['last_sync'] = time.time()
+        self._save_prefs_dict(prefs)
+        Clock.schedule_once(lambda dt: self._update_sync_status(), 0)
+
+    def _sync_status_text(self):
+        """Return human-readable sync age: '' if today, 'yesterday', '-N days'."""
+        import time, datetime
+        prefs = self._load_prefs()
+        ts = prefs.get('last_sync', 0)
+        if not ts:
+            return ''
+        dt_sync = datetime.datetime.fromtimestamp(ts)
+        now = datetime.datetime.now()
+        today = now.date()
+        sync_date = dt_sync.date()
+        time_str = dt_sync.strftime('%H:%M')
+        days = (today - sync_date).days
+        if days == 0:
+            return time_str
+        elif days == 1:
+            return f'yesterday {time_str}'
+        else:
+            return f'-{days}d {time_str}'
+
+    def _update_sync_status(self):
+        """Push sync status text into the recorder top bar."""
+        sm = self.root.ids.sm
+        rec_screen = sm.get_screen('recorder')
+        lbl = rec_screen.ids.get('sync_status_label')
+        if lbl:
+            lbl.text = self._sync_status_text()
 
     def _auto_commit_sync(self):
         """Background: commit new audio and .lift changes, sync if online."""
@@ -2493,18 +3411,68 @@ class LIFTRecorderApp(App):
             return
         prefs = self._load_prefs()
         name = prefs.get('collab_name', '') or 'Recorder'
-        user = prefs.get('collab_username', '')
-        token = prefs.get('collab_token', '')
+        _, token = self._get_gh_credentials()
         project_dir = self.recorder.db.dir
         import threading
         def _worker():
             try:
                 from collab import commit_audio_and_sync
-                result = commit_audio_and_sync(project_dir, name, user, token)
+                result = commit_audio_and_sync(
+                    project_dir, name, 'x-access-token', token)
                 print(f'[auto-sync] {result}')
+                if 'pushed' in result.lower() or 'Pushed' in result:
+                    Clock.schedule_once(lambda dt: self._record_sync_time(), 0)
             except Exception as ex:
                 print(f'[auto-sync] error: {ex}')
         threading.Thread(target=_worker, daemon=True).start()
+
+    def show_start_over(self):
+        """Show template/image repo info, then navigate to welcome screen."""
+        from kivy.uix.popup import Popup
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.label import Label
+        from kivy.uix.button import Button
+
+        content = BoxLayout(orientation='vertical', spacing=dp(12), padding=dp(12))
+        template = ''
+        image_repo = ''
+        if self.recorder:
+            template = self.recorder.db.list_type or '(unknown)'
+            image_repo = self.recorder.db.image_repo or 'https://github.com/kent-rasmussen/images_CAWL'
+        content.add_widget(Label(
+            text=f'Template: {template}\nImage repo: {image_repo}',
+            font_size=sp(14), font_name=_FONT_NAME,
+            color=(0.94, 0.91, 0.86, 1),
+            size_hint_y=None, height=dp(60),
+            halign='left', valign='top',
+            text_size=(dp(280), None),
+        ))
+        content.add_widget(Label(
+            text='Start a new project or switch projects?',
+            font_size=sp(14), font_name=_FONT_NAME,
+            color=(0.5412, 0.4784, 0.4157, 1),
+            size_hint_y=None, height=dp(30),
+        ))
+        btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
+        cancel_btn = Button(text='Cancel', font_size=sp(14))
+        go_btn = Button(text='Start over', font_size=sp(14),
+                        background_color=(0.7882, 0.4824, 0.2275, 1))
+        btn_row.add_widget(cancel_btn)
+        btn_row.add_widget(go_btn)
+        content.add_widget(btn_row)
+
+        popup = Popup(
+            title='Current project',
+            content=content,
+            size_hint=(0.9, None), height=dp(240),
+            auto_dismiss=True,
+        )
+        cancel_btn.bind(on_release=popup.dismiss)
+        def _go(*a):
+            popup.dismiss()
+            self.go_welcome()
+        go_btn.bind(on_release=_go)
+        popup.open()
 
     def go_welcome(self):
         self._auto_commit_sync()
@@ -2573,8 +3541,7 @@ class LIFTRecorderApp(App):
             return
         prefs = self._load_prefs()
         name = prefs.get('collab_name', '') or 'Recorder'
-        user = prefs.get('collab_username', '')
-        token = prefs.get('collab_token', '')
+        _, token = self._get_gh_credentials()
         from collab import sync_repo, run_async
 
         saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''
@@ -2584,9 +3551,22 @@ class LIFTRecorderApp(App):
                 lambda dt: self._reload_and_restore(saved_guid), 0)
             return result
 
+        def _on_sync_done(result):
+            print(f'Sync: {result}')
+            if 'Pushed' in (result or ''):
+                self._record_sync_time()
         run_async(_sync_and_reload,
-                  self.recorder.db.dir, user, token, name,
-                  on_done=lambda result: print(f'Sync: {result}'))
+                  self.recorder.db.dir, 'x-access-token', token, name,
+                  on_done=_on_sync_done)
+
+    def show_image_picker(self):
+        if not self.recorder or not self.recorder.current:
+            return
+        sm = self.root.ids.sm
+        picker = sm.get_screen('imagepicker')
+        picker.populate(self.recorder.current)
+        sm.transition = SlideTransition(direction='left')
+        sm.current = 'imagepicker'
 
     def go_recorder(self):
         sm = self.root.ids.sm
@@ -2604,11 +3584,134 @@ class LIFTRecorderApp(App):
 
     def nav_prev(self):
         if self.recorder:
+            self._save_remote_image()
             self.recorder.go_prev()
+            self._auto_commit_sync()
 
     def nav_next(self):
         if self.recorder:
+            self._save_remote_image()
             self.recorder.go_next()
+            self._auto_commit_sync()
+
+    def _save_remote_image(self):
+        """If the current entry's image is from cache or remote URL, copy/save
+        it to the git images/ dir so it gets committed on swipe."""
+        if not self.recorder:
+            return
+        entry = self.recorder.current
+        if not entry:
+            return
+        img_path = entry.get('image_path', '')
+        if not img_path:
+            return  # no image
+        # Already in git images/ dir
+        db = self.recorder.db
+        if img_path.startswith(db.images_dir):
+            return
+        filename = db.imagename(entry)
+        dest = os.path.join(db.images_dir, filename)
+        if os.path.exists(dest):
+            return  # already saved locally
+        # If image is from cache, just copy the file
+        cache_dir = self._get_image_cache_dir()
+        if img_path.startswith(cache_dir) and os.path.exists(img_path):
+            import threading, shutil
+            threading.Thread(
+                target=self._copy_cached_to_images,
+                args=(img_path, dest, entry), daemon=True).start()
+            return
+        # Remote URL — try texture first, then download
+        if not img_path.startswith('http'):
+            return
+        import threading
+        sm = self.root.ids.sm
+        rec_screen = sm.get_screen('recorder')
+        img_widget = rec_screen.ids.get('entry_image')
+        if img_widget and img_widget.texture:
+            tex = img_widget.texture
+            pixels = tex.pixels
+            w, h = tex.size
+            threading.Thread(
+                target=self._save_texture_to_file,
+                args=(pixels, w, h, dest, entry), daemon=True).start()
+        else:
+            threading.Thread(
+                target=self._download_remote_image,
+                args=(img_path, dest, entry), daemon=True).start()
+
+    def _copy_cached_to_images(self, src, dest, entry):
+        """Copy a cached image to images/ dir and update LIFT XML."""
+        try:
+            import shutil
+            from PIL import Image as PILImage
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            # Scale if needed
+            img = PILImage.open(src)
+            w, h = img.size
+            max_dim = 1284
+            if w > max_dim or h > max_dim:
+                ratio = min(max_dim / w, max_dim / h)
+                img = img.resize((int(w * ratio), int(h * ratio)),
+                                 PILImage.LANCZOS)
+                img.save(dest, 'PNG')
+            else:
+                shutil.copy2(src, dest)
+            entry['image_path'] = dest
+            entry['illustration_href'] = os.path.basename(dest)
+            guid = entry.get('guid', '')
+            self.recorder.db.set_illustration(guid, os.path.basename(dest))
+            print(f'[image-save] copied from cache to {dest}')
+        except Exception as ex:
+            print(f'[image-save] cache copy error: {ex}')
+
+    def _save_texture_to_file(self, pixels, w, h, dest, entry):
+        """Save raw RGBA pixel data to a PNG file."""
+        try:
+            from PIL import Image as PILImage
+            img = PILImage.frombytes('RGBA', (w, h), pixels)
+            img = img.transpose(PILImage.FLIP_TOP_BOTTOM)  # Kivy textures are flipped
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            max_dim = 1284
+            if w > max_dim or h > max_dim:
+                ratio = min(max_dim / w, max_dim / h)
+                img = img.resize((int(w * ratio), int(h * ratio)),
+                                 PILImage.LANCZOS)
+            img.save(dest, 'PNG')
+            entry['image_path'] = dest
+            entry['illustration_href'] = os.path.basename(dest)
+            guid = entry.get('guid', '')
+            self.recorder.db.set_illustration(guid, os.path.basename(dest))
+            print(f'[image-save] saved from texture to {dest}')
+        except Exception as ex:
+            print(f'[image-save] texture save error: {ex}')
+
+    def _download_remote_image(self, url, dest, entry):
+        """Fallback: download a remote image to local images/ dir."""
+        try:
+            import urllib.request
+            ctx = self._ssl_context()
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+                data = resp.read()
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            from PIL import Image as PILImage
+            import io
+            img = PILImage.open(io.BytesIO(data))
+            max_dim = 1284
+            w, h = img.size
+            if w > max_dim or h > max_dim:
+                ratio = min(max_dim / w, max_dim / h)
+                img = img.resize((int(w * ratio), int(h * ratio)),
+                                 PILImage.LANCZOS)
+            img.save(dest, 'PNG')
+            entry['image_path'] = dest
+            entry['illustration_href'] = os.path.basename(dest)
+            guid = entry.get('guid', '')
+            self.recorder.db.set_illustration(guid, os.path.basename(dest))
+            print(f'[image-save] downloaded remote image to {dest}')
+        except Exception as ex:
+            print(f'[image-save] download error: {ex}')
 
     def play_audio(self):
         if self.recorder:
@@ -2741,20 +3844,6 @@ class LIFTRecorderApp(App):
         owner_input.bind(text=_update_url)
         repo_input.bind(text=_update_url)
 
-        # Auth credentials
-        user_input = TextInput(
-            text=prefs.get('collab_username', ''),
-            hint_text='Your git username',
-            multiline=False, size_hint_y=None, height=dp(44), font_size=sp(14),
-        )
-        token_input = TextInput(
-            text=prefs.get('collab_token', ''),
-            hint_text='Personal access token', password=True,
-            multiline=False, size_hint_y=None, height=dp(44), font_size=sp(14),
-        )
-        content.add_widget(user_input)
-        content.add_widget(token_input)
-
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
         cancel_btn = Button(text='Cancel', font_size=sp(14))
         clone_btn = Button(text='Clone', font_size=sp(14),
@@ -2766,21 +3855,18 @@ class LIFTRecorderApp(App):
         popup = Popup(
             title='Clone Repository',
             content=content,
-            size_hint=(0.9, None), height=dp(440),
+            size_hint=(0.9, None), height=dp(340),
             auto_dismiss=True,
         )
 
         def _do_clone(*args):
             clone_url = url_label.text.strip()
-            user = user_input.text.strip()
-            token = token_input.text.strip()
             popup.dismiss()
             if not clone_url:
                 return
-            # Save credentials and clone prefs for future use
+            _, token = self._get_gh_credentials()
+            # Save clone prefs for future use
             prefs = self._load_prefs()
-            prefs['collab_username'] = user
-            prefs['collab_token'] = token
             prefs['clone_host'] = host_spinner.text
             prefs['clone_owner'] = owner_input.text.strip()
             self._save_prefs_dict(prefs)
@@ -2792,7 +3878,8 @@ class LIFTRecorderApp(App):
             from collab import clone_repo
 
             def _worker():
-                lift_path, log = clone_repo(clone_url, dest, user, token)
+                lift_path, log = clone_repo(
+                    clone_url, dest, 'x-access-token', token)
                 if lift_path:
                     Clock.schedule_once(lambda dt: self.load_lift(lift_path), 0)
                 else:
@@ -2818,11 +3905,18 @@ class LIFTRecorderApp(App):
         if 'progress_label' in ids:
             ids.progress_label.text = r.progress_text
 
+        # Sync status
+        self._update_sync_status()
+
         # Image — size to actual width, maintaining aspect ratio
         if 'entry_image' in ids:
             img = ids.entry_image
             if r.has_image:
-                img.source = r.image_path
+                new_src = r.image_path
+                if img.source == new_src:
+                    img.reload()
+                else:
+                    img.source = new_src
                 img.opacity = 1
                 # Bind texture size to compute correct height once loaded
                 def _resize_image(img_ref, *args):

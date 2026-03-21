@@ -1,5 +1,5 @@
 """
-Git collaboration support for LIFT Recorder.
+Git collaboration support for A-Z+T Recorder.
 
 Uses dulwich (pure Python git) so it works on Android without a system git binary.
 
@@ -9,14 +9,35 @@ Workflow
 * Clone:    clone a remote repo, find the .lift file, open it.
 * Pull:     fetch + fast-forward merge from origin.
 * Push branch: stage + commit all changes, push to contrib/<name> for a PR.
+
+Authentication
+--------------
+Uses a GitHub App ("A-Z+T Recorder") with device flow for user authentication.
+Only the public client_id is embedded in the app — no private key needed.
+Tokens are stored locally and refreshed automatically.
 """
 
 import io
+import json
+import logging
 import os
 import ssl
 import threading
+import time
 
 from kivy.clock import Clock
+
+# Suppress dulwich debug/info logging (gitconfig path spam)
+logging.getLogger('dulwich').setLevel(logging.WARNING)
+
+# ── GitHub App configuration ─────────────────────────────────────────────────
+# Register your GitHub App at https://github.com/settings/apps
+# Enable "Device Flow" in the app settings.
+# Required permissions: Repository → Administration: Write, Contents: Write
+# Set these after creating the app:
+GITHUB_APP_CLIENT_ID = 'Iv23li66Fo9MBReatv6i'  # set after registering the GitHub App
+GITHUB_APP_NAME = 'a-z-t-recorder'
+GITHUB_COLLABORATOR = 'kent-rasmussen'  # auto-added to new repos
 
 # ── SSL fix for Android (missing CA bundle) ──────────────────────────────────
 # On Android, p4a doesn't ship system CA certs.  dulwich's
@@ -125,6 +146,276 @@ def _ensure_ssl():
 
 
 # ---------------------------------------------------------------------------
+# GitHub App Device Flow authentication
+# ---------------------------------------------------------------------------
+
+def device_flow_start():
+    """Begin device flow. Returns dict with 'user_code', 'verification_uri',
+    'device_code', 'interval', 'expires_in' — or raises on error."""
+    _ensure_ssl()
+    from urllib.request import Request, urlopen
+    req = Request(
+        'https://github.com/login/device/code',
+        data=f'client_id={GITHUB_APP_CLIENT_ID}&scope=repo'.encode(),
+        headers={'Accept': 'application/json'},
+        method='POST',
+    )
+    with urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read())
+
+
+def device_flow_poll(device_code, interval=5, expires_in=900):
+    """Poll until user authorizes or timeout. Returns token dict or raises.
+
+    Token dict keys: access_token, refresh_token, token_type, etc.
+    Blocks the calling thread (run in background).
+    """
+    _ensure_ssl()
+    from urllib.request import Request, urlopen
+    from urllib.error import HTTPError
+    deadline = time.time() + expires_in
+    while time.time() < deadline:
+        time.sleep(interval)
+        data = (
+            f'client_id={GITHUB_APP_CLIENT_ID}'
+            f'&device_code={device_code}'
+            f'&grant_type=urn:ietf:params:oauth:grant-type:device_code'
+        ).encode()
+        req = Request(
+            'https://github.com/login/oauth/access_token',
+            data=data,
+            headers={'Accept': 'application/json'},
+            method='POST',
+        )
+        try:
+            with urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read())
+        except HTTPError:
+            continue
+        if 'access_token' in result:
+            return result
+        error = result.get('error', '')
+        if error == 'authorization_pending':
+            continue
+        elif error == 'slow_down':
+            interval = result.get('interval', interval + 5)
+            continue
+        elif error == 'expired_token':
+            raise RuntimeError('Authorization expired. Please try again.')
+        elif error == 'access_denied':
+            raise RuntimeError('Authorization denied by user.')
+        else:
+            raise RuntimeError(f'Device flow error: {error}')
+    raise RuntimeError('Authorization timed out.')
+
+
+def refresh_access_token(refresh_token):
+    """Refresh an expired access token. Returns new token dict."""
+    _ensure_ssl()
+    from urllib.request import Request, urlopen
+    data = (
+        f'client_id={GITHUB_APP_CLIENT_ID}'
+        f'&grant_type=refresh_token'
+        f'&refresh_token={refresh_token}'
+    ).encode()
+    req = Request(
+        'https://github.com/login/oauth/access_token',
+        data=data,
+        headers={'Accept': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+    except Exception as ex:
+        raise RuntimeError(f'Token refresh network error: {ex}')
+    if 'access_token' in result:
+        return result
+    raise RuntimeError(f'Token refresh failed: {result.get("error", "unknown")}')
+
+
+def get_github_username(token):
+    """Return the authenticated user's GitHub username."""
+    _ensure_ssl()
+    from urllib.request import Request, urlopen
+    req = Request(
+        'https://api.github.com/user',
+        headers={
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/vnd.github+json',
+        },
+    )
+    try:
+        with urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read()).get('login', '')
+    except Exception as ex:
+        print(f'[collab] get_github_username failed: {ex}')
+        return ''
+
+
+def check_app_installed(token):
+    """Check if the GitHub App is installed for the authenticated user.
+    Returns dict: {'installed': bool, 'installation_id': int|None,
+                    'all_repos': bool}."""
+    _ensure_ssl()
+    from urllib.request import Request, urlopen
+    from urllib.error import HTTPError
+    result = {'installed': False, 'installation_id': None, 'all_repos': False}
+    req = Request(
+        'https://api.github.com/user/installations',
+        headers={
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/vnd.github+json',
+        },
+    )
+    try:
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        for inst in data.get('installations', []):
+            if inst.get('app_slug') == GITHUB_APP_NAME:
+                result['installed'] = True
+                result['installation_id'] = inst.get('id')
+                # 'all' means all repos, 'selected' means specific repos
+                result['all_repos'] = (
+                    inst.get('repository_selection') == 'all')
+                break
+    except HTTPError:
+        pass
+    return result
+
+
+def check_repo_in_installation(token, installation_id, owner, repo_name):
+    """Check if a specific repo is accessible to the app installation.
+    Returns True if accessible, False otherwise."""
+    _ensure_ssl()
+    from urllib.request import Request, urlopen
+    from urllib.error import HTTPError
+    # List repos accessible to the installation (paginated, check first page)
+    req = Request(
+        f'https://api.github.com/user/installations/{installation_id}'
+        f'/repositories?per_page=100',
+        headers={
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/vnd.github+json',
+        },
+    )
+    try:
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        for r in data.get('repositories', []):
+            if r.get('full_name', '').lower() == f'{owner}/{repo_name}'.lower():
+                return True
+        return False
+    except HTTPError:
+        return False
+
+
+def app_install_url(installation_id=None):
+    """Return the URL to install or configure the GitHub App."""
+    if installation_id:
+        return f'https://github.com/settings/installations/{installation_id}'
+    return f'https://github.com/apps/{GITHUB_APP_NAME}/installations/new'
+
+
+GITHUB_APP_INSTALL_URL = f'https://github.com/apps/{GITHUB_APP_NAME}/installations/new'
+
+
+def _diagnose_403(token, remote_url):
+    """Diagnose a 403 push/pull failure. Returns a human-readable message."""
+    if not token:
+        return 'Not connected to GitHub. Go to Setup > Connect to GitHub.'
+    info = check_app_installed(token)
+    if not info['installed']:
+        return (f'App not installed. Visit {GITHUB_APP_INSTALL_URL} '
+                f'and select "All repositories".')
+    # App is installed — check if this repo is accessible
+    install_id = info['installation_id']
+    if not info['all_repos']:
+        # Extract owner/repo from remote URL
+        import re
+        m = re.search(r'github\.com[/:]([^/]+)/([^/.]+)', remote_url)
+        if m:
+            owner, repo_name = m.group(1), m.group(2)
+            if not check_repo_in_installation(token, install_id, owner, repo_name):
+                settings_url = app_install_url(install_id)
+                return (f'App not authorized for {owner}/{repo_name}. '
+                        f'Add it at {settings_url}')
+    return f'Access denied (403). Check app permissions at {app_install_url(install_id)}'
+
+
+def add_collaborator(owner, repo_name, collaborator, token):
+    """Add *collaborator* to *owner/repo_name* on GitHub. Silently succeeds if
+    already a collaborator or if the invitation was already sent."""
+    _ensure_ssl()
+    from urllib.request import Request, urlopen
+    from urllib.error import HTTPError
+    url = f'https://api.github.com/repos/{owner}/{repo_name}/collaborators/{collaborator}'
+    req = Request(
+        url,
+        data=json.dumps({'permission': 'push'}).encode(),
+        headers={
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+        },
+        method='PUT',
+    )
+    try:
+        with urlopen(req, timeout=15) as resp:
+            pass  # 201 = invited, 204 = already collaborator
+    except HTTPError as e:
+        if e.code not in (204, 422):  # 422 = already invited
+            print(f'[collab] add collaborator failed ({e.code}): {e.read()[:200]}')
+
+
+# ---------------------------------------------------------------------------
+# Token storage helpers (called from main.py app)
+# ---------------------------------------------------------------------------
+
+def save_tokens(prefs_path, token_data, username=''):
+    """Persist token data to the prefs file."""
+    try:
+        with open(prefs_path) as f:
+            prefs = json.load(f)
+    except Exception:
+        prefs = {}
+    prefs['gh_access_token'] = token_data.get('access_token', '')
+    prefs['gh_refresh_token'] = token_data.get('refresh_token', '')
+    prefs['gh_token_time'] = time.time()
+    if username:
+        prefs['gh_username'] = username
+    os.makedirs(os.path.dirname(prefs_path), exist_ok=True)
+    with open(prefs_path, 'w') as f:
+        json.dump(prefs, f)
+
+
+def get_valid_token(prefs_path):
+    """Return (username, access_token) with automatic refresh if expired.
+    Returns ('', '') if no token stored or refresh fails."""
+    try:
+        with open(prefs_path) as f:
+            prefs = json.load(f)
+    except Exception:
+        return '', ''
+    token = prefs.get('gh_access_token', '')
+    refresh = prefs.get('gh_refresh_token', '')
+    username = prefs.get('gh_username', '')
+    token_time = prefs.get('gh_token_time', 0)
+    if not token:
+        return '', ''
+    # Access tokens last 8 hours; refresh proactively at 7h
+    if time.time() - token_time > 7 * 3600 and refresh:
+        try:
+            new_data = refresh_access_token(refresh)
+            save_tokens(prefs_path, new_data, username)
+            token = new_data['access_token']
+        except Exception as ex:
+            print(f'[collab] token refresh failed: {ex}')
+            # Return the old token — it might still work
+    return username, token
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -187,12 +478,17 @@ def _default_author(contributor_name):
     return _enc(f'{contributor_name} <{safe}@device>')
 
 
+def _app_committer():
+    """Return committer identity for the A-Z+T Recorder app."""
+    return _enc(f'{GITHUB_APP_NAME}[bot] <{GITHUB_APP_NAME}[bot]@users.noreply.github.com>')
+
+
 def _ensure_remote_repo(remote_url, username, token):
     """Create the remote repo on GitHub/GitLab if it doesn't exist yet.
+    On GitHub, also adds GITHUB_COLLABORATOR to the repo.
 
     Returns (ok, message).
     """
-    import json
     from urllib.request import Request, urlopen
     from urllib.error import HTTPError, URLError
 
@@ -213,7 +509,7 @@ def _ensure_remote_repo(remote_url, username, token):
             'auto_init': False,
         }).encode()
         headers = {
-            'Authorization': f'token {token}',
+            'Authorization': f'Bearer {token}',
             'Accept': 'application/vnd.github+json',
             'Content-Type': 'application/json',
         }
@@ -231,18 +527,30 @@ def _ensure_remote_repo(remote_url, username, token):
     else:
         return True, ''   # Unknown host — assume repo exists, let push fail
 
+    created = False
     try:
         req = Request(api_url, data=payload, headers=headers, method='POST')
-        resp = urlopen(req, timeout=30)
-        return True, f'Created remote repository {owner}/{repo_name}.'
+        urlopen(req, timeout=30)
+        created = True
     except HTTPError as e:
         body = e.read().decode('utf-8', errors='replace')
         # 422 = already exists (GitHub), 400 = already exists (GitLab)
         if e.code in (422, 400) and 'already' in body.lower():
-            return True, ''   # Already exists — fine
-        return False, f'Create repo failed ({e.code}): {body[:200]}'
+            pass   # Already exists — fine
+        else:
+            return False, f'Create repo failed ({e.code}): {body[:200]}'
     except (URLError, OSError) as e:
         return False, f'Create repo failed: {e}'
+
+    # Add collaborator on GitHub repos
+    if 'github.com' in host and GITHUB_COLLABORATOR:
+        try:
+            add_collaborator(owner, repo_name, GITHUB_COLLABORATOR, token)
+        except Exception as ex:
+            print(f'[collab] add collaborator warning: {ex}')
+
+    msg = f'Created remote repository {owner}/{repo_name}.' if created else ''
+    return True, msg
 
 
 # ---------------------------------------------------------------------------
@@ -315,17 +623,18 @@ def init_repo(project_dir, remote_url, username, token,
     gitignore = os.path.join(project_dir, '.gitignore')
     if not os.path.exists(gitignore):
         with open(gitignore, 'w') as fh:
-            fh.write('__pycache__/\n*.pyc\n.buildozer/\nenv/\n.DS_Store\n')
+            fh.write('__pycache__/\n*.pyc\n.buildozer/\nenv/\n.DS_Store\nimage_cache/\n')
         log.append('Created .gitignore.')
 
     # Stage + commit
     _stage_all(repo, project_dir)
     author = _default_author(contributor_name)
+    committer = _app_committer()
     try:
         sha = porcelain.commit(
             repo,
             message=_enc(f'Initial commit by {contributor_name}'),
-            author=author, committer=author,
+            author=author, committer=committer,
         )
         sha_str = sha[:8].decode() if isinstance(sha, bytes) else str(sha)[:8]
         log.append(f'Committed ({sha_str}).')
@@ -474,11 +783,12 @@ def commit_and_push_branch(project_dir, username, token, contributor_name):
 
     # Commit
     author = _default_author(contributor_name)
+    committer = _app_committer()
     try:
         porcelain.commit(
             repo,
             message=_enc(f'Audio recordings by {contributor_name}'),
-            author=author, committer=author,
+            author=author, committer=committer,
         )
         log.append('Committed.')
     except Exception as exc:
@@ -532,6 +842,9 @@ def sync_repo(project_dir, username, token, contributor_name):
         )
         log.append('Pulled latest changes.')
     except Exception as exc:
+        if '403' in str(exc):
+            log.append(f'Pull failed: {_diagnose_403(token, remote_url)}')
+            return '\n'.join(log)  # no point continuing
         log.append(f'Pull failed: {exc}')
 
     # Stage all
@@ -542,11 +855,12 @@ def sync_repo(project_dir, username, token, contributor_name):
     has_staged = any(st.staged.get(k) for k in ('add', 'modify', 'delete'))
     if has_staged:
         author = _default_author(contributor_name)
+        committer = _app_committer()
         try:
             porcelain.commit(
                 repo,
                 message=_enc(f'Audio recordings by {contributor_name}'),
-                author=author, committer=author,
+                author=author, committer=committer,
             )
             log.append('Committed local changes.')
         except Exception as exc:
@@ -568,7 +882,10 @@ def sync_repo(project_dir, username, token, contributor_name):
         )
         log.append(f'Pushed to {branch}.')
     except Exception as exc:
-        log.append(f'Push failed: {exc}')
+        if '403' in str(exc):
+            log.append(f'Push failed: {_diagnose_403(token, remote_url)}')
+        else:
+            log.append(f'Push failed: {exc}')
 
     return '\n'.join(log)
 
@@ -581,7 +898,9 @@ def _stage_audio(repo, project_dir):
 
     def _is_audio_or_lift(p):
         s = p if isinstance(p, str) else p.decode('utf-8', errors='replace')
-        return s.startswith('audio/') or s.endswith('.lift')
+        return (s.startswith('audio/') or s.startswith('images/')
+                or s == 'audio' or s == 'images'
+                or s.endswith('.lift'))
 
     for f in status.unstaged:
         if _is_audio_or_lift(f):
@@ -646,11 +965,12 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
 
     # Commit
     author = _default_author(contributor_name)
+    committer = _app_committer()
     try:
         porcelain.commit(
             repo,
             message=_enc(f'Audio recordings by {contributor_name}'),
-            author=author, committer=author,
+            author=author, committer=committer,
         )
     except Exception as exc:
         return f'Commit failed: {exc}'
@@ -667,11 +987,25 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
     except KeyError:
         return 'Committed (no remote configured)'
 
-    # Push
     try:
         branch = porcelain.active_branch(repo).decode('utf-8', errors='replace')
     except Exception:
         branch = 'main'
+
+    # Pull first (fetch + merge) so push won't be rejected
+    try:
+        porcelain.pull(
+            repo, remote_url,
+            username=username, password=token,
+            errstream=io.BytesIO(),
+        )
+    except Exception as exc:
+        if '403' in str(exc):
+            return f'Committed locally, sync failed: {_diagnose_403(token, remote_url)}'
+        # Non-fatal — local commit is safe, push may still work
+        print(f'[auto-sync] pull warning: {exc}')
+
+    # Push
     refspec = _enc(f'refs/heads/{branch}:refs/heads/{branch}')
     try:
         porcelain.push(
@@ -681,6 +1015,8 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
         )
         return f'Committed and pushed {n} file(s)'
     except Exception as exc:
+        if '403' in str(exc):
+            return f'Committed locally, push failed: {_diagnose_403(token, remote_url)}'
         return f'Committed locally, push failed: {exc}'
 
 

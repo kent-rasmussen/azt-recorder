@@ -16,3 +16,12 @@ Whether you are starting now, or continuing work, you will want to share it.
 - select Github (or Gitlab)
 - create an account there, if you don't have one already
 - input your 
+
+1. Tap "Connect to GitHub"
+2. App shows: "Go to github.com/login/device and enter code WDJB-MJHT"
+3. User opens a browser, enters the code, clicks "Authorize"
+4. App automatically detects authorization and is ready to go
+
+  No PATs, no tokens, no git usernames. Just a one-time code entry.
+
+

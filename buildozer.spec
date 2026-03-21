@@ -16,7 +16,7 @@ requirements = python3,kivy==2.3.1,pillow,sounddevice,soundfile,numpy,dulwich,ce
 orientation = portrait
 fullscreen = 0
 
-android.permissions = INTERNET,RECORD_AUDIO,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE
+android.permissions = INTERNET,RECORD_AUDIO,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE,CAMERA
 #android.api = 33
 android.minapi = 26
 android.archs = arm64-v8a, armeabi-v7a
