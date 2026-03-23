@@ -14,7 +14,8 @@ import sys
 import traceback
 import warnings
 
-from appinfo import APP_NAME, APP_TAGLINE, APP_USER_AGENT
+from appinfo import APP_NAME, APP_TAGLINE, APP_USER_AGENT, APP_ICON
+import theme
 
 os.environ.setdefault('KIVY_NO_ENV_CONFIG', '1')
 warnings.filterwarnings('ignore', message='.*olefile.*')
@@ -166,6 +167,7 @@ _FONT_NAME = 'CharisSIL' if _CHARIS_AVAILABLE else 'Roboto'
 KV_TEMPLATE = '''
 #:import dp kivy.metrics.dp
 #:import sp kivy.metrics.sp
+#:import T theme
 #:set FONT '{font_name}'
 
 <RootScreen>:
@@ -184,19 +186,10 @@ KV_TEMPLATE = '''
         ImagePickerScreen:
             name: 'imagepicker'
 
-# ── Colour palette (dark, warm) ────────────────────────────────────────────────
-#   bg      #1a1612
-#   surface #2a2320
-#   accent  #c97b3a
-#   text    #f0e8dc
-#   dim     #8a7a6a
-#   red     #c0392b
-#   green   #27ae60
-
 <WelcomeScreen>:
     canvas.before:
         Color:
-            rgba: (0.102, 0.0863, 0.0706, 1)
+            rgba: T.BG
         Rectangle:
             pos: self.pos
             size: self.size
@@ -207,9 +200,9 @@ KV_TEMPLATE = '''
         Widget:
             size_hint_y: 0.05
         Image:
-            source: 'icons/icon.png'
+            source: app.icon #'icons/icon.png'
             size_hint: None, None
-            size: dp(120), dp(120)
+            size: dp(240), dp(240)
             pos_hint: {{'center_x': 0.5}}
             allow_stretch: True
             keep_ratio: True
@@ -218,34 +211,34 @@ KV_TEMPLATE = '''
             font_size: sp(28)
             font_name: FONT
             bold: True
-            color: (0.7882, 0.4824, 0.2275, 1)
+            color: T.ACCENT
             size_hint_y: None
             height: dp(50)
         Label:
             text: 'Open or create a LIFT lexicon'
             font_size: sp(16)
             font_name: FONT
-            color: (0.5412, 0.4784, 0.4157, 1)
+            color: T.TEXT_DIM
             size_hint_y: None
             height: dp(30)
         Widget:
             size_hint_y: 0.08
         RecBtn:
             text: 'From Phone'
-            normal_color: (0.7882, 0.4824, 0.2275, 1)
+            normal_color: T.ACCENT
             on_release: app.open_file()
         RecBtn:
             text: 'From Internet'
-            normal_color: (0.3922, 0.3137, 0.2353, 1)
+            normal_color: T.BTN_INACTIVE
             on_release: app.open_url_dialog()
         RecBtn:
             text: 'Clone Repository'
-            normal_color: (0.3922, 0.3137, 0.2353, 1)
+            normal_color: T.BTN_INACTIVE
             on_release: app.clone_dialog()
         RecBtn:
             text: 'Start New'
-            normal_color: (0.3922, 0.3137, 0.2353, 1)
-            on_release: app.new_from_template()
+            normal_color: T.BTN_INACTIVE
+            on_release: app.show_start_over() #< should be Start a new wordlist
         # ── Existing projects ─────────────────────────────────────
         BoxLayout:
             id: project_list
@@ -259,7 +252,7 @@ KV_TEMPLATE = '''
             text: app.version_string
             font_size: sp(11)
             font_name: FONT
-            color: (0.2902, 0.2275, 0.1647, 1)
+            color: T.TEXT_FAINT
             size_hint_y: None
             height: dp(20)
             halign: 'center'
@@ -268,7 +261,7 @@ KV_TEMPLATE = '''
 <RecorderScreen>:
     canvas.before:
         Color:
-            rgba: (0.102, 0.0863, 0.0706, 1)
+            rgba: T.BG
         Rectangle:
             pos: self.pos
             size: self.size
@@ -283,7 +276,7 @@ KV_TEMPLATE = '''
             spacing: dp(8)
             canvas.before:
                 Color:
-                    rgba: (0.1647, 0.1373, 0.1255, 1)
+                    rgba: T.SURFACE
                 Rectangle:
                     pos: self.pos
                     size: self.size
@@ -292,17 +285,17 @@ KV_TEMPLATE = '''
                 text: ''
                 font_size: sp(13)
                 font_name: FONT
-                color: (0.5412, 0.4784, 0.4157, 1)
+                color: T.TEXT_DIM
                 halign: 'left'
                 valign: 'middle'
                 text_size: self.size
-                background_color: 0, 0, 0, 0
+                background_color: T.TRANSPARENT
                 background_normal: ''
                 on_release: app.show_goto_dialog()
                 size_hint_x: 1
             Button:
                 size_hint_x: 1
-                background_color: 0, 0, 0, 0
+                background_color: T.TRANSPARENT
                 background_normal: ''
                 on_release: app.do_sync()
                 BoxLayout:
@@ -321,14 +314,14 @@ KV_TEMPLATE = '''
                         text: ''
                         font_size: sp(20)
                         font_name: FONT
-                        color: (0.7, 0.62, 0.55, 1)
+                        color: T.TEXT_MID
                         halign: 'left'
                         valign: 'middle'
                         text_size: self.size
             Button:
                 size_hint_x: None
                 width: dp(44)
-                background_color: 0, 0, 0, 0
+                background_color: T.TRANSPARENT
                 background_normal: ''
                 on_release: app.go_config()
                 Image:
@@ -357,7 +350,7 @@ KV_TEMPLATE = '''
                 size_hint: None, None
                 size: dp(80), dp(80)
                 pos: image_container.x + image_container.width - self.width - dp(4), image_container.y + dp(4)
-                background_color: 0, 0, 0, 0
+                background_color: T.TRANSPARENT
                 background_normal: ''
                 opacity: 1 if entry_image.opacity > 0 else 0
                 disabled: entry_image.opacity == 0
@@ -381,7 +374,7 @@ KV_TEMPLATE = '''
             text: ''
             font_size: sp(12)
             font_name: FONT
-            color: (0.5412, 0.4784, 0.4157, 1)
+            color: T.TEXT_DIM
             size_hint_y: None
             height: dp(28)
             halign: 'center'
@@ -399,7 +392,7 @@ KV_TEMPLATE = '''
 <ConfigScreen>:
     canvas.before:
         Color:
-            rgba: (0.102, 0.0863, 0.0706, 1)
+            rgba: T.BG
         Rectangle:
             pos: self.pos
             size: self.size
@@ -412,7 +405,7 @@ KV_TEMPLATE = '''
             padding: dp(8), dp(6)
             canvas.before:
                 Color:
-                    rgba: (0.1647, 0.1373, 0.1255, 1)
+                    rgba: T.SURFACE
                 Rectangle:
                     pos: self.pos
                     size: self.size
@@ -420,7 +413,7 @@ KV_TEMPLATE = '''
                 text: app.version_string
                 font_size: sp(11)
                 font_name: FONT
-                color: (0.5412, 0.4784, 0.4157, 1)
+                color: T.TEXT_DIM
                 halign: 'left'
                 valign: 'middle'
                 text_size: self.size
@@ -429,7 +422,7 @@ KV_TEMPLATE = '''
             Button:
                 size_hint_x: None
                 width: dp(44)
-                background_color: 0, 0, 0, 0
+                background_color: T.TRANSPARENT
                 background_normal: ''
                 on_release: app.share_apk()
                 Image:
@@ -445,7 +438,7 @@ KV_TEMPLATE = '''
                 text: 'X'
                 size_hint_x: None
                 width: dp(44)
-                on_release: app.go_recorder()
+                on_release: root.apply_and_go()
         ScrollView:
             BoxLayout:
                 orientation: 'vertical'
@@ -474,7 +467,7 @@ KV_TEMPLATE = '''
                         text: 'CAWL number or range (e.g. 1-100, 42, leave blank for all)'
                         font_size: sp(13)
                         font_name: FONT
-                        color: (0.5412, 0.4784, 0.4157, 1)
+                        color: T.TEXT_DIM
                         size_hint_y: None
                         height: dp(36)
                         halign: 'left'
@@ -486,16 +479,16 @@ KV_TEMPLATE = '''
                         font_name: FONT
                         size_hint_y: None
                         height: dp(48)
-                        background_color: (0.1647, 0.1373, 0.1255, 1)
-                        foreground_color: (0.9412, 0.9098, 0.8627, 1)
-                        cursor_color: (0.7882, 0.4824, 0.2275, 1)
+                        background_color: T.SURFACE
+                        foreground_color: T.TEXT
+                        cursor_color: T.ACCENT
                         multiline: False
                         on_text_validate: root.apply_cawl(self.text)
                     Label:
                         text: 'Gloss search (filter by gloss text)'
                         font_size: sp(13)
                         font_name: FONT
-                        color: (0.5412, 0.4784, 0.4157, 1)
+                        color: T.TEXT_DIM
                         size_hint_y: None
                         height: dp(36)
                         halign: 'left'
@@ -507,39 +500,46 @@ KV_TEMPLATE = '''
                         font_name: FONT
                         size_hint_y: None
                         height: dp(48)
-                        background_color: (0.1647, 0.1373, 0.1255, 1)
-                        foreground_color: (0.9412, 0.9098, 0.8627, 1)
-                        cursor_color: (0.7882, 0.4824, 0.2275, 1)
+                        background_color: T.SURFACE
+                        foreground_color: T.TEXT
+                        cursor_color: T.ACCENT
                         multiline: False
                 # Show past work — toggle (logically reversed from only_unrecorded)
                 UnrecordedToggle:
                     id: unrecorded_toggle
-                    active: True
+                    active: False
                     on_active: root.toggle_show_past(self.active)
-                # Recording task selector (shown only when >1 task available)
-                RecBtn:
-                    id: rec_task_btn
-                    text: ''
+                # Recording task selector
+                BoxLayout:
+                    id: rec_task_row
                     size_hint_y: None
                     height: 0
                     opacity: 0
-                    font_size: sp(15)
-                    normal_color: (0.1647, 0.1373, 0.1255, 1)
-                    on_release: root._show_rec_overlay()
-                # Apply button
+                    spacing: dp(8)
+                    Label:
+                        text: 'Recording:'
+                        font_size: sp(15)
+                        font_name: FONT
+                        color: T.TEXT_DIM
+                        size_hint_x: None
+                        size: self.texture_size
+                        valign: 'middle'
+                    RecBtn:
+                        id: rec_task_btn
+                        text: ''
+                        font_size: sp(15)
+                        normal_color: T.SURFACE
+                        on_release: root._show_rec_overlay()
+                # Bottom spacer
                 Widget:
                     size_hint_y: None
                     height: dp(16)
-                RecBtn:
-                    text: 'Use these Settings'
-                    normal_color: (0.7882, 0.4824, 0.2275, 1)
-                    on_release: root.apply_and_go()
                 Widget:
                     size_hint_y: None
                     height: dp(8)
                 RecBtn:
                     text: 'Setup Collaboration'
-                    normal_color: (0.1647, 0.1373, 0.1255, 1)
+                    normal_color: T.SURFACE
                     on_release: app.go_collab()
                 Widget:
                     size_hint_y: None
@@ -553,17 +553,17 @@ KV_TEMPLATE = '''
                     font_name: FONT
                     size_hint_y: None
                     height: dp(48)
-                    background_color: (0.1647, 0.1373, 0.1255, 1)
-                    foreground_color: (0.9412, 0.9098, 0.8627, 1)
-                    cursor_color: (0.7882, 0.4824, 0.2275, 1)
+                    background_color: T.SURFACE
+                    foreground_color: T.TEXT
+                    cursor_color: T.ACCENT
                     multiline: False
                 Widget:
                     size_hint_y: None
                     height: dp(8)
                 RecBtn:
                     text: 'Start over'
-                    normal_color: (0.3922, 0.3137, 0.2353, 1)
-                    on_release: app.show_start_over()
+                    normal_color: T.BTN_INACTIVE
+                    on_release: app.go_welcome() #new_from_template < should be "Open or create a LIFT lexicon" (WelcomeScreen)
                 Widget:
                     size_hint_y: None
                     height: dp(40)
@@ -571,7 +571,7 @@ KV_TEMPLATE = '''
 <CollabScreen>:
     canvas.before:
         Color:
-            rgba: (0.102, 0.0863, 0.0706, 1)
+            rgba: T.BG
         Rectangle:
             pos: self.pos
             size: self.size
@@ -584,7 +584,7 @@ KV_TEMPLATE = '''
             padding: dp(8), dp(6)
             canvas.before:
                 Color:
-                    rgba: (0.1647, 0.1373, 0.1255, 1)
+                    rgba: T.SURFACE
                 Rectangle:
                     pos: self.pos
                     size: self.size
@@ -593,7 +593,7 @@ KV_TEMPLATE = '''
                 font_size: sp(17)
                 font_name: FONT
                 bold: True
-                color: (0.7882, 0.4824, 0.2275, 1)
+                color: T.ACCENT
                 halign: 'left'
                 valign: 'middle'
                 text_size: self.size
@@ -620,9 +620,9 @@ KV_TEMPLATE = '''
                     font_name: FONT
                     size_hint_y: None
                     height: dp(48)
-                    background_color: (0.1647, 0.1373, 0.1255, 1)
-                    foreground_color: (0.9412, 0.9098, 0.8627, 1)
-                    cursor_color: (0.7882, 0.4824, 0.2275, 1)
+                    background_color: T.SURFACE
+                    foreground_color: T.TEXT
+                    cursor_color: T.ACCENT
                     multiline: False
                 # ── Host toggle ───────────────────────────────────────────
                 BoxLayout:
@@ -633,13 +633,13 @@ KV_TEMPLATE = '''
                         id: host_github_btn
                         text: 'GitHub'
                         font_size: sp(14)
-                        normal_color: (0.1529, 0.6824, 0.3765, 1)
+                        normal_color: T.GREEN
                         on_release: root.set_host('github')
                     RecBtn:
                         id: host_gitlab_btn
                         text: 'GitLab'
                         font_size: sp(14)
-                        normal_color: (0.3922, 0.3137, 0.2353, 1)
+                        normal_color: T.BTN_INACTIVE
                         on_release: root.set_host('gitlab')
                 # ── GitHub section ────────────────────────────────────────
                 BoxLayout:
@@ -655,7 +655,7 @@ KV_TEMPLATE = '''
                         text: 'Not connected'
                         font_size: sp(14)
                         font_name: FONT
-                        color: (0.5412, 0.4784, 0.4157, 1)
+                        color: T.TEXT_DIM
                         size_hint_y: None
                         height: dp(28)
                         halign: 'left'
@@ -663,7 +663,7 @@ KV_TEMPLATE = '''
                     RecBtn:
                         id: gh_connect_btn
                         text: 'Connect to GitHub'
-                        normal_color: (0.1529, 0.6824, 0.3765, 1)
+                        normal_color: T.GREEN
                         on_release: root.start_device_flow()
                     Label:
                         id: device_instructions_label
@@ -671,7 +671,7 @@ KV_TEMPLATE = '''
                         font_size: sp(13)
                         font_name: FONT
                         markup: True
-                        color: (0.5412, 0.4784, 0.4157, 1)
+                        color: T.TEXT_DIM
                         size_hint_y: None
                         height: dp(0)
                         halign: 'center'
@@ -690,7 +690,7 @@ KV_TEMPLATE = '''
                             font_size: sp(28)
                             font_name: FONT
                             bold: True
-                            color: (0.9412, 0.9098, 0.8627, 1)
+                            color: T.TEXT
                             halign: 'center'
                             valign: 'middle'
                             text_size: self.size
@@ -700,7 +700,7 @@ KV_TEMPLATE = '''
                             size_hint_x: None
                             width: dp(64)
                             font_size: sp(13)
-                            normal_color: (0.3922, 0.3137, 0.2353, 1)
+                            normal_color: T.BTN_INACTIVE
                             on_release: root.copy_code()
                 # ── GitLab section ────────────────────────────────────────
                 BoxLayout:
@@ -719,9 +719,9 @@ KV_TEMPLATE = '''
                         font_name: FONT
                         size_hint_y: None
                         height: dp(48)
-                        background_color: (0.1647, 0.1373, 0.1255, 1)
-                        foreground_color: (0.9412, 0.9098, 0.8627, 1)
-                        cursor_color: (0.7882, 0.4824, 0.2275, 1)
+                        background_color: T.SURFACE
+                        foreground_color: T.TEXT
+                        cursor_color: T.ACCENT
                         multiline: False
                         password: True
                     TextInput:
@@ -731,13 +731,13 @@ KV_TEMPLATE = '''
                         font_name: FONT
                         size_hint_y: None
                         height: dp(48)
-                        background_color: (0.1647, 0.1373, 0.1255, 1)
-                        foreground_color: (0.9412, 0.9098, 0.8627, 1)
-                        cursor_color: (0.7882, 0.4824, 0.2275, 1)
+                        background_color: T.SURFACE
+                        foreground_color: T.TEXT
+                        cursor_color: T.ACCENT
                         multiline: False
                     RecBtn:
                         text: 'Save GitLab credentials'
-                        normal_color: (0.1529, 0.6824, 0.3765, 1)
+                        normal_color: T.GREEN
                         on_release: root.save_gitlab_credentials()
                 # ── Publish ───────────────────────────────────────────────
                 SectionLabel:
@@ -749,9 +749,9 @@ KV_TEMPLATE = '''
                     font_name: FONT
                     size_hint_y: None
                     height: dp(48)
-                    background_color: (0.1647, 0.1373, 0.1255, 1)
-                    foreground_color: (0.9412, 0.9098, 0.8627, 1)
-                    cursor_color: (0.7882, 0.4824, 0.2275, 1)
+                    background_color: T.SURFACE
+                    foreground_color: T.TEXT
+                    cursor_color: T.ACCENT
                     multiline: False
                     on_text: root.update_publish_url()
                 Label:
@@ -759,14 +759,14 @@ KV_TEMPLATE = '''
                     text: ''
                     font_size: sp(12)
                     font_name: FONT
-                    color: (0.5412, 0.4784, 0.4157, 1)
+                    color: T.TEXT_DIM
                     size_hint_y: None
                     height: dp(28)
                     halign: 'left'
                     text_size: self.width, None
                 RecBtn:
                     text: 'Publish'
-                    normal_color: (0.7882, 0.4824, 0.2275, 1)
+                    normal_color: T.ACCENT
                     on_release: root.do_publish()
                 # ── Log ───────────────────────────────────────────────────
                 SectionLabel:
@@ -776,7 +776,7 @@ KV_TEMPLATE = '''
                     text: ''
                     font_size: sp(12)
                     font_name: FONT
-                    color: (0.5412, 0.4784, 0.4157, 1)
+                    color: T.TEXT_DIM
                     size_hint_y: None
                     height: self.texture_size[1] + dp(16)
                     halign: 'left'
@@ -789,7 +789,7 @@ KV_TEMPLATE = '''
 <ImagePickerScreen>:
     canvas.before:
         Color:
-            rgba: (0.102, 0.0863, 0.0706, 1)
+            rgba: T.BG
         Rectangle:
             pos: self.pos
             size: self.size
@@ -801,7 +801,7 @@ KV_TEMPLATE = '''
             text: ''
             font_size: sp(30)
             font_name: FONT
-            color: (0.7882, 0.4824, 0.2275, 1)
+            color: T.ACCENT
             size_hint_y: None
             height: dp(72)
             halign: 'center'
@@ -825,17 +825,17 @@ KV_TEMPLATE = '''
             spacing: dp(6)
             RecBtn:
                 text: 'openclipart'
-                normal_color: (0.1529, 0.6824, 0.3765, 1)
+                normal_color: T.GREEN
                 font_size: sp(12)
                 on_release: root.fetch_openclipart()
             RecBtn:
                 text: 'FreeSVG'
-                normal_color: (0.1529, 0.5824, 0.5765, 1)
+                normal_color: T.TEAL
                 font_size: sp(12)
                 on_release: root.fetch_freesvg()
             RecBtn:
                 text: 'Wikimedia'
-                normal_color: (0.2, 0.4, 0.7, 1)
+                normal_color: T.BLUE
                 font_size: sp(12)
                 on_release: root.fetch_wikimedia()
         # Bottom buttons — local sources
@@ -846,17 +846,17 @@ KV_TEMPLATE = '''
             spacing: dp(6)
             RecBtn:
                 text: 'Photo'
-                normal_color: (0.3922, 0.3137, 0.2353, 1)
+                normal_color: T.BTN_INACTIVE
                 font_size: sp(12)
                 on_release: root.take_photo()
             RecBtn:
                 text: 'File'
-                normal_color: (0.3922, 0.3137, 0.2353, 1)
+                normal_color: T.BTN_INACTIVE
                 font_size: sp(12)
                 on_release: root.pick_from_file()
             RecBtn:
                 text: 'Cancel'
-                normal_color: (0.1647, 0.1373, 0.1255, 1)
+                normal_color: T.SURFACE
                 font_size: sp(12)
                 on_release: app.go_recorder()
 
@@ -866,7 +866,7 @@ KV_TEMPLATE = '''
     size_hint: 1, 1
     canvas:
         Color:
-            rgba: (0.7529, 0.2235, 0.1686, 1) if self.recording else (0.7882, 0.4824, 0.2275, 1)
+            rgba: T.RED if self.recording else T.ACCENT
         RoundedRectangle:
             pos: self.x + dp(4), self.y + dp(4)
             size: self.width - dp(8), self.height - dp(8)
@@ -886,7 +886,7 @@ KV_TEMPLATE = '''
 <PlayButton>:
     canvas:
         Color:
-            rgba: (0.1529, 0.6824, 0.3765, 1)
+            rgba: T.GREEN
         RoundedRectangle:
             pos: self.x + dp(4), self.y + dp(4)
             size: self.width - dp(8), self.height - dp(8)
@@ -900,13 +900,13 @@ KV_TEMPLATE = '''
 <RedoButton>:
     canvas:
         Color:
-            rgba: (0.1647, 0.1373, 0.1255, 1)
+            rgba: T.SURFACE
         RoundedRectangle:
             pos: self.x + dp(4), self.y + dp(4)
             size: self.width - dp(8), self.height - dp(8)
             radius: [dp(12)]
         Color:
-            rgba: (0.7882, 0.4824, 0.2275, 0.6)
+            rgba: T.ACCENT[:3] + (0.6,)
         Line:
             rounded_rectangle: self.x + dp(4), self.y + dp(4), self.width - dp(8), self.height - dp(8), dp(12)
             width: dp(1.5)
@@ -915,13 +915,13 @@ KV_TEMPLATE = '''
         font_size: sp(36)
         font_name: FONT
         bold: True
-        color: (0.7882, 0.4824, 0.2275, 1)
+        color: T.ACCENT
         center: root.center
 
 <LangPickerScreen>:
     canvas.before:
         Color:
-            rgba: (0.102, 0.0863, 0.0706, 1)
+            rgba: T.BG
         Rectangle:
             pos: self.pos
             size: self.size
@@ -935,7 +935,7 @@ KV_TEMPLATE = '''
             font_size: sp(22)
             font_name: FONT
             bold: True
-            color: (0.7882, 0.4824, 0.2275, 1)
+            color: T.ACCENT
             size_hint_y: None
             height: dp(44)
         # ── Search ────────────────────────────────────────────────────────
@@ -947,10 +947,10 @@ KV_TEMPLATE = '''
             multiline: False
             size_hint_y: None
             height: dp(44)
-            background_color: (0.1647, 0.1373, 0.1255, 1)
-            foreground_color: (0.9412, 0.9098, 0.8627, 1)
-            hint_text_color: (0.5412, 0.4784, 0.4157, 0.6)
-            cursor_color: (0.7882, 0.4824, 0.2275, 1)
+            background_color: T.SURFACE
+            foreground_color: T.TEXT
+            hint_text_color: T.HINT
+            cursor_color: T.ACCENT
             padding: [dp(10), dp(10)]
             on_text: root._on_search_text(self.text)
         # ── Results ───────────────────────────────────────────────────────
@@ -975,7 +975,7 @@ KV_TEMPLATE = '''
                 text: ''
                 font_size: sp(15)
                 font_name: FONT
-                color: (0.9412, 0.9098, 0.8627, 1)
+                color: T.TEXT
                 size_hint_y: None
                 height: dp(32)
                 halign: 'left'
@@ -986,7 +986,7 @@ KV_TEMPLATE = '''
                 text: 'Select region:'
                 font_size: sp(14)
                 font_name: FONT
-                color: (0.5412, 0.4784, 0.4157, 1)
+                color: T.TEXT_DIM
                 size_hint_y: None
                 height: 0
                 opacity: 0
@@ -1013,7 +1013,7 @@ KV_TEMPLATE = '''
                     text: "I'm working on a dialect"
                     font_size: sp(14)
                     font_name: FONT
-                    color: (0.9412, 0.9098, 0.8627, 1)
+                    color: T.TEXT
                     halign: 'left'
                     valign: 'middle'
                     text_size: self.size
@@ -1026,10 +1026,10 @@ KV_TEMPLATE = '''
                 size_hint_y: None
                 height: 0
                 opacity: 0
-                background_color: (0.1647, 0.1373, 0.1255, 1)
-                foreground_color: (0.9412, 0.9098, 0.8627, 1)
-                hint_text_color: (0.5412, 0.4784, 0.4157, 0.6)
-                cursor_color: (0.7882, 0.4824, 0.2275, 1)
+                background_color: T.SURFACE
+                foreground_color: T.TEXT
+                hint_text_color: T.HINT
+                cursor_color: T.ACCENT
                 padding: [dp(10), dp(10)]
                 on_text: root._update_code()
             # Assembled code display
@@ -1039,7 +1039,7 @@ KV_TEMPLATE = '''
                 font_size: sp(16)
                 font_name: FONT
                 bold: True
-                color: (0.1529, 0.6824, 0.3765, 1)
+                color: T.GREEN
                 size_hint_y: None
                 height: dp(28)
                 halign: 'left'
@@ -1048,7 +1048,7 @@ KV_TEMPLATE = '''
         RecBtn:
             id: continue_btn
             text: 'Continue'
-            normal_color: (0.1529, 0.6824, 0.3765, 1)
+            normal_color: T.GREEN
             size_hint_y: None
             height: dp(52)
             opacity: 0.3
@@ -1060,7 +1060,7 @@ KV_TEMPLATE = '''
     height: dp(70)
     canvas.before:
         Color:
-            rgba: (0.1647, 0.1373, 0.1255, 1)
+            rgba: T.SURFACE
         RoundedRectangle:
             pos: self.x, self.y + dp(2)
             size: self.width, self.height - dp(4)
@@ -1072,7 +1072,7 @@ KV_TEMPLATE = '''
             text: root.lang
             font_size: sp(13)
             font_name: FONT
-            color: (0.5412, 0.4784, 0.4157, 1)
+            color: T.TEXT_DIM
             size_hint_x: None
             width: dp(44)
             halign: 'right'
@@ -1083,7 +1083,7 @@ KV_TEMPLATE = '''
             font_size: sp(30)
             font_name: FONT
             bold: True
-            color: (0.9412, 0.9098, 0.8627, 1)
+            color: T.TEXT
             halign: 'left'
             valign: 'middle'
             text_size: self.size
@@ -1093,7 +1093,7 @@ KV_TEMPLATE = '''
     height: dp(56)
     canvas.before:
         Color:
-            rgba: (0.15, 0.35, 0.22, 1) if self.active else (0.1647, 0.1373, 0.1255, 1)
+            rgba: T.GREEN_DARK if self.active else T.SURFACE
         RoundedRectangle:
             pos: self.pos
             size: self.size
@@ -1106,27 +1106,27 @@ KV_TEMPLATE = '''
             size_hint_x: None
             width: dp(48)
             active: root.active
-            color: (0.7882, 0.4824, 0.2275, 1)
+            color: T.ACCENT
             on_active: root.active = self.active
         Label:
             text: 'Show past work'
             font_size: sp(16)
             font_name: FONT
             bold: True
-            color: (0.1529, 0.9, 0.3765, 1) if root.active else (0.9412, 0.9098, 0.8627, 1)
+            color: T.GREEN_BRIGHT if root.active else T.TEXT
             halign: 'left'
             valign: 'middle'
             text_size: self.size
 
 <RecBtn@Button>:
-    normal_color: (0.7882, 0.4824, 0.2275, 1)
+    normal_color: T.ACCENT
     size_hint_y: None
     height: dp(52)
-    background_color: 0,0,0,0
+    background_color: T.TRANSPARENT
     background_normal: ''
     canvas.before:
         Color:
-            rgba: self.normal_color
+            rgba: self.normal_color or T.ACCENT
         RoundedRectangle:
             pos: self.pos
             size: self.size
@@ -1138,24 +1138,24 @@ KV_TEMPLATE = '''
 
 <NavBtn@Button>:
     size_hint_y: 1
-    background_color: 0,0,0,0
+    background_color: T.TRANSPARENT
     background_normal: ''
     canvas.before:
         Color:
-            rgba: (0.1647, 0.1373, 0.1255, 1)
+            rgba: T.SURFACE
         RoundedRectangle:
             pos: self.pos
             size: self.size
             radius: [dp(8)]
-    color: (0.7882, 0.4824, 0.2275, 1)
+    color: T.ACCENT
     font_size: sp(16)
     font_name: FONT
     bold: True
 
 <IconBtn@Button>:
-    background_color: 0,0,0,0
+    background_color: T.TRANSPARENT
     background_normal: ''
-    color: (0.5412, 0.4784, 0.4157, 1)
+    color: T.TEXT_DIM
     font_size: sp(20)
     font_name: FONT
 
@@ -1165,7 +1165,7 @@ KV_TEMPLATE = '''
     font_size: sp(12)
     font_name: FONT
     bold: True
-    color: (0.7882, 0.4824, 0.2275, 1)
+    color: T.ACCENT
     halign: 'left'
     valign: 'middle'
     text_size: self.size
@@ -1174,24 +1174,24 @@ KV_TEMPLATE = '''
 <CheckboxStyled@CheckBox>:
     size_hint_x: None
     width: dp(40)
-    color: (0.7882, 0.4824, 0.2275, 1)
+    color: T.ACCENT
 
 <LangToggle>:
     size_hint_y: None
     height: dp(44)
     canvas.before:
         Color:
-            rgba: (0.15, 0.35, 0.22, 1) if root.active else (0.1647, 0.1373, 0.1255, 1)
+            rgba: T.GREEN_DARK if root.active else T.SURFACE
         RoundedRectangle:
             pos: self.pos
             size: self.size
             radius: [dp(6)]
     Label:
-        text: root.lang
+        text: root.display_name
         font_size: sp(15)
         font_name: FONT
         bold: root.active
-        color: (0.1529, 0.9, 0.3765, 1) if root.active else (0.9412, 0.9098, 0.8627, 1)
+        color: T.GREEN_BRIGHT if root.active else T.TEXT
         halign: 'center'
         valign: 'middle'
         text_size: self.size
@@ -1265,9 +1265,21 @@ class GlossRow(BoxLayout):
 
 
 class LangToggle(BoxLayout):
+    _LANG_NAMES = {
+        'en': 'English', 'es': 'Español', 'pt': 'Português',
+        'fr': 'Français', 'de': 'Deutsch', 'id': 'Indonesia',
+        'sw': 'Kiswahili', 'ar': 'العربية', 'zh': '中文',
+        'ru': 'Русский', 'hi': 'हिन्दी','ha': 'Hausa',
+        'id': 'Bahasa Indonesia', 'swh': 'Swahili',
+        'ln-CD': 'Lingala (RDC)'
+    }
     lang = StringProperty('')
+    display_name = StringProperty('')
     active = BooleanProperty(True)
     callback = ObjectProperty(None)
+
+    def on_lang(self, *args):
+        self.display_name = self._LANG_NAMES.get(self.lang, self.lang)
 
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
@@ -1302,7 +1314,7 @@ class WelcomeScreen(Screen):
             btn = Builder.load_string(
                 'RecBtn:\n'
                 f'    text: {name!r}\n'
-                '    normal_color: (0.1529, 0.6824, 0.3765, 1)\n'
+                '    normal_color: T.GREEN\n'
             )
             btn.lift_path = path
             btn.bind(on_release=lambda b: app.load_lift(b.lift_path))
@@ -1392,9 +1404,9 @@ class LangPickerScreen(Screen):
             height=dp(48),
             halign='left',
             valign='middle',
-            background_color=(0.1647, 0.1373, 0.1255, 1),
+            background_color=theme.SURFACE,
             background_normal='',
-            color=(0.9412, 0.9098, 0.8627, 1),
+            color=theme.TEXT,
             padding=(dp(10), dp(4)),
         )
         btn.text_size = (None, None)
@@ -1461,9 +1473,9 @@ class LangPickerScreen(Screen):
                 font_name=_FONT_NAME,
                 size_hint_y=None,
                 height=dp(38),
-                background_color=(0.2353, 0.1961, 0.1647, 1),
+                background_color=theme.SURFACE_ALT,
                 background_normal='',
-                color=(0.9412, 0.9098, 0.8627, 1),
+                color=theme.TEXT,
             )
             btn.bind(on_release=lambda w: self._select_region(''))
             region_box.add_widget(btn)
@@ -1475,9 +1487,9 @@ class LangPickerScreen(Screen):
                     font_name=_FONT_NAME,
                     size_hint_y=None,
                     height=dp(38),
-                    background_color=(0.2353, 0.1961, 0.1647, 1),
+                    background_color=theme.SURFACE_ALT,
                     background_normal='',
-                    color=(0.9412, 0.9098, 0.8627, 1),
+                    color=theme.TEXT,
                 )
                 btn.bind(on_release=lambda w, c=rc: self._select_region(c))
                 region_box.add_widget(btn)
@@ -1500,11 +1512,11 @@ class LangPickerScreen(Screen):
         if region_box:
             for child in region_box.children:
                 if region_code and region_code in child.text:
-                    child.background_color = (0.7882, 0.4824, 0.2275, 1)
+                    child.background_color = theme.ACCENT
                 elif not region_code and 'Multiple' in child.text:
-                    child.background_color = (0.7882, 0.4824, 0.2275, 1)
+                    child.background_color = theme.ACCENT
                 else:
-                    child.background_color = (0.2353, 0.1961, 0.1647, 1)
+                    child.background_color = theme.SURFACE_ALT
         self._update_code()
 
     def _toggle_dialect(self, active):
@@ -2156,7 +2168,14 @@ class ConfigScreen(Screen):
         ir = self.ids.get('image_repo_input')
         if ir:
             ir.text = app._load_prefs().get('image_repo', '')
-        # Build recording options (only show when >1 task available)
+        # Restore show-past-work toggle (default False)
+        prefs = app._load_prefs()
+        show_past = prefs.get('show_past_work', False)
+        toggle = self.ids.get('unrecorded_toggle')
+        if toggle:
+            toggle.active = show_past
+        self.only_unrecorded = not show_past
+        # Build recording options
         self._build_rec_options(app)
 
     def build_lang_toggles(self):
@@ -2190,28 +2209,33 @@ class ConfigScreen(Screen):
         app = App.get_running_app()
         if app.recorder:
             app.recorder.only_unrecorded = not show_past
+        prefs = app._load_prefs()
+        prefs['show_past_work'] = show_past
+        app._save_prefs_dict(prefs)
 
     # Assumed second-form field types (until secondformfield is available)
     _SECOND_FORM_FIELDS = {'Noun': 'Plural', 'Verb': 'Imperative'}
 
     def _build_rec_options(self, app):
-        """Populate recording task button; hide if only one task available."""
+        """Populate recording task row; always visible, tappable when >1 option."""
+        row = self.ids.get('rec_task_row')
         btn = self.ids.get('rec_task_btn')
-        if not btn:
+        if not row or not btn:
             return
         available = self._available_rec_tasks(app)
         self._rec_available = available
-        if len(available) <= 1:
-            btn.height = 0
-            btn.opacity = 0
-            return
-        btn.height = dp(44)
-        btn.opacity = 1
-        # Restore saved selection
+        # Restore saved selection (or default to citation)
         prefs = app._load_prefs()
         saved_key = prefs.get('rec_task', 'citation')
+        # If saved key is no longer available, fall back to citation
+        if not any(k == saved_key for k, _ in available):
+            saved_key = 'citation'
+            prefs['rec_task'] = saved_key
+            app._save_prefs_dict(prefs)
         saved_label = next((t for k, t in available if k == saved_key), available[0][1])
-        btn.text = f'Recording: {saved_label}'
+        btn.text = saved_label
+        row.height = dp(44)
+        row.opacity = 1
 
     def _show_rec_overlay(self):
         """Show a modal overlay with recording task options."""
@@ -2220,7 +2244,7 @@ class ConfigScreen(Screen):
         from kivy.uix.modalview import ModalView
 
         available = getattr(self, '_rec_available', [])
-        if not available:
+        if len(available) <= 1:
             return
 
         app = App.get_running_app()
@@ -2230,7 +2254,7 @@ class ConfigScreen(Screen):
         view = ModalView(
             size_hint=(0.85, None),
             height=dp(52 * len(available) + 20),
-            background_color=(0, 0, 0, 0.85),
+            background_color=theme.OVERLAY_DARK,
             auto_dismiss=True,
         )
         box = BoxLayout(
@@ -2245,9 +2269,9 @@ class ConfigScreen(Screen):
                 font_name=_FONT_NAME,
                 font_size=sp(16),
                 size_hint_y=None, height=dp(44),
-                background_color=(0.1529, 0.6824, 0.3765, 1) if is_selected
-                else (0.1647, 0.1373, 0.1255, 1),
-                color=(0.94, 0.91, 0.86, 1),
+                background_color=theme.GREEN if is_selected
+                else theme.SURFACE,
+                color=theme.TEXT,
             )
 
             def _select(k=key, l=label, v=view):
@@ -2256,7 +2280,7 @@ class ConfigScreen(Screen):
                 app._save_prefs_dict(prefs2)
                 task_btn = self.ids.get('rec_task_btn')
                 if task_btn:
-                    task_btn.text = f'Recording: {l}'
+                    task_btn.text = l
                 v.dismiss()
 
             btn.bind(on_release=lambda inst, cb=_select: cb())
@@ -2345,7 +2369,72 @@ class CollabScreen(Screen):
         w = self.ids.get('langcode_input')
         if w and not w.text:
             w.text = prefs.get('collab_langcode', '')
+        # Restore host selection
+        host = prefs.get('collab_host', 'github')
+        self.set_host(host, save=False)
         self._update_gh_status()
+        # Restore GitLab fields
+        gl_user = self.ids.get('gl_username_input')
+        if gl_user and not gl_user.text:
+            gl_user.text = prefs.get('gl_username', '')
+        self.update_publish_url()
+
+    def set_host(self, host, save=True):
+        """Toggle between github and gitlab sections."""
+        self._host = host
+        gh_btn = self.ids.get('host_github_btn')
+        gl_btn = self.ids.get('host_gitlab_btn')
+        gh_sec = self.ids.get('gh_section')
+        gl_sec = self.ids.get('gl_section')
+
+        active_color = theme.GREEN
+        inactive_color = theme.BTN_INACTIVE
+
+        if host == 'gitlab':
+            if gh_btn:
+                gh_btn.normal_color = inactive_color
+            if gl_btn:
+                gl_btn.normal_color = active_color
+            if gh_sec:
+                gh_sec.height = 0
+                gh_sec.opacity = 0
+            if gl_sec:
+                gl_sec.height = gl_sec.minimum_height
+                gl_sec.opacity = 1
+        else:
+            if gh_btn:
+                gh_btn.normal_color = active_color
+            if gl_btn:
+                gl_btn.normal_color = inactive_color
+            if gh_sec:
+                gh_sec.height = gh_sec.minimum_height
+                gh_sec.opacity = 1
+            if gl_sec:
+                gl_sec.height = 0
+                gl_sec.opacity = 0
+
+        if save:
+            app = App.get_running_app()
+            prefs = app._load_prefs()
+            prefs['collab_host'] = host
+            app._save_prefs_dict(prefs)
+        self.update_publish_url()
+
+    def save_gitlab_credentials(self):
+        """Save GitLab PAT and username to prefs."""
+        app = App.get_running_app()
+        prefs = app._load_prefs()
+        token_w = self.ids.get('gl_token_input')
+        user_w = self.ids.get('gl_username_input')
+        token = token_w.text.strip() if token_w else ''
+        username = user_w.text.strip() if user_w else ''
+        if not token or not username:
+            self._set_log('Enter both GitLab username and token.')
+            return
+        prefs['gl_token'] = token
+        prefs['gl_username'] = username
+        app._save_prefs_dict(prefs)
+        self._set_log(f'GitLab credentials saved for {username}')
         self.update_publish_url()
 
     def _update_gh_status(self):
@@ -2359,10 +2448,10 @@ class CollabScreen(Screen):
         if lbl:
             if username and token:
                 lbl.text = f'Connected as {username}'
-                lbl.color = (0.1529, 0.6824, 0.3765, 1)
+                lbl.color = theme.GREEN
             else:
                 lbl.text = 'Not connected'
-                lbl.color = (0.5412, 0.4784, 0.4157, 1)
+                lbl.color = theme.TEXT_DIM
         if btn:
             btn.text = 'Reconnect' if (username and token) else 'Connect to GitHub'
 
@@ -2520,19 +2609,34 @@ class CollabScreen(Screen):
     # ── Button handlers ────────────────────────────────────────────────────
 
     def update_publish_url(self):
-        """Auto-generate the publish URL from GitHub username and language code."""
+        """Auto-generate the publish URL from username and language code."""
         lbl = self.ids.get('publish_url_label')
         if not lbl:
             return
         app = App.get_running_app()
         prefs = app._load_prefs()
-        user = prefs.get('gh_username', '')
+        host = getattr(self, '_host', prefs.get('collab_host', 'github'))
         lang_w = self.ids.get('langcode_input')
         lang = lang_w.text.strip() if lang_w else ''
+        if host == 'gitlab':
+            user = prefs.get('gl_username', '')
+            domain = 'gitlab.com'
+        else:
+            user = prefs.get('gh_username', '')
+            domain = 'github.com'
         if not user or not lang:
             lbl.text = ''
             return
-        lbl.text = f'https://github.com/{user}/{lang}.git'
+        lbl.text = f'https://{domain}/{user}/{lang}.git'
+
+    def _get_credentials_for_host(self):
+        """Return (username, token) for the currently selected host."""
+        app = App.get_running_app()
+        prefs = app._load_prefs()
+        host = getattr(self, '_host', prefs.get('collab_host', 'github'))
+        if host == 'gitlab':
+            return prefs.get('gl_username', ''), prefs.get('gl_token', '')
+        return app._get_gh_credentials()
 
     def do_publish(self):
         app = App.get_running_app()
@@ -2540,9 +2644,11 @@ class CollabScreen(Screen):
             self._set_log('No project loaded.')
             return
         self._save_settings()
-        user, token = app._get_gh_credentials()
+        user, token = self._get_credentials_for_host()
+        host = getattr(self, '_host', 'github')
         if not token:
-            self._set_log('Connect to GitHub first.')
+            host_name = 'GitLab' if host == 'gitlab' else 'GitHub'
+            self._set_log(f'Connect to {host_name} first.')
             return
         name_w = self.ids.get('name_input')
         name = (name_w.text.strip() if name_w else '') or 'Recorder'
@@ -2551,10 +2657,12 @@ class CollabScreen(Screen):
         if not remote_url:
             self._set_log('Enter a language code first.')
             return
+        # GitLab uses username + PAT directly; GitHub uses x-access-token
+        git_user = user if host == 'gitlab' else 'x-access-token'
         from collab import init_repo
         self._run('Publishing...', init_repo,
                   app.recorder.db.dir, remote_url,
-                  'x-access-token', token,
+                  git_user, token,
                   'main', name)
 
 
@@ -2992,12 +3100,12 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.13.3'
+__version__ = '1.14.0'
 
 
 class LIFTRecorderApp(App):
     title = APP_TAGLINE
-    icon = 'icons/icon.png'
+    icon = APP_ICON
     version_string = StringProperty(f'version {__version__}')
     recorder: RecorderController = None
     config_screen: ConfigScreen = None
@@ -3114,7 +3222,7 @@ class LIFTRecorderApp(App):
         content.add_widget(Label(
             text='Paste the URL to a .lift file:',
             size_hint_y=None, height=dp(30),
-            font_size=sp(14), color=(0.94, 0.91, 0.86, 1),
+            font_size=sp(14), color=theme.TEXT,
         ))
         url_input = TextInput(
             text='', hint_text='https://example.com/path/to/file.lift',
@@ -3125,7 +3233,7 @@ class LIFTRecorderApp(App):
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
         cancel_btn = Button(text='Cancel', font_size=sp(14))
         open_btn = Button(text='Open', font_size=sp(14),
-                          background_color=(0.7882, 0.4824, 0.2275, 1))
+                          background_color=theme.ACCENT)
         btn_row.add_widget(cancel_btn)
         btn_row.add_widget(open_btn)
         content.add_widget(btn_row)
@@ -3220,9 +3328,9 @@ class LIFTRecorderApp(App):
                 # Clone the whole repo
                 repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')
                 dest = os.path.join(self.user_data_dir, 'projects', repo_name)
-                _, token = self._get_gh_credentials()
+                git_user, token = self._get_sync_credentials()
                 from collab import clone_repo
-                lift_path, log = clone_repo(clone_url, dest, 'x-access-token', token)
+                lift_path, log = clone_repo(clone_url, dest, git_user, token)
                 if lift_path:
                     Clock.schedule_once(lambda dt: self.load_lift(lift_path), 0)
                 else:
@@ -3286,12 +3394,12 @@ class LIFTRecorderApp(App):
         self._dismiss_loading_overlay()
         view = ModalView(
             size_hint=(0.8, None), height=dp(80),
-            background_color=(0, 0, 0, 0.85),
+            background_color=theme.OVERLAY_DARK,
             auto_dismiss=False,
         )
         view.add_widget(Label(
             text=msg, font_size=sp(16), font_name=_FONT_NAME,
-            color=(0.94, 0.91, 0.86, 1),
+            color=theme.TEXT,
         ))
         self._loading_overlay = view
         view.open()
@@ -3309,12 +3417,12 @@ class LIFTRecorderApp(App):
         from kivy.uix.modalview import ModalView
         view = ModalView(
             size_hint=(None, None), size=(dp(250), dp(50)),
-            background_color=(0, 0, 0, 0.7),
+            background_color=theme.OVERLAY,
             auto_dismiss=True,
         )
         view.add_widget(Label(
             text=msg, font_size=sp(14), font_name=_FONT_NAME,
-            color=(0.94, 0.91, 0.86, 1),
+            color=theme.TEXT,
         ))
         view.open()
         Clock.schedule_once(lambda dt: view.dismiss(), duration)
@@ -3580,6 +3688,10 @@ class LIFTRecorderApp(App):
             if saved_vern:
                 db.set_vernlang(saved_vern)
         self.recorder = RecorderController(db)
+        # Apply persisted show-past-work preference (default: hide past work)
+        show_past = self._load_prefs().get('show_past_work', False)
+        self.recorder.only_unrecorded = not show_past
+        self.recorder.rebuild_queue()
         sm = self.root.ids.sm
         sm.transition = SlideTransition(direction='left')
         sm.current = 'recorder'
@@ -3631,19 +3743,30 @@ class LIFTRecorderApp(App):
 
     def _try_auto_publish(self):
         """If git credentials and langcode are configured, publish automatically."""
-        user, token = self._get_gh_credentials()
         prefs = self._load_prefs()
         langcode = prefs.get('collab_langcode', '')
-        if not (token and langcode and self.recorder):
+        if not (langcode and self.recorder):
             return
-        remote_url = f'https://github.com/{user}/{langcode}.git'
+        host = prefs.get('collab_host', 'github')
+        git_user, token = self._get_sync_credentials()
+        if not token:
+            return
+        if host == 'gitlab':
+            user = prefs.get('gl_username', '')
+            domain = 'gitlab.com'
+        else:
+            user = prefs.get('gh_username', '')
+            domain = 'github.com'
+        if not user:
+            return
+        remote_url = f'https://{domain}/{user}/{langcode}.git'
         name = prefs.get('collab_name', '') or 'Recorder'
         import threading
         def _worker():
             try:
                 from collab import init_repo
                 result = init_repo(self.recorder.db.dir, remote_url,
-                                   'x-access-token', token, 'main', name)
+                                   git_user, token, 'main', name)
                 print(f'[auto-publish] {result}')
             except Exception as ex:
                 print(f'[auto-publish] error: {ex}')
@@ -3685,6 +3808,18 @@ class LIFTRecorderApp(App):
         if lbl:
             lbl.text = self._sync_status_text()
 
+    def _get_sync_credentials(self):
+        """Return (git_username, token) for sync, respecting host toggle."""
+        prefs = self._load_prefs()
+        host = prefs.get('collab_host', 'github')
+        if host == 'gitlab':
+            user = prefs.get('gl_username', '')
+            token = prefs.get('gl_token', '')
+            return user, token
+        from collab import get_valid_token
+        _, token = get_valid_token(self._prefs_path)
+        return 'x-access-token', token
+
     def _auto_commit_sync(self):
         """Background: commit new audio and .lift changes, sync if online."""
         if not self.recorder:
@@ -3692,14 +3827,13 @@ class LIFTRecorderApp(App):
         prefs = self._load_prefs()
         name = prefs.get('collab_name', '') or 'Recorder'
         project_dir = self.recorder.db.dir
-        prefs_path = self._prefs_path
+        git_user, token = self._get_sync_credentials()
         import threading
         def _worker():
             try:
-                from collab import commit_audio_and_sync, get_valid_token
-                _, token = get_valid_token(prefs_path)
+                from collab import commit_audio_and_sync
                 result = commit_audio_and_sync(
-                    project_dir, name, 'x-access-token', token)
+                    project_dir, name, git_user, token)
                 print(f'[auto-sync] {result}')
                 if 'pushed' in result.lower() or 'Pushed' in result:
                     Clock.schedule_once(lambda dt: self._record_sync_time(), 0)
@@ -3714,7 +3848,7 @@ class LIFTRecorderApp(App):
         from kivy.uix.label import Label
         from kivy.uix.button import Button
 
-        content = BoxLayout(orientation='vertical', spacing=dp(12), padding=dp(12))
+        content = BoxLayout(orientation='vertical', spacing=dp(6), padding=dp(6))
         template = ''
         image_repo = ''
         if self.recorder:
@@ -3723,7 +3857,7 @@ class LIFTRecorderApp(App):
         content.add_widget(Label(
             text=f'Template: {template}\nImage repo: {image_repo}',
             font_size=sp(14), font_name=_FONT_NAME,
-            color=(0.94, 0.91, 0.86, 1),
+            color=theme.TEXT,
             size_hint_y=None, height=dp(60),
             halign='left', valign='top',
             text_size=(dp(280), None),
@@ -3731,13 +3865,13 @@ class LIFTRecorderApp(App):
         content.add_widget(Label(
             text='Start a new wordlist with this template?',
             font_size=sp(14), font_name=_FONT_NAME,
-            color=(0.5412, 0.4784, 0.4157, 1),
+            color=theme.TEXT_DIM,
             size_hint_y=None, height=dp(30),
         ))
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
         cancel_btn = Button(text='Cancel', font_size=sp(14))
         go_btn = Button(text='Yes', font_size=sp(14),
-                        background_color=(0.7882, 0.4824, 0.2275, 1))
+                        background_color=theme.ACCENT)
         btn_row.add_widget(go_btn)
         btn_row.add_widget(cancel_btn)
         content.add_widget(btn_row)
@@ -3751,7 +3885,7 @@ class LIFTRecorderApp(App):
         cancel_btn.bind(on_release=popup.dismiss)
         def _go(*a):
             popup.dismiss()
-            self.go_welcome()
+            self.new_from_template() #was go_welcome() #< should be langpicker
         go_btn.bind(on_release=_go)
         popup.open()
 
@@ -3829,7 +3963,7 @@ class LIFTRecorderApp(App):
             return
         prefs = self._load_prefs()
         name = prefs.get('collab_name', '') or 'Recorder'
-        _, token = self._get_gh_credentials()
+        git_user, token = self._get_sync_credentials()
         from collab import sync_repo, run_async
 
         saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''
@@ -3844,7 +3978,7 @@ class LIFTRecorderApp(App):
             if 'Pushed' in (result or ''):
                 self._record_sync_time()
         run_async(_sync_and_reload,
-                  self.recorder.db.dir, 'x-access-token', token, name,
+                  self.recorder.db.dir, git_user, token, name,
                   on_done=_on_sync_done)
 
     def show_image_picker(self):
@@ -4036,7 +4170,7 @@ class LIFTRecorderApp(App):
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
         clear_btn = Button(text='Clear', font_size=sp(14))
         ok_btn = Button(text='OK', font_size=sp(14),
-                        background_color=(0.7882, 0.4824, 0.2275, 1))
+                        background_color=theme.ACCENT)
         btn_row.add_widget(clear_btn)
         btn_row.add_widget(ok_btn)
         content.add_widget(btn_row)
@@ -4087,7 +4221,7 @@ class LIFTRecorderApp(App):
         content.add_widget(Label(
             text='Clone a git repository containing a LIFT file:',
             size_hint_y=None, height=dp(30),
-            font_size=sp(13), color=(0.94, 0.91, 0.86, 1),
+            font_size=sp(13), color=theme.TEXT,
         ))
 
         # Host + owner row
@@ -4116,7 +4250,7 @@ class LIFTRecorderApp(App):
         # Live URL preview
         url_label = Label(
             text='', font_size=sp(12),
-            color=(0.5412, 0.4784, 0.4157, 1),
+            color=theme.TEXT_DIM,
             size_hint_y=None, height=dp(24),
             halign='left',
         )
@@ -4140,7 +4274,7 @@ class LIFTRecorderApp(App):
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
         cancel_btn = Button(text='Cancel', font_size=sp(14))
         clone_btn = Button(text='Clone', font_size=sp(14),
-                           background_color=(0.7882, 0.4824, 0.2275, 1))
+                           background_color=theme.ACCENT)
         btn_row.add_widget(cancel_btn)
         btn_row.add_widget(clone_btn)
         content.add_widget(btn_row)
@@ -4157,7 +4291,7 @@ class LIFTRecorderApp(App):
             popup.dismiss()
             if not clone_url:
                 return
-            _, token = self._get_gh_credentials()
+            git_user, token = self._get_sync_credentials()
             # Save clone prefs for future use
             prefs = self._load_prefs()
             prefs['clone_host'] = host_spinner.text
@@ -4172,7 +4306,7 @@ class LIFTRecorderApp(App):
 
             def _worker():
                 lift_path, log = clone_repo(
-                    clone_url, dest, 'x-access-token', token)
+                    clone_url, dest, git_user, token)
                 if lift_path:
                     Clock.schedule_once(lambda dt: self.load_lift(lift_path), 0)
                 else:
@@ -4242,8 +4376,8 @@ class LIFTRecorderApp(App):
         # Status text + colour
         if 'status_label' in ids:
             ids.status_label.text = r.status_text
-            ids.status_label.color = (0.1529, 0.6824, 0.3765, 1) \
-                if r.has_recording else (0.5412, 0.4784, 0.4157, 1)
+            ids.status_label.color = theme.GREEN \
+                if r.has_recording else theme.TEXT_DIM
 
         # Button area: record button OR play+redo pair
         if 'btn_area' in ids:
