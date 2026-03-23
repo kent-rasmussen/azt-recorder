@@ -1,7 +1,7 @@
 [app]
-title = Record My Wordlist
-package.name = liftrecorder
-package.domain = org.liftrecorder
+title = A-Z+T Recorder
+package.name = azt_recorder
+package.domain = org.atoznback
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,lift,ttf,gz
 # azt_images/ is 320 MB — too large to bundle in the APK (causes OOM on device).
@@ -28,12 +28,12 @@ android.ndk = 29
 android.allow_backup = False
 
 # Legacy icon (pre-API 26 fallback)
-icon.filename = %(source.dir)s/icons/icon.png
+icon.filename = %(source.dir)s/icons/icon_dark.png
 # Adaptive icon layers (API 26+)
 icon.adaptive_foreground.filename = %(source.dir)s/icons/icon_dark.png
 icon.adaptive_background.filename = %(source.dir)s/icons/icon_bg.png
 
-presplash.filename = %(source.dir)s/icons/icon.png
+presplash.filename = %(source.dir)s/presplash.png
 android.presplash_color = #1a1612
 
 [buildozer]

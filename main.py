@@ -1,5 +1,6 @@
 """
-LIFT Recorder — field audio recorder for LIFT XML lexicon databases.
+A-Z+T Recorder — field audio recorder for LIFT XML lexicon databases.
+Part of the A-Z+T suite of linguistic tools.
 
 Records high-quality audio for dictionary entries, stores WAV files in an
 'audio/' directory next to the LIFT file, and writes filenames back into
@@ -13,13 +14,15 @@ import sys
 import traceback
 import warnings
 
+from appinfo import APP_NAME, APP_TAGLINE, APP_USER_AGENT
+
 os.environ.setdefault('KIVY_NO_ENV_CONFIG', '1')
 warnings.filterwarnings('ignore', message='.*olefile.*')
 
 # ── Crash logging — runs before any Kivy import ────────────────────────────────
 # On Android: p4a sets $ANDROID_PRIVATE to the app's private files dir (always writable).
 #             Also tries /sdcard/ (may need MANAGE_EXTERNAL_STORAGE on API 30+).
-# On desktop: ~/liftrecorder.log
+# On desktop: ~/azt_recorder.log
 def _setup_logging():
     _on_android = os.path.exists('/system/build.prop')
     candidates = []
@@ -27,14 +30,14 @@ def _setup_logging():
         # ANDROID_PRIVATE is set by p4a bootstrap, e.g. /data/user/0/org.x.y/files
         android_private = os.environ.get('ANDROID_PRIVATE', '')
         if android_private:
-            candidates.append(os.path.join(android_private, 'liftrecorder.log'))
+            candidates.append(os.path.join(android_private, 'azt_recorder.log'))
         # Fallback using known package name pattern
         candidates += [
-            '/data/user/0/org.liftrecorder.liftrecorder/files/liftrecorder.log',
-            '/sdcard/liftrecorder.log',
+            '/data/user/0/org.atoznback.azt_recorder/files/azt_recorder.log',
+            '/sdcard/azt_recorder.log',
         ]
     else:
-        candidates += [os.path.join(os.path.expanduser('~'), 'liftrecorder.log')]
+        candidates += [os.path.join(os.path.expanduser('~'), 'azt_recorder.log')]
     fh = None
     for path in candidates:
         try:
@@ -71,7 +74,7 @@ def _setup_logging():
         _orig_hook(etype, evalue, etb)
     sys.excepthook = _hook
 
-    print(f'[LOG] liftrecorder starting — log: {path}', flush=True)
+    print(f'[LOG] azt_recorder starting — log: {path}', flush=True)
 
 _setup_logging()
 
@@ -115,7 +118,7 @@ def _find_font(filename):
         os.path.join(os.path.expanduser('~'), '.fonts', filename),
         os.path.join(os.path.expanduser('~'), '.local/share/fonts', filename),
         # Android: Kivy bundles app assets here at runtime
-        os.path.join('/data/user/0', 'org.liftrecorder', 'files/app/fonts', filename),
+        os.path.join('/data/user/0', 'org.atoznback.azt_recorder', 'files/app/fonts', filename),
     ]
     for path in search:
         if os.path.exists(path):
@@ -211,7 +214,7 @@ KV_TEMPLATE = '''
             allow_stretch: True
             keep_ratio: True
         Label:
-            text: 'Record My Wordlist'
+            text: app.title
             font_size: sp(28)
             font_name: FONT
             bold: True
@@ -513,37 +516,16 @@ KV_TEMPLATE = '''
                     id: unrecorded_toggle
                     active: True
                     on_active: root.toggle_show_past(self.active)
-                # Recording options
-                SectionLabel:
-                    text: 'Recording'
-                BoxLayout:
-                    orientation: 'vertical'
+                # Recording task selector (shown only when >1 task available)
+                RecBtn:
+                    id: rec_task_btn
+                    text: ''
                     size_hint_y: None
-                    height: self.minimum_height
-                    spacing: dp(4)
-                    RecordingOption:
-                        id: rec_citation
-                        text: 'Citation forms'
-                        active: True
-                        on_active: root.toggle_rec_option('citation', self.active)
-                    RecordingOption:
-                        id: rec_noun
-                        text: 'Second forms (nouns)'
-                        active: False
-                        disabled: True
-                        on_active: root.toggle_rec_option('noun', self.active)
-                    RecordingOption:
-                        id: rec_verb
-                        text: 'Second forms (verbs)'
-                        active: False
-                        disabled: True
-                        on_active: root.toggle_rec_option('verb', self.active)
-                    RecordingOption:
-                        id: rec_example
-                        text: 'Examples'
-                        active: False
-                        disabled: True
-                        on_active: root.toggle_rec_option('example', self.active)
+                    height: 0
+                    opacity: 0
+                    font_size: sp(15)
+                    normal_color: (0.1647, 0.1373, 0.1255, 1)
+                    on_release: root._show_rec_overlay()
                 # Apply button
                 Widget:
                     size_hint_y: None
@@ -642,61 +624,121 @@ KV_TEMPLATE = '''
                     foreground_color: (0.9412, 0.9098, 0.8627, 1)
                     cursor_color: (0.7882, 0.4824, 0.2275, 1)
                     multiline: False
-                # ── GitHub connection ─────────────────────────────────────
-                SectionLabel:
-                    text: 'GitHub account'
-                Label:
-                    id: gh_status_label
-                    text: 'Not connected'
-                    font_size: sp(14)
-                    font_name: FONT
-                    color: (0.5412, 0.4784, 0.4157, 1)
-                    size_hint_y: None
-                    height: dp(28)
-                    halign: 'left'
-                    text_size: self.width, None
-                RecBtn:
-                    id: gh_connect_btn
-                    text: 'Connect to GitHub'
-                    normal_color: (0.1529, 0.6824, 0.3765, 1)
-                    on_release: root.start_device_flow()
-                Label:
-                    id: device_instructions_label
-                    text: ''
-                    font_size: sp(13)
-                    font_name: FONT
-                    markup: True
-                    color: (0.5412, 0.4784, 0.4157, 1)
-                    size_hint_y: None
-                    height: dp(0)
-                    halign: 'center'
-                    text_size: self.width, None
-                    on_ref_press: root.open_link(args[1])
+                # ── Host toggle ───────────────────────────────────────────
                 BoxLayout:
-                    id: device_code_box
                     size_hint_y: None
-                    height: dp(0)
-                    opacity: 0
+                    height: dp(40)
                     spacing: dp(8)
-                    padding: dp(20), 0
-                    Label:
-                        id: device_code_label
-                        text: ''
-                        font_size: sp(28)
-                        font_name: FONT
-                        bold: True
-                        color: (0.9412, 0.9098, 0.8627, 1)
-                        halign: 'center'
-                        valign: 'middle'
-                        text_size: self.size
                     RecBtn:
-                        id: copy_code_btn
-                        text: 'Copy'
-                        size_hint_x: None
-                        width: dp(64)
-                        font_size: sp(13)
+                        id: host_github_btn
+                        text: 'GitHub'
+                        font_size: sp(14)
+                        normal_color: (0.1529, 0.6824, 0.3765, 1)
+                        on_release: root.set_host('github')
+                    RecBtn:
+                        id: host_gitlab_btn
+                        text: 'GitLab'
+                        font_size: sp(14)
                         normal_color: (0.3922, 0.3137, 0.2353, 1)
-                        on_release: root.copy_code()
+                        on_release: root.set_host('gitlab')
+                # ── GitHub section ────────────────────────────────────────
+                BoxLayout:
+                    id: gh_section
+                    orientation: 'vertical'
+                    size_hint_y: None
+                    height: self.minimum_height
+                    spacing: dp(14)
+                    SectionLabel:
+                        text: 'GitHub account'
+                    Label:
+                        id: gh_status_label
+                        text: 'Not connected'
+                        font_size: sp(14)
+                        font_name: FONT
+                        color: (0.5412, 0.4784, 0.4157, 1)
+                        size_hint_y: None
+                        height: dp(28)
+                        halign: 'left'
+                        text_size: self.width, None
+                    RecBtn:
+                        id: gh_connect_btn
+                        text: 'Connect to GitHub'
+                        normal_color: (0.1529, 0.6824, 0.3765, 1)
+                        on_release: root.start_device_flow()
+                    Label:
+                        id: device_instructions_label
+                        text: ''
+                        font_size: sp(13)
+                        font_name: FONT
+                        markup: True
+                        color: (0.5412, 0.4784, 0.4157, 1)
+                        size_hint_y: None
+                        height: dp(0)
+                        halign: 'center'
+                        text_size: self.width, None
+                        on_ref_press: root.open_link(args[1])
+                    BoxLayout:
+                        id: device_code_box
+                        size_hint_y: None
+                        height: dp(0)
+                        opacity: 0
+                        spacing: dp(8)
+                        padding: dp(20), 0
+                        Label:
+                            id: device_code_label
+                            text: ''
+                            font_size: sp(28)
+                            font_name: FONT
+                            bold: True
+                            color: (0.9412, 0.9098, 0.8627, 1)
+                            halign: 'center'
+                            valign: 'middle'
+                            text_size: self.size
+                        RecBtn:
+                            id: copy_code_btn
+                            text: 'Copy'
+                            size_hint_x: None
+                            width: dp(64)
+                            font_size: sp(13)
+                            normal_color: (0.3922, 0.3137, 0.2353, 1)
+                            on_release: root.copy_code()
+                # ── GitLab section ────────────────────────────────────────
+                BoxLayout:
+                    id: gl_section
+                    orientation: 'vertical'
+                    size_hint_y: None
+                    height: 0
+                    opacity: 0
+                    spacing: dp(14)
+                    SectionLabel:
+                        text: 'GitLab account'
+                    TextInput:
+                        id: gl_token_input
+                        hint_text: 'Personal access token'
+                        font_size: sp(14)
+                        font_name: FONT
+                        size_hint_y: None
+                        height: dp(48)
+                        background_color: (0.1647, 0.1373, 0.1255, 1)
+                        foreground_color: (0.9412, 0.9098, 0.8627, 1)
+                        cursor_color: (0.7882, 0.4824, 0.2275, 1)
+                        multiline: False
+                        password: True
+                    TextInput:
+                        id: gl_username_input
+                        hint_text: 'GitLab username'
+                        font_size: sp(14)
+                        font_name: FONT
+                        size_hint_y: None
+                        height: dp(48)
+                        background_color: (0.1647, 0.1373, 0.1255, 1)
+                        foreground_color: (0.9412, 0.9098, 0.8627, 1)
+                        cursor_color: (0.7882, 0.4824, 0.2275, 1)
+                        multiline: False
+                    RecBtn:
+                        text: 'Save GitLab credentials'
+                        normal_color: (0.1529, 0.6824, 0.3765, 1)
+                        on_release: root.save_gitlab_credentials()
                 # ── Publish ───────────────────────────────────────────────
                 SectionLabel:
                     text: 'Publish this project'
@@ -775,31 +817,47 @@ KV_TEMPLATE = '''
                 height: self.minimum_height
                 spacing: dp(8)
                 padding: dp(8)
-        # Bottom buttons
+        # Bottom buttons — web sources
         BoxLayout:
             size_hint_y: None
-            height: dp(56)
-            padding: dp(12), dp(4)
-            spacing: dp(8)
+            height: dp(48)
+            padding: dp(12), dp(2)
+            spacing: dp(6)
             RecBtn:
                 text: 'openclipart'
                 normal_color: (0.1529, 0.6824, 0.3765, 1)
-                font_size: sp(13)
+                font_size: sp(12)
                 on_release: root.fetch_openclipart()
+            RecBtn:
+                text: 'FreeSVG'
+                normal_color: (0.1529, 0.5824, 0.5765, 1)
+                font_size: sp(12)
+                on_release: root.fetch_freesvg()
+            RecBtn:
+                text: 'Wikimedia'
+                normal_color: (0.2, 0.4, 0.7, 1)
+                font_size: sp(12)
+                on_release: root.fetch_wikimedia()
+        # Bottom buttons — local sources
+        BoxLayout:
+            size_hint_y: None
+            height: dp(48)
+            padding: dp(12), dp(2)
+            spacing: dp(6)
             RecBtn:
                 text: 'Photo'
                 normal_color: (0.3922, 0.3137, 0.2353, 1)
-                font_size: sp(13)
+                font_size: sp(12)
                 on_release: root.take_photo()
             RecBtn:
                 text: 'File'
                 normal_color: (0.3922, 0.3137, 0.2353, 1)
-                font_size: sp(13)
+                font_size: sp(12)
                 on_release: root.pick_from_file()
             RecBtn:
                 text: 'Cancel'
                 normal_color: (0.1647, 0.1373, 0.1255, 1)
-                font_size: sp(13)
+                font_size: sp(12)
                 on_release: app.go_recorder()
 
 # ── Reusable widgets ──────────────────────────────────────────────────────────
@@ -1060,35 +1118,6 @@ KV_TEMPLATE = '''
             valign: 'middle'
             text_size: self.size
 
-<RecordingOption>:
-    size_hint_y: None
-    height: dp(44)
-    canvas.before:
-        Color:
-            rgba: (0.15, 0.35, 0.22, 1) if (self.active and not self.disabled) else (0.1647, 0.1373, 0.1255, 1)
-        RoundedRectangle:
-            pos: self.pos
-            size: self.size
-            radius: [dp(6)]
-    BoxLayout:
-        spacing: dp(10)
-        padding: dp(10), dp(4)
-        CheckBox:
-            size_hint_x: None
-            width: dp(40)
-            active: root.active
-            disabled: root.disabled
-            color: (0.7882, 0.4824, 0.2275, 1)
-            on_active: root.active = self.active
-        Label:
-            text: root.text
-            font_size: sp(14)
-            font_name: FONT
-            color: (0.4, 0.38, 0.35, 1) if root.disabled else ((0.1529, 0.9, 0.3765, 1) if root.active else (0.9412, 0.9098, 0.8627, 1))
-            halign: 'left'
-            valign: 'middle'
-            text_size: self.size
-
 <RecBtn@Button>:
     normal_color: (0.7882, 0.4824, 0.2275, 1)
     size_hint_y: None
@@ -1228,17 +1257,6 @@ class UnrecordedToggle(BoxLayout):
         return super().on_touch_down(touch)
 
 
-class RecordingOption(BoxLayout):
-    text = StringProperty('')
-    active = BooleanProperty(False)
-
-    def on_touch_down(self, touch):
-        if self.disabled:
-            return False
-        if self.collide_point(*touch.pos):
-            self.active = not self.active
-            return True
-        return super().on_touch_down(touch)
 
 
 class GlossRow(BoxLayout):
@@ -1560,7 +1578,10 @@ class LangPickerScreen(Screen):
 
     def _on_continue(self):
         app = App.get_running_app()
-        app._pending_vernlang = self._assembled_code()
+        code = self._assembled_code()
+        app._pending_vernlang = code
+        # Show overlay immediately so user knows the button worked
+        app._show_loading_overlay(f'Setting up wordlist for {code}...')
         app.new_from_template()
 
 
@@ -1569,6 +1590,8 @@ class ImagePickerScreen(Screen):
     _entry = None
     _shown_urls = None  # set of URLs already in the grid
     _openclipart_page = 1
+    _freesvg_page = 1
+    _wikimedia_continue = ''  # continuation token for paging
 
     def populate(self, entry):
         self._entry = entry
@@ -1590,6 +1613,8 @@ class ImagePickerScreen(Screen):
         grid.clear_widgets()
         self._shown_urls = set()
         self._openclipart_page = 1
+        self._freesvg_page = 1
+        self._wikimedia_continue = ''
 
         # Gather URLs from CAWL image repo
         db = app.recorder.db if app.recorder else None
@@ -1605,11 +1630,11 @@ class ImagePickerScreen(Screen):
 
         self._add_image_buttons(grid, urls, self._cell_h)
 
-        # Auto-fetch from openclipart if internet available and few images
+        # Auto-fetch from web sources if internet available and few images
         if len(urls) < 10 and self._glosses:
             import threading
             threading.Thread(
-                target=self._auto_openclipart, args=(self._cell_h,), daemon=True).start()
+                target=self._auto_web_images, args=(self._cell_h,), daemon=True).start()
 
     def _add_image_buttons(self, grid, urls, cell_h):
         from kivy.uix.image import AsyncImage
@@ -1783,8 +1808,8 @@ class ImagePickerScreen(Screen):
         threading.Thread(
             target=self._do_openclipart, args=(cell_h,), daemon=True).start()
 
-    def _auto_openclipart(self, cell_h):
-        """Background auto-fetch from openclipart if internet available."""
+    def _auto_web_images(self, cell_h):
+        """Background auto-fetch from web sources if internet available."""
         try:
             from collab import _has_internet
             if not _has_internet():
@@ -1792,10 +1817,14 @@ class ImagePickerScreen(Screen):
         except Exception:
             return
         self._do_openclipart(cell_h)
+        self._do_wikimedia(cell_h)
+        self._do_freesvg(cell_h)
+
+    # ── openclipart ───────────────────────────────────────────────────────
 
     def _do_openclipart(self, cell_h):
         """Background: query openclipart.org for images matching glosses."""
-        import urllib.request, urllib.parse, json, ssl, re
+        import urllib.request, urllib.parse, re
         app = App.get_running_app()
         query = ' '.join(self._glosses[:3])
         try:
@@ -1804,15 +1833,13 @@ class ImagePickerScreen(Screen):
             page = self._openclipart_page
             api_url = f'https://openclipart.org/search/?query={encoded_q}&page={page}'
             req = urllib.request.Request(api_url,
-                headers={'User-Agent': 'AZTRecorder/1.10'})
+                headers={'User-Agent': f'{APP_USER_AGENT}/{__version__}'})
             with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
                 raw = resp.read()
             if not raw:
                 print(f'[openclipart] empty response for "{query}"')
                 return
             html = raw.decode('utf-8', errors='replace')
-            # Extract image URLs from HTML — openclipart serves images at
-            # /image/800px/{id} paths
             urls = []
             for m in re.finditer(r'src=["\'](/image/800px/\d+)["\']', html):
                 url = 'https://openclipart.org' + m.group(1)
@@ -1822,28 +1849,143 @@ class ImagePickerScreen(Screen):
                     break
             n = len(urls)
             print(f'[openclipart] found {n} images for "{query}" (page {page})')
-            app = App.get_running_app()
             if urls:
                 self._openclipart_page = page + 1
                 Clock.schedule_once(
-                    lambda dt: self._append_openclipart(urls, cell_h), 0)
-                Clock.schedule_once(
-                    lambda dt: app._show_toast(f'{n} images from openclipart'), 0)
+                    lambda dt: self._append_web_images(urls, cell_h, 'openclipart'), 0)
             else:
                 Clock.schedule_once(
                     lambda dt: app._show_toast('No images found on openclipart'), 0)
         except Exception as ex:
             print(f'[openclipart] fetch error: {ex}')
 
-    def _append_openclipart(self, urls, cell_h):
+    # ── FreeSVG ───────────────────────────────────────────────────────────
+
+    def fetch_freesvg(self):
+        """Fetch images from freesvg.org based on glosses."""
+        if not self._glosses:
+            return
+        import threading
+        cell_h = int(Window.height * 0.4)
+        threading.Thread(
+            target=self._do_freesvg, args=(cell_h,), daemon=True).start()
+
+    def _do_freesvg(self, cell_h):
+        """Background: query freesvg.org for public domain SVG images."""
+        import urllib.request, urllib.parse, re
+        app = App.get_running_app()
+        query = ' '.join(self._glosses[:3])
+        try:
+            ctx = app._ssl_context()
+            encoded_q = urllib.parse.quote(query)
+            page = self._freesvg_page
+            api_url = f'https://freesvg.org/search?q={encoded_q}&p={page}'
+            req = urllib.request.Request(api_url,
+                headers={'User-Agent': f'{APP_USER_AGENT}/{__version__}'})
+            with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+                raw = resp.read()
+            if not raw:
+                return
+            html = raw.decode('utf-8', errors='replace')
+            # Thumbnails at /storage/img/thumb/FILENAME.png
+            urls = []
+            for m in re.finditer(
+                    r'src=["\'](/storage/img/thumb/[^"\']+)["\']', html):
+                url = 'https://freesvg.org' + urllib.parse.quote(m.group(1))
+                if url not in urls:
+                    urls.append(url)
+                if len(urls) >= 6:
+                    break
+            n = len(urls)
+            print(f'[freesvg] found {n} images for "{query}" (page {page})')
+            if urls:
+                self._freesvg_page = page + 1
+                Clock.schedule_once(
+                    lambda dt: self._append_web_images(urls, cell_h, 'FreeSVG'), 0)
+            else:
+                Clock.schedule_once(
+                    lambda dt: app._show_toast('No images found on FreeSVG'), 0)
+        except Exception as ex:
+            print(f'[freesvg] fetch error: {ex}')
+
+    # ── Wikimedia Commons ─────────────────────────────────────────────────
+
+    def fetch_wikimedia(self):
+        """Fetch public domain images from Wikimedia Commons."""
+        if not self._glosses:
+            return
+        import threading
+        cell_h = int(Window.height * 0.4)
+        threading.Thread(
+            target=self._do_wikimedia, args=(cell_h,), daemon=True).start()
+
+    def _do_wikimedia(self, cell_h):
+        """Background: query Wikimedia Commons for public domain images."""
+        import urllib.request, urllib.parse, json
+        app = App.get_running_app()
+        query = ' '.join(self._glosses[:3])
+        try:
+            ctx = app._ssl_context()
+            encoded_q = urllib.parse.quote(query + ' drawing')
+            params = (
+                f'action=query&generator=search'
+                f'&gsrsearch={encoded_q}'
+                f'&gsrnamespace=6&gsrlimit=20'
+                f'&prop=imageinfo&iiprop=url|extmetadata'
+                f'&iiurlwidth=400&format=json'
+            )
+            if self._wikimedia_continue:
+                params += f'&gsroffset={self._wikimedia_continue}'
+            api_url = f'https://commons.wikimedia.org/w/api.php?{params}'
+            req = urllib.request.Request(api_url,
+                headers={'User-Agent': f'{APP_USER_AGENT}/{__version__}'})
+            with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
+                data = json.loads(resp.read())
+            pages = data.get('query', {}).get('pages', {})
+            # Filter to public domain / CC0 only
+            pd_keywords = ('public domain', 'cc0', 'pd-')
+            urls = []
+            for page in pages.values():
+                ii = page.get('imageinfo', [{}])[0]
+                meta = ii.get('extmetadata', {})
+                lic = meta.get('LicenseShortName', {}).get('value', '')
+                if not any(k in lic.lower() for k in pd_keywords):
+                    continue
+                thumb = ii.get('thumburl', '')
+                if thumb:
+                    urls.append(thumb)
+                if len(urls) >= 6:
+                    break
+            # Save continuation for next page
+            cont = data.get('continue', {}).get('gsroffset', '')
+            self._wikimedia_continue = str(cont) if cont else ''
+            n = len(urls)
+            print(f'[wikimedia] found {n} PD images for "{query}"')
+            if urls:
+                Clock.schedule_once(
+                    lambda dt: self._append_web_images(urls, cell_h, 'Wikimedia'), 0)
+            else:
+                Clock.schedule_once(
+                    lambda dt: app._show_toast('No public domain images on Wikimedia'), 0)
+        except Exception as ex:
+            print(f'[wikimedia] fetch error: {ex}')
+
+    # ── Shared append helper ──────────────────────────────────────────────
+
+    def _append_web_images(self, urls, cell_h, source_name):
+        """Append web-fetched images to the picker grid (main thread)."""
         grid = self.ids.get('image_grid')
         if not grid:
             return
-        # Switch to 2 cols if we now have enough images
-        total = len(grid.children) + len(urls)
+        # Count how many are genuinely new before _add_image_buttons dedup
+        new_urls = [u for u in urls if u not in (self._shown_urls or set())]
+        total = len(grid.children) + len(new_urls)
         if total > 2:
             grid.cols = 2
         self._add_image_buttons(grid, urls, cell_h)
+        if new_urls:
+            app = App.get_running_app()
+            app._show_toast(f'{len(new_urls)} images from {source_name}')
 
     def take_photo(self):
         """Launch camera to take a photo."""
@@ -2014,13 +2156,8 @@ class ConfigScreen(Screen):
         ir = self.ids.get('image_repo_input')
         if ir:
             ir.text = app._load_prefs().get('image_repo', '')
-        # Load recording options
-        prefs = app._load_prefs()
-        rec_opts = prefs.get('rec_options', {})
-        for key in ('citation', 'noun', 'verb', 'example'):
-            w = self.ids.get(f'rec_{key}')
-            if w:
-                w.active = rec_opts.get(key, key == 'citation')
+        # Build recording options (only show when >1 task available)
+        self._build_rec_options(app)
 
     def build_lang_toggles(self):
         app = App.get_running_app()
@@ -2054,13 +2191,130 @@ class ConfigScreen(Screen):
         if app.recorder:
             app.recorder.only_unrecorded = not show_past
 
-    def toggle_rec_option(self, key, active):
+    # Assumed second-form field types (until secondformfield is available)
+    _SECOND_FORM_FIELDS = {'Noun': 'Plural', 'Verb': 'Imperative'}
+
+    def _build_rec_options(self, app):
+        """Populate recording task button; hide if only one task available."""
+        btn = self.ids.get('rec_task_btn')
+        if not btn:
+            return
+        available = self._available_rec_tasks(app)
+        self._rec_available = available
+        if len(available) <= 1:
+            btn.height = 0
+            btn.opacity = 0
+            return
+        btn.height = dp(44)
+        btn.opacity = 1
+        # Restore saved selection
+        prefs = app._load_prefs()
+        saved_key = prefs.get('rec_task', 'citation')
+        saved_label = next((t for k, t in available if k == saved_key), available[0][1])
+        btn.text = f'Recording: {saved_label}'
+
+    def _show_rec_overlay(self):
+        """Show a modal overlay with recording task options."""
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.button import Button
+        from kivy.uix.modalview import ModalView
+
+        available = getattr(self, '_rec_available', [])
+        if not available:
+            return
+
         app = App.get_running_app()
         prefs = app._load_prefs()
-        rec_opts = prefs.get('rec_options', {})
-        rec_opts[key] = active
-        prefs['rec_options'] = rec_opts
-        app._save_prefs_dict(prefs)
+        current_key = prefs.get('rec_task', 'citation')
+
+        view = ModalView(
+            size_hint=(0.85, None),
+            height=dp(52 * len(available) + 20),
+            background_color=(0, 0, 0, 0.85),
+            auto_dismiss=True,
+        )
+        box = BoxLayout(
+            orientation='vertical', spacing=dp(4),
+            padding=(dp(10), dp(10)),
+        )
+
+        for key, label in available:
+            is_selected = key == current_key
+            btn = Button(
+                text=label,
+                font_name=_FONT_NAME,
+                font_size=sp(16),
+                size_hint_y=None, height=dp(44),
+                background_color=(0.1529, 0.6824, 0.3765, 1) if is_selected
+                else (0.1647, 0.1373, 0.1255, 1),
+                color=(0.94, 0.91, 0.86, 1),
+            )
+
+            def _select(k=key, l=label, v=view):
+                prefs2 = app._load_prefs()
+                prefs2['rec_task'] = k
+                app._save_prefs_dict(prefs2)
+                task_btn = self.ids.get('rec_task_btn')
+                if task_btn:
+                    task_btn.text = f'Recording: {l}'
+                v.dismiss()
+
+            btn.bind(on_release=lambda inst, cb=_select: cb())
+            box.add_widget(btn)
+
+        view.add_widget(box)
+        view.open()
+
+    @staticmethod
+    def _available_rec_tasks(app):
+        """Return list of (key, label) for recording tasks relevant to the data.
+
+        Checks for actual LIFT field elements rather than just grammatical-info.
+        For second forms, assumes Noun→Plural and Verb→Imperative field types.
+        """
+        tasks = [('citation', 'Citation forms')]
+        if not app.recorder:
+            return tasks
+        db = app.recorder.db
+        vernlang = db.vernlang
+
+        # Check for actual field elements in the LIFT data
+        has_plural = False
+        has_imperative = False
+        has_example = False
+        for entry in db.entries:
+            el = entry.get('_el')
+            if el is None:
+                continue
+            # Check top-level field elements: Entry/field[@type=X]/form[@lang=vernlang]/text
+            for field_el in el.findall('field'):
+                ft = field_el.get('type', '')
+                if ft == 'Plural' and not has_plural:
+                    for form in field_el.findall('form'):
+                        if form.get('lang') == vernlang and db._text(form):
+                            has_plural = True
+                            break
+                elif ft == 'Imperative' and not has_imperative:
+                    for form in field_el.findall('form'):
+                        if form.get('lang') == vernlang and db._text(form):
+                            has_imperative = True
+                            break
+            # Check for examples in senses
+            if not has_example:
+                for sense in el.findall('sense'):
+                    if sense.find('example') is not None:
+                        has_example = True
+                        break
+            if has_plural and has_imperative and has_example:
+                break
+        if has_plural:
+            tasks.append(('noun', 'Second forms (nouns)'))
+        if has_imperative:
+            tasks.append(('verb', 'Second forms (verbs)'))
+        if has_example:
+            tasks.append(('example', 'Examples'))
+        return tasks
+
 
     def apply_and_go(self):
         app = App.get_running_app()
@@ -2738,11 +2992,11 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.11.0'
+__version__ = '1.13.2'
 
 
 class LIFTRecorderApp(App):
-    title = 'Record My Wordlist'
+    title = APP_TAGLINE
     icon = 'icons/icon.png'
     version_string = StringProperty(f'version {__version__}')
     recorder: RecorderController = None
@@ -3003,6 +3257,7 @@ class LIFTRecorderApp(App):
         except Exception as ex:
             msg = f'Could not download:\n{ex}'
             print(f'URL download error: {ex}')
+            Clock.schedule_once(lambda dt: self._dismiss_loading_overlay(), 0)
             Clock.schedule_once(lambda dt: self._show_error(msg), 0)
 
     # ── New from SILCAWL template ──────────────────────────────────────────────
@@ -3023,6 +3278,30 @@ class LIFTRecorderApp(App):
         threading.Thread(
             target=self._download_and_open,
             args=(self._SILCAWL_URL,), daemon=True).start()
+
+    def _show_loading_overlay(self, msg):
+        """Show a modal overlay that stays until dismissed."""
+        from kivy.uix.label import Label
+        from kivy.uix.modalview import ModalView
+        self._dismiss_loading_overlay()
+        view = ModalView(
+            size_hint=(0.8, None), height=dp(80),
+            background_color=(0, 0, 0, 0.85),
+            auto_dismiss=False,
+        )
+        view.add_widget(Label(
+            text=msg, font_size=sp(16), font_name=_FONT_NAME,
+            color=(0.94, 0.91, 0.86, 1),
+        ))
+        self._loading_overlay = view
+        view.open()
+
+    def _dismiss_loading_overlay(self):
+        """Dismiss the loading overlay if one is showing."""
+        overlay = getattr(self, '_loading_overlay', None)
+        if overlay:
+            overlay.dismiss()
+            self._loading_overlay = None
 
     def _show_toast(self, msg, duration=1.5):
         """Show a brief overlay message that auto-dismisses."""
@@ -3277,6 +3556,7 @@ class LIFTRecorderApp(App):
             print(f'[image-prefetch] cached {count} new images')
 
     def load_lift(self, path):
+        self._dismiss_loading_overlay()
         path = os.path.abspath(path)
         try:
             db = LIFTDatabase(path, image_repo=self._image_repo(),
@@ -3411,12 +3691,13 @@ class LIFTRecorderApp(App):
             return
         prefs = self._load_prefs()
         name = prefs.get('collab_name', '') or 'Recorder'
-        _, token = self._get_gh_credentials()
         project_dir = self.recorder.db.dir
+        prefs_path = self._prefs_path
         import threading
         def _worker():
             try:
-                from collab import commit_audio_and_sync
+                from collab import commit_audio_and_sync, get_valid_token
+                _, token = get_valid_token(prefs_path)
                 result = commit_audio_and_sync(
                     project_dir, name, 'x-access-token', token)
                 print(f'[auto-sync] {result}')
@@ -3493,43 +3774,50 @@ class LIFTRecorderApp(App):
         sm.current = 'collab'
 
     def share_apk(self):
-        """Share the running APK via the OS share sheet."""
+        """Share the running APK via Android's share sheet using MediaStore content:// URI."""
         if platform == 'android':
             try:
-                import shutil
                 from jnius import autoclass, cast
                 PythonActivity = autoclass('org.kivy.android.PythonActivity')
                 Intent = autoclass('android.content.Intent')
-                Uri = autoclass('android.net.Uri')
-                File = autoclass('java.io.File')
-                StrictMode = autoclass('android.os.StrictMode')
+                ContentValues = autoclass('android.content.ContentValues')
+                MediaStoreDownloads = autoclass(
+                    'android.provider.MediaStore$Downloads')
                 activity = PythonActivity.mActivity
-                pm = activity.getPackageManager()
-                pkg = activity.getPackageName()
-                app_info = pm.getApplicationInfo(pkg, 0)
+                context = cast('android.content.Context', activity)
+                pm = context.getPackageManager()
+                app_info = pm.getApplicationInfo(
+                    context.getPackageName(), 0)
                 apk_path = app_info.sourceDir
-                # Copy to external cache so other apps can read it
-                cache_dir = activity.getExternalCacheDir().getAbsolutePath()
-                dest = os.path.join(cache_dir, 'RecordMyWordlist.apk')
-                shutil.copy2(apk_path, dest)
-                dest_file = File(dest)
-                # Temporarily allow file:// URIs (no FileProvider in p4a)
-                old_policy = StrictMode.getVmPolicy()
-                builder = autoclass('android.os.StrictMode$VmPolicy$Builder')()
-                StrictMode.setVmPolicy(builder.build())
-                try:
-                    uri = Uri.fromFile(dest_file)
-                    intent = Intent(Intent.ACTION_SEND)
-                    intent.setType('application/vnd.android.package-archive')
-                    intent.putExtra(Intent.EXTRA_STREAM, cast(
-                        'android.os.Parcelable', uri))
-                    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    chooser = Intent.createChooser(intent, cast(
-                        'java.lang.CharSequence',
-                        autoclass('java.lang.String')('Share app')))
-                    activity.startActivity(chooser)
-                finally:
-                    StrictMode.setVmPolicy(old_policy)
+                # Insert into MediaStore Downloads to get a content:// URI
+                values = ContentValues()
+                values.put('_display_name', 'azt_recorder.apk')
+                values.put('mime_type',
+                           'application/vnd.android.package-archive')
+                resolver = context.getContentResolver()
+                uri = resolver.insert(
+                    MediaStoreDownloads.EXTERNAL_CONTENT_URI, values)
+                if not uri:
+                    self._show_error('Share failed: could not create MediaStore entry')
+                    return
+                # Copy APK bytes into the MediaStore entry
+                fos = resolver.openOutputStream(uri)
+                with open(apk_path, 'rb') as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        fos.write(chunk)
+                fos.close()
+                intent = Intent(Intent.ACTION_SEND)
+                intent.setType('application/vnd.android.package-archive')
+                intent.putExtra(Intent.EXTRA_STREAM,
+                                cast('android.os.Parcelable', uri))
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                chooser = Intent.createChooser(
+                    intent,
+                    autoclass('java.lang.String')('Share app'))
+                activity.startActivity(chooser)
             except Exception as ex:
                 print(f'Share APK error: {ex}')
                 self._show_error(f'Could not share APK:\n{ex}')
@@ -3632,9 +3920,13 @@ class LIFTRecorderApp(App):
             tex = img_widget.texture
             pixels = tex.pixels
             w, h = tex.size
+            # Kivy textures from file/URL loaders may have uvpos[1]==0
+            # (already top-down) or uvpos[1]!=0 (OpenGL bottom-up)
+            needs_flip = (tex.uvpos[1] == 0)
             threading.Thread(
                 target=self._save_texture_to_file,
-                args=(pixels, w, h, dest, entry), daemon=True).start()
+                args=(pixels, w, h, dest, entry, needs_flip),
+                daemon=True).start()
         else:
             threading.Thread(
                 target=self._download_remote_image,
@@ -3665,12 +3957,13 @@ class LIFTRecorderApp(App):
         except Exception as ex:
             print(f'[image-save] cache copy error: {ex}')
 
-    def _save_texture_to_file(self, pixels, w, h, dest, entry):
+    def _save_texture_to_file(self, pixels, w, h, dest, entry, needs_flip=True):
         """Save raw RGBA pixel data to a PNG file."""
         try:
             from PIL import Image as PILImage
             img = PILImage.frombytes('RGBA', (w, h), pixels)
-            img = img.transpose(PILImage.FLIP_TOP_BOTTOM)  # Kivy textures are flipped
+            if needs_flip:
+                img = img.transpose(PILImage.FLIP_TOP_BOTTOM)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             max_dim = 1284
             if w > max_dim or h > max_dim:
@@ -3908,27 +4201,28 @@ class LIFTRecorderApp(App):
         # Sync status
         self._update_sync_status()
 
-        # Image — size to actual width, maintaining aspect ratio
+        # Image — only update if source changed
         if 'entry_image' in ids:
             img = ids.entry_image
             if r.has_image:
                 new_src = r.image_path
-                if img.source == new_src:
-                    img.reload()
-                else:
+                if img.source != new_src:
                     img.source = new_src
-                img.opacity = 1
-                # Bind texture size to compute correct height once loaded
-                def _resize_image(img_ref, *args):
-                    if img_ref.texture:
-                        tw, th = img_ref.texture.size
-                        if tw > 0:
-                            img_ref.height = img_ref.width * th / tw
-                    elif img_ref.height == 0:
-                        img_ref.height = img_ref.width  # fallback square
-                img.bind(texture=lambda *a: _resize_image(img))
-                img.bind(width=lambda *a: _resize_image(img))
-                _resize_image(img)
+                    img.opacity = 1
+                    # Bind texture size to compute correct height once loaded
+                    def _resize_image(img_ref, *args):
+                        if img_ref.texture:
+                            tw, th = img_ref.texture.size
+                            if tw > 0:
+                                h = img_ref.width * th / tw
+                                img_ref.height = min(h, dp(500))
+                        elif img_ref.height == 0:
+                            img_ref.height = min(img_ref.width, dp(500))
+                    img.bind(texture=lambda *a: _resize_image(img))
+                    img.bind(width=lambda *a: _resize_image(img))
+                    _resize_image(img)
+                elif img.opacity == 0:
+                    img.opacity = 1
             else:
                 img.source = ''
                 img.height = 0

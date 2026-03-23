@@ -1,5 +1,5 @@
 """
-Git collaboration support for A-Z+T Recorder.
+Git collaboration support for A-Z+T Recorder (part of the A-Z+T suite).
 
 Uses dulwich (pure Python git) so it works on Android without a system git binary.
 
@@ -12,7 +12,7 @@ Workflow
 
 Authentication
 --------------
-Uses a GitHub App ("A-Z+T Recorder") with device flow for user authentication.
+Uses a GitHub App with device flow for user authentication.
 Only the public client_id is embedded in the app — no private key needed.
 Tokens are stored locally and refreshed automatically.
 """
@@ -35,8 +35,10 @@ logging.getLogger('dulwich').setLevel(logging.WARNING)
 # Enable "Device Flow" in the app settings.
 # Required permissions: Repository → Administration: Write, Contents: Write
 # Set these after creating the app:
+from appinfo import APP_SLUG
+
 GITHUB_APP_CLIENT_ID = 'Iv23li66Fo9MBReatv6i'  # set after registering the GitHub App
-GITHUB_APP_NAME = 'a-z-t-recorder'
+GITHUB_APP_NAME = APP_SLUG
 GITHUB_COLLABORATOR = 'kent-rasmussen'  # auto-added to new repos
 
 # ── SSL fix for Android (missing CA bundle) ──────────────────────────────────

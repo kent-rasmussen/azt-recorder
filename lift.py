@@ -1,5 +1,5 @@
 """
-lift.py — LIFT XML lexicon database reader/writer for LIFT Recorder.
+lift.py — LIFT XML lexicon database reader/writer for A-Z+T Recorder.
 
 Provides LIFTDatabase which:
   - Parses a .lift file into entry dicts
@@ -28,6 +28,7 @@ ET.register_namespace('', '')
 
 _DEFAULT_IMAGE_REPO = 'kent-rasmussen/images_CAWL'
 _GITHUB_BRANCH = 'main'
+_IMAGE_CACHE_VERSION = 2  # bump to invalidate stale caches
 
 
 class _CAWLImageResolver:
@@ -96,14 +97,11 @@ class _CAWLImageResolver:
                 try:
                     with open(self._cache_file, 'r', encoding='utf-8') as f:
                         cached = json.load(f)
-                    # Cache may be old format (flat dict) or new (with 'all')
-                    if isinstance(cached, dict) and 'all' in cached:
+                    if (isinstance(cached, dict) and 'all' in cached
+                            and cached.get('v') == _IMAGE_CACHE_VERSION):
                         self._urls = cached['first']
                         self._all_urls = cached['all']
-                    else:
-                        self._urls = cached
-                        self._all_urls = {k: [v] for k, v in cached.items()}
-                    return
+                        return
                 except Exception:
                     pass
 
@@ -134,29 +132,48 @@ class _CAWLImageResolver:
                         continue
                     path = item['path']
                     parts = path.split('/')
-                    if len(parts) != 2:
+                    if len(parts) == 1:
+                        # Root-level file: 0001.png, 0038.jpg
+                        filename = parts[0]
+                    elif len(parts) == 2:
+                        # Subdirectory: 0001_word/image.png
+                        filename = parts[1]
+                    else:
                         continue
                     # Skip non-image files (e.g. .txt); accept
                     # .png/.jpg/.jpeg and extensionless files (common)
-                    low = parts[1].lower()
+                    low = filename.lower()
                     if '.' in low and not (low.endswith('.png')
                             or low.endswith('.jpg')
                             or low.endswith('.jpeg')):
                         continue
+                    # Extract CAWL number from first path component
                     cawl_num = parts[0].split('_')[0]
+                    # Strip extension for root-level files (0001.png → 0001)
+                    if len(parts) == 1 and '.' in cawl_num:
+                        cawl_num = cawl_num.rsplit('.', 1)[0]
                     encoded = '/'.join(
                         urllib.parse.quote(p, safe='') for p in parts
                     )
                     url = f'{self._raw_base}/{encoded}'
+                    # Prefer files with __ in filename (generic/default image)
+                    is_default = '__' in filename
                     if cawl_num not in self._urls:
                         self._urls[cawl_num] = url
-                    self._all_urls.setdefault(cawl_num, []).append(url)
+                    elif is_default and '__' not in self._urls[cawl_num].split('/')[-1]:
+                        self._urls[cawl_num] = url
+                    # Put __ files first in the all-urls list
+                    if is_default:
+                        self._all_urls.setdefault(cawl_num, []).insert(0, url)
+                    else:
+                        self._all_urls.setdefault(cawl_num, []).append(url)
 
                 # Persist to disk
                 try:
                     os.makedirs(self._cache_dir, exist_ok=True)
                     with open(self._cache_file, 'w', encoding='utf-8') as f:
-                        json.dump({'first': self._urls, 'all': self._all_urls}, f)
+                        json.dump({'v': _IMAGE_CACHE_VERSION,
+                              'first': self._urls, 'all': self._all_urls}, f)
                 except OSError:
                     pass
             except Exception as e:
