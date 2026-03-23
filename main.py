@@ -171,20 +171,36 @@ KV_TEMPLATE = '''
 #:set FONT '{font_name}'
 
 <RootScreen>:
-    ScreenManager:
-        id: sm
-        WelcomeScreen:
-            name: 'welcome'
-        RecorderScreen:
-            name: 'recorder'
-        ConfigScreen:
-            name: 'config'
-        CollabScreen:
-            name: 'collab'
-        LangPickerScreen:
-            name: 'langpicker'
-        ImagePickerScreen:
-            name: 'imagepicker'
+    canvas.before:
+        Color:
+            rgba: T.BG
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    BoxLayout:
+        orientation: 'vertical'
+        pos: root.pos
+        size: root.size
+        Widget:
+            size_hint_y: None
+            height: root._inset_top
+        ScreenManager:
+            id: sm
+            WelcomeScreen:
+                name: 'welcome'
+            RecorderScreen:
+                name: 'recorder'
+            ConfigScreen:
+                name: 'config'
+            CollabScreen:
+                name: 'collab'
+            LangPickerScreen:
+                name: 'langpicker'
+            ImagePickerScreen:
+                name: 'imagepicker'
+        Widget:
+            size_hint_y: None
+            height: root._inset_bottom
 
 <WelcomeScreen>:
     canvas.before:
@@ -509,14 +525,6 @@ KV_TEMPLATE = '''
                     id: unrecorded_toggle
                     active: False
                     on_active: root.toggle_show_past(self.active)
-                # Theme selector
-                SectionLabel:
-                    text: 'Theme'
-                BoxLayout:
-                    id: theme_row
-                    size_hint_y: None
-                    height: dp(44)
-                    spacing: dp(6)
                 # Recording task selector
                 BoxLayout:
                     id: rec_task_row
@@ -1301,7 +1309,38 @@ class LangToggle(BoxLayout):
 # ── Screens ────────────────────────────────────────────────────────────────────
 
 class RootScreen(Screen):
-    pass
+    _inset_top = NumericProperty(0)
+    _inset_bottom = NumericProperty(0)
+
+    def on_kv_post(self, *args):
+        if platform != 'android':
+            return
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            window = activity.getWindow()
+            decor = window.getDecorView()
+            insets = decor.getRootWindowInsets()
+            if insets is None:
+                return
+            # API 30+: getInsets(Type.systemBars())
+            try:
+                WindowInsets = autoclass('android.view.WindowInsets$Type')
+                sys_insets = insets.getInsets(WindowInsets.systemBars())
+                density = activity.getResources().getDisplayMetrics().density
+                self._inset_top = sys_insets.top / density
+                self._inset_bottom = sys_insets.bottom / density
+            except Exception:
+                # Pre-API 30 fallback
+                si = insets.getStableInsetTop()
+                bi = insets.getStableInsetBottom()
+                density = activity.getResources().getDisplayMetrics().density
+                self._inset_top = si / density
+                self._inset_bottom = bi / density
+            print(f'[insets] top={self._inset_top:.0f}dp  bottom={self._inset_bottom:.0f}dp')
+        except Exception as ex:
+            print(f'[insets] could not read: {ex}')
 
 
 class WelcomeScreen(Screen):
@@ -2183,8 +2222,7 @@ class ConfigScreen(Screen):
         if toggle:
             toggle.active = show_past
         self.only_unrecorded = not show_past
-        # Build theme selector and recording options
-        self._build_theme_buttons()
+        # Build recording options
         self._build_rec_options(app)
 
     def build_lang_toggles(self):
@@ -2294,7 +2332,20 @@ class ConfigScreen(Screen):
             mv.dismiss()
         def _restart(b):
             mv.dismiss()
-            app.stop()
+            if platform == 'android':
+                from jnius import autoclass
+                Intent = autoclass('android.content.Intent')
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                activity = PythonActivity.mActivity
+                intent = activity.getPackageManager().getLaunchIntentForPackage(
+                    activity.getPackageName())
+                intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                activity.startActivity(intent)
+                activity.finishAffinity()
+            else:
+                app.stop()
+                os.execv(sys.executable, [sys.executable] + sys.argv)
         cancel_btn.bind(on_release=_cancel)
         ok_btn.bind(on_release=_restart)
         btn_row.add_widget(cancel_btn)
@@ -3190,7 +3241,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.15.0'
+__version__ = '1.15.2'
 
 
 class LIFTRecorderApp(App):
@@ -3263,7 +3314,7 @@ class LIFTRecorderApp(App):
         try:
             # Apply saved theme before KV is parsed
             prefs = self._load_prefs()
-            theme.set_theme(prefs.get('theme', 'Earth'))
+            theme.set_theme(prefs.get('theme', 'Ocean'))
             Builder.load_string(KV)
             self.root = RootScreen()
             return self.root

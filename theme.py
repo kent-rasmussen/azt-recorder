@@ -148,7 +148,7 @@ THEMES = {
 
 THEME_NAMES = list(THEMES.keys())
 
-current_theme = 'Earth'
+current_theme = 'Ocean'
 
 
 def _to_rgb255(rgba):
@@ -165,7 +165,7 @@ def set_theme(name):
     """Apply a named palette, updating all module-level colour globals."""
     global current_theme
     if name not in THEMES:
-        name = 'Earth'
+        name = 'Ocean'
     palette = THEMES[name]
     current_theme = name
     mod = sys.modules[__name__]
@@ -178,4 +178,4 @@ def set_theme(name):
 
 
 # ── Apply default palette on import ─────────────────────────────────────────
-set_theme('Earth')
+set_theme('Ocean')
