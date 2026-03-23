@@ -3100,7 +3100,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.14.0'
+__version__ = '1.14.1'
 
 
 class LIFTRecorderApp(App):
@@ -3391,18 +3391,34 @@ class LIFTRecorderApp(App):
         """Show a modal overlay that stays until dismissed."""
         from kivy.uix.label import Label
         from kivy.uix.modalview import ModalView
+        from kivy.uix.boxlayout import BoxLayout
         self._dismiss_loading_overlay()
         view = ModalView(
-            size_hint=(0.8, None), height=dp(80),
+            size_hint=(0.8, None), height=dp(100),
             background_color=theme.OVERLAY_DARK,
             auto_dismiss=False,
         )
-        view.add_widget(Label(
+        box = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
+        lbl = Label(
             text=msg, font_size=sp(16), font_name=_FONT_NAME,
-            color=theme.TEXT,
-        ))
+            color=theme.TEXT, size_hint_y=0.6,
+        )
+        detail = Label(
+            text='', font_size=sp(12), font_name=_FONT_NAME,
+            color=theme.TEXT_DIM, size_hint_y=0.4,
+        )
+        box.add_widget(lbl)
+        box.add_widget(detail)
+        view.add_widget(box)
         self._loading_overlay = view
+        self._loading_detail = detail
         view.open()
+
+    def _update_loading_detail(self, text):
+        """Update the detail line of the loading overlay (thread-safe)."""
+        detail = getattr(self, '_loading_detail', None)
+        if detail:
+            detail.text = text
 
     def _dismiss_loading_overlay(self):
         """Dismiss the loading overlay if one is showing."""
@@ -3410,6 +3426,7 @@ class LIFTRecorderApp(App):
         if overlay:
             overlay.dismiss()
             self._loading_overlay = None
+            self._loading_detail = None
 
     def _show_toast(self, msg, duration=1.5):
         """Show a brief overlay message that auto-dismisses."""
@@ -4301,17 +4318,31 @@ class LIFTRecorderApp(App):
             repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')
             dest = os.path.join(self.user_data_dir, 'projects', repo_name)
 
+            self._show_loading_overlay('Cloning repository...')
             import threading
             from collab import clone_repo
 
+            def _on_progress(line):
+                Clock.schedule_once(
+                    lambda dt, t=line: self._update_loading_detail(t), 0)
+
             def _worker():
-                lift_path, log = clone_repo(
-                    clone_url, dest, git_user, token)
-                if lift_path:
-                    Clock.schedule_once(lambda dt: self.load_lift(lift_path), 0)
-                else:
+                try:
+                    lift_path, log = clone_repo(
+                        clone_url, dest, git_user, token,
+                        on_progress=_on_progress)
+                    print(f'[clone] result: {log}')
+                    if lift_path:
+                        Clock.schedule_once(lambda dt: self.load_lift(lift_path), 0)
+                    else:
+                        Clock.schedule_once(
+                            lambda dt: (self._dismiss_loading_overlay(),
+                                        self._show_error(log)), 0)
+                except Exception as ex:
+                    print(f'[clone] error: {ex}')
                     Clock.schedule_once(
-                        lambda dt: self._show_error(log), 0)
+                        lambda dt: (self._dismiss_loading_overlay(),
+                                    self._show_error(str(ex))), 0)
 
             threading.Thread(target=_worker, daemon=True).start()
 

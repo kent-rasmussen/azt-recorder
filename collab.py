@@ -690,20 +690,64 @@ def init_repo(project_dir, remote_url, username, token,
     return '\n'.join(log)
 
 
-def clone_repo(remote_url, dest_dir, username, token):
+class _ProgressStream(io.RawIOBase):
+    """Captures git protocol progress lines and forwards to a callback.
+
+    Dulwich writes progress messages like ``Receiving objects:  75% (30/40)\\r``
+    to *errstream*.  This stream buffers them and calls *on_progress(line)* on
+    each complete line (delimited by ``\\r`` or ``\\n``).
+    """
+
+    def __init__(self, on_progress=None):
+        self._callback = on_progress
+        self._buf = b''
+
+    def write(self, data):
+        if not data:
+            return 0
+        self._buf += data
+        while b'\r' in self._buf or b'\n' in self._buf:
+            # Split on whichever delimiter comes first
+            ri = self._buf.find(b'\r')
+            ni = self._buf.find(b'\n')
+            if ri == -1:
+                idx = ni
+            elif ni == -1:
+                idx = ri
+            else:
+                idx = min(ri, ni)
+            line = self._buf[:idx].decode('utf-8', errors='replace').strip()
+            self._buf = self._buf[idx + 1:]
+            if line and self._callback:
+                self._callback(line)
+        return len(data)
+
+    def writable(self):
+        return True
+
+
+def clone_repo(remote_url, dest_dir, username, token, on_progress=None):
     """
     Clone remote_url into dest_dir.
     Returns (lift_path_or_None, log_string).
+    *on_progress* is called with status strings from the git protocol.
     """
     _ensure_ssl()
     from dulwich import porcelain
     log = []
+
+    errstream = _ProgressStream(on_progress) if on_progress else io.BytesIO()
+
+    # Remove any previous dest so clone starts fresh
+    if os.path.exists(dest_dir):
+        import shutil
+        shutil.rmtree(dest_dir)
     try:
         os.makedirs(dest_dir, exist_ok=True)
         porcelain.clone(
             remote_url, dest_dir,
             username=username, password=token,
-            errstream=io.BytesIO(),
+            errstream=errstream,
         )
         log.append(f'Cloned to {dest_dir}')
     except Exception as exc:
