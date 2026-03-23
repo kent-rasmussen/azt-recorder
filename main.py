@@ -509,6 +509,14 @@ KV_TEMPLATE = '''
                     id: unrecorded_toggle
                     active: False
                     on_active: root.toggle_show_past(self.active)
+                # Theme selector
+                SectionLabel:
+                    text: 'Theme'
+                BoxLayout:
+                    id: theme_row
+                    size_hint_y: None
+                    height: dp(44)
+                    spacing: dp(6)
                 # Recording task selector
                 BoxLayout:
                     id: rec_task_row
@@ -2175,7 +2183,8 @@ class ConfigScreen(Screen):
         if toggle:
             toggle.active = show_past
         self.only_unrecorded = not show_past
-        # Build recording options
+        # Build theme selector and recording options
+        self._build_theme_buttons()
         self._build_rec_options(app)
 
     def build_lang_toggles(self):
@@ -2212,6 +2221,87 @@ class ConfigScreen(Screen):
         prefs = app._load_prefs()
         prefs['show_past_work'] = show_past
         app._save_prefs_dict(prefs)
+
+    def _build_theme_buttons(self):
+        """Populate theme selector row with one button per theme."""
+        from kivy.uix.button import Button
+        row = self.ids.get('theme_row')
+        if not row:
+            return
+        row.clear_widgets()
+        for name in theme.THEME_NAMES:
+            is_active = (name == theme.current_theme)
+            btn = Button(
+                text=name,
+                font_size=sp(14),
+                font_name=_FONT_NAME,
+                background_normal='',
+                background_color=theme.GREEN if is_active else theme.SURFACE,
+                color=theme.TEXT,
+                size_hint_x=1,
+            )
+            btn.bind(on_release=lambda b, n=name: self._set_theme(n))
+            row.add_widget(btn)
+
+    def _set_theme(self, name):
+        """Save the selected theme and offer to restart."""
+        if name == theme.current_theme:
+            return
+        app = App.get_running_app()
+        prefs = app._load_prefs()
+        prefs['theme'] = name
+        app._save_prefs_dict(prefs)
+        # Update button highlights
+        row = self.ids.get('theme_row')
+        if row:
+            for btn in row.children:
+                btn.background_color = theme.GREEN if btn.text == name \
+                    else theme.SURFACE
+        # Confirm restart
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.button import Button
+        from kivy.uix.label import Label
+        from kivy.uix.modalview import ModalView
+        mv = ModalView(size_hint=(0.8, None), height=dp(140),
+                       background_color=theme.OVERLAY_DARK)
+        box = BoxLayout(orientation='vertical', padding=dp(12), spacing=dp(12))
+        box.add_widget(Label(
+            text=f'Restart with {name} theme?',
+            font_size=sp(16), font_name=_FONT_NAME,
+            color=theme.TEXT, halign='center',
+            size_hint_y=None, height=dp(40),
+        ))
+        btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
+        cancel_btn = Button(
+            text='Cancel', font_size=sp(14), font_name=_FONT_NAME,
+            background_normal='', background_color=theme.SURFACE,
+            color=theme.TEXT,
+        )
+        ok_btn = Button(
+            text='OK', font_size=sp(14), font_name=_FONT_NAME,
+            background_normal='', background_color=theme.GREEN,
+            color=theme.TEXT,
+        )
+        def _cancel(b):
+            # Revert pref to current theme
+            prefs2 = app._load_prefs()
+            prefs2['theme'] = theme.current_theme
+            app._save_prefs_dict(prefs2)
+            if row:
+                for btn in row.children:
+                    btn.background_color = theme.GREEN \
+                        if btn.text == theme.current_theme else theme.SURFACE
+            mv.dismiss()
+        def _restart(b):
+            mv.dismiss()
+            app.stop()
+        cancel_btn.bind(on_release=_cancel)
+        ok_btn.bind(on_release=_restart)
+        btn_row.add_widget(cancel_btn)
+        btn_row.add_widget(ok_btn)
+        box.add_widget(btn_row)
+        mv.add_widget(box)
+        mv.open()
 
     # Assumed second-form field types (until secondformfield is available)
     _SECOND_FORM_FIELDS = {'Noun': 'Plural', 'Verb': 'Imperative'}
@@ -3100,7 +3190,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.14.2'
+__version__ = '1.15.0'
 
 
 class LIFTRecorderApp(App):
@@ -3171,6 +3261,9 @@ class LIFTRecorderApp(App):
 
     def build(self):
         try:
+            # Apply saved theme before KV is parsed
+            prefs = self._load_prefs()
+            theme.set_theme(prefs.get('theme', 'Earth'))
             Builder.load_string(KV)
             self.root = RootScreen()
             return self.root
