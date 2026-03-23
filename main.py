@@ -2992,7 +2992,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.13.2'
+__version__ = '1.13.3'
 
 
 class LIFTRecorderApp(App):
@@ -3729,21 +3729,21 @@ class LIFTRecorderApp(App):
             text_size=(dp(280), None),
         ))
         content.add_widget(Label(
-            text='Start a new project or switch projects?',
+            text='Start a new wordlist with this template?',
             font_size=sp(14), font_name=_FONT_NAME,
             color=(0.5412, 0.4784, 0.4157, 1),
             size_hint_y=None, height=dp(30),
         ))
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
         cancel_btn = Button(text='Cancel', font_size=sp(14))
-        go_btn = Button(text='Start over', font_size=sp(14),
+        go_btn = Button(text='Yes', font_size=sp(14),
                         background_color=(0.7882, 0.4824, 0.2275, 1))
-        btn_row.add_widget(cancel_btn)
         btn_row.add_widget(go_btn)
+        btn_row.add_widget(cancel_btn)
         content.add_widget(btn_row)
 
         popup = Popup(
-            title='Current project',
+            title='Start a new wordlist',
             content=content,
             size_hint=(0.9, None), height=dp(240),
             auto_dismiss=True,
