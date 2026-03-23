@@ -719,6 +719,10 @@ class _ProgressStream(io.RawIOBase):
             line = self._buf[:idx].decode('utf-8', errors='replace').strip()
             self._buf = self._buf[idx + 1:]
             if line and self._callback:
+                # Split "Phase: detail" onto two lines for narrow displays
+                if ':' in line:
+                    phase, _, detail = line.partition(':')
+                    line = f'{phase}:\n{detail.strip()}'
                 self._callback(line)
         return len(data)
 

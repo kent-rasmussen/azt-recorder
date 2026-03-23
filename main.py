@@ -3100,7 +3100,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.14.1'
+__version__ = '1.14.2'
 
 
 class LIFTRecorderApp(App):
@@ -3394,19 +3394,21 @@ class LIFTRecorderApp(App):
         from kivy.uix.boxlayout import BoxLayout
         self._dismiss_loading_overlay()
         view = ModalView(
-            size_hint=(0.8, None), height=dp(100),
+            size_hint=(0.8, None), height=dp(120),
             background_color=theme.OVERLAY_DARK,
             auto_dismiss=False,
         )
         box = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(4))
         lbl = Label(
             text=msg, font_size=sp(16), font_name=_FONT_NAME,
-            color=theme.TEXT, size_hint_y=0.6,
+            color=theme.TEXT, size_hint_y=None, height=dp(30),
         )
         detail = Label(
             text='', font_size=sp(12), font_name=_FONT_NAME,
-            color=theme.TEXT_DIM, size_hint_y=0.4,
+            color=theme.TEXT_DIM,
+            halign='center', valign='top',
         )
+        detail.bind(size=lambda w, s: setattr(w, 'text_size', s))
         box.add_widget(lbl)
         box.add_widget(detail)
         view.add_widget(box)

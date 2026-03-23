@@ -319,17 +319,21 @@ class LIFTDatabase:
                     if text not in glosses[lang]:
                         glosses[lang].append(text)
 
-            # CAWL / field type
+            # CAWL / field type — only capture the field that holds the
+            # wordlist number (e.g. SILCAWL), not other fields like Plural
             if not cawl:
                 for field_el in sense_el.findall('field'):
                     ft = field_el.get('type', '')
-                    if ft:
-                        field_type = ft
-                        for form in field_el.findall('form'):
-                            t = self._text(form)
-                            if t:
-                                cawl = t
-                                break
+                    if not ft:
+                        continue
+                    for form in field_el.findall('form'):
+                        t = self._text(form)
+                        if t:
+                            cawl = t
+                            field_type = ft
+                            break
+                    if cawl:
+                        break
 
             # Illustration
             if not illustration_href:
