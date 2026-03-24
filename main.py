@@ -1325,19 +1325,17 @@ class RootScreen(Screen):
             if insets is None:
                 return
             # API 30+: getInsets(Type.systemBars())
+            # Values are in physical pixels; Kivy sizes are also in pixels
+            # on Android, so use raw values (no density conversion).
             try:
                 WindowInsets = autoclass('android.view.WindowInsets$Type')
                 sys_insets = insets.getInsets(WindowInsets.systemBars())
-                density = activity.getResources().getDisplayMetrics().density
-                self._inset_top = sys_insets.top / density
-                self._inset_bottom = sys_insets.bottom / density
+                self._inset_top = sys_insets.top
+                self._inset_bottom = sys_insets.bottom
             except Exception:
                 # Pre-API 30 fallback
-                si = insets.getStableInsetTop()
-                bi = insets.getStableInsetBottom()
-                density = activity.getResources().getDisplayMetrics().density
-                self._inset_top = si / density
-                self._inset_bottom = bi / density
+                self._inset_top = insets.getStableInsetTop()
+                self._inset_bottom = insets.getStableInsetBottom()
             print(f'[insets] top={self._inset_top:.0f}dp  bottom={self._inset_bottom:.0f}dp')
         except Exception as ex:
             print(f'[insets] could not read: {ex}')
@@ -3241,7 +3239,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.15.2'
+__version__ = '1.15.3'
 
 
 class LIFTRecorderApp(App):
