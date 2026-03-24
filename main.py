@@ -1321,6 +1321,12 @@ class RootScreen(Screen):
     def _read_insets_android(self):
         try:
             from jnius import autoclass
+            # Edge-to-edge is only enforced on API 35+ (Android 15);
+            # older versions already reserve space for system bars.
+            Build = autoclass('android.os.Build$VERSION')
+            if Build.SDK_INT < 35:
+                print(f'[insets] SDK {Build.SDK_INT} < 35, skipping')
+                return
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
             activity = PythonActivity.mActivity
             window = activity.getWindow()
@@ -3306,7 +3312,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.15.3'
+__version__ = '1.15.4'
 
 
 class LIFTRecorderApp(App):
