@@ -1313,8 +1313,12 @@ class RootScreen(Screen):
     _inset_bottom = NumericProperty(0)
 
     def on_kv_post(self, *args):
-        if platform != 'android':
-            return
+        if platform == 'android':
+            self._read_insets_android()
+        elif platform == 'ios':
+            self._read_insets_ios()
+
+    def _read_insets_android(self):
         try:
             from jnius import autoclass
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
@@ -1336,7 +1340,23 @@ class RootScreen(Screen):
                 # Pre-API 30 fallback
                 self._inset_top = insets.getStableInsetTop()
                 self._inset_bottom = insets.getStableInsetBottom()
-            print(f'[insets] top={self._inset_top:.0f}dp  bottom={self._inset_bottom:.0f}dp')
+            print(f'[insets] top={self._inset_top:.0f}  bottom={self._inset_bottom:.0f}')
+        except Exception as ex:
+            print(f'[insets] could not read: {ex}')
+
+    def _read_insets_ios(self):
+        try:
+            from pyobjus import autoclass as objc_class
+            UIApplication = objc_class('UIApplication')
+            app = UIApplication.sharedApplication()
+            window = app.keyWindow
+            if window is None:
+                return
+            insets = window.safeAreaInsets
+            # UIKit points; Kivy on iOS uses points, so use directly
+            self._inset_top = insets.top
+            self._inset_bottom = insets.bottom
+            print(f'[insets] top={self._inset_top:.0f}  bottom={self._inset_bottom:.0f}')
         except Exception as ex:
             print(f'[insets] could not read: {ex}')
 
@@ -1775,6 +1795,8 @@ class ImagePickerScreen(Screen):
         app = App.get_running_app()
         if platform == 'android':
             self._pick_from_file_android()
+        elif platform == 'ios':
+            self._pick_from_file_ios()
         else:
             self._pick_from_file_desktop()
 
@@ -1808,6 +1830,49 @@ class ImagePickerScreen(Screen):
             PythonActivity.mActivity.startActivityForResult(chooser, 1002)
         except Exception as ex:
             print(f'Android image picker error: {ex}')
+
+    def _pick_from_file_ios(self):
+        """Use UIImagePickerController to pick an image on iOS."""
+        self._ios_launch_image_picker(camera=False)
+
+    def _ios_launch_image_picker(self, camera=False):
+        try:
+            from pyobjus import autoclass as objc_class
+            from pyobjus.dylib_manager import load_framework
+            load_framework('/System/Library/Frameworks/UIKit.framework')
+            UIImagePickerController = objc_class('UIImagePickerController')
+            picker = UIImagePickerController.alloc().init()
+            # 0 = photo library, 1 = camera
+            picker.sourceType = 1 if camera else 0
+            UIApplication = objc_class('UIApplication')
+            root_vc = UIApplication.sharedApplication().keyWindow.rootViewController
+            root_vc.presentViewController_animated_completion_(picker, True, None)
+            self._ios_image_picker = picker
+            Clock.schedule_interval(self._poll_ios_image_picker, 0.3)
+        except Exception as ex:
+            print(f'iOS image picker error: {ex}')
+
+    def _poll_ios_image_picker(self, dt):
+        """Check if the iOS image picker has been dismissed with a result."""
+        try:
+            picker = self._ios_image_picker
+            if picker.presentingViewController is not None:
+                return  # still presented
+            Clock.unschedule(self._poll_ios_image_picker)
+            # Extract the picked image info
+            info = getattr(picker, '_picked_info', None)
+            if info:
+                from pyobjus import autoclass as objc_class
+                url = info.objectForKey_('UIImagePickerControllerImageURL')
+                if url:
+                    path = url.path.UTF8String()
+                    if path:
+                        self._set_local_image(path)
+            self._ios_image_picker = None
+        except Exception as ex:
+            print(f'iOS image picker poll error: {ex}')
+            Clock.unschedule(self._poll_ios_image_picker)
+            self._ios_image_picker = None
 
     def _set_local_image(self, source_path):
         """Copy and scale a local image file into images/."""
@@ -2048,6 +2113,8 @@ class ImagePickerScreen(Screen):
         """Launch camera to take a photo."""
         if platform == 'android':
             self._take_photo_android()
+        elif platform == 'ios':
+            self._ios_launch_image_picker(camera=True)
         else:
             # Desktop: no camera — use file picker instead
             self.pick_from_file()
@@ -3741,12 +3808,47 @@ class LIFTRecorderApp(App):
     def _open_file_ios(self):
         """Use UIDocumentPickerViewController on iOS."""
         try:
-            from pyobjus import autoclass
+            from pyobjus import autoclass as objc_class
             from pyobjus.dylib_manager import load_framework
-            # Document picker — handled via delegate callback
-            pass  # Simplified; in production wire up UIDocumentPickerDelegate
+            load_framework('/System/Library/Frameworks/UIKit.framework')
+            load_framework('/System/Library/Frameworks/MobileCoreServices.framework')
+            UIDocumentPickerVC = objc_class('UIDocumentPickerViewController')
+            UTType = objc_class('NSString')
+            # kUTTypeItem — picks any file
+            picker = UIDocumentPickerVC.alloc() \
+                .initWithDocumentTypes_inMode_([UTType.stringWithString_('public.item')], 0)
+            UIApplication = objc_class('UIApplication')
+            root_vc = UIApplication.sharedApplication().keyWindow.rootViewController
+            root_vc.presentViewController_animated_completion_(picker, True, None)
+            # Poll for result — pyobjus doesn't support delegate callbacks
+            # directly, so use a scheduled check
+            self._ios_doc_picker = picker
+            Clock.schedule_interval(self._poll_ios_doc_picker, 0.3)
         except Exception as ex:
             print(f'iOS file picker error: {ex}')
+
+    def _poll_ios_doc_picker(self, dt):
+        """Check if the iOS document picker has been dismissed with a result."""
+        try:
+            picker = self._ios_doc_picker
+            if picker.presentingViewController is not None:
+                return  # still presented
+            Clock.unschedule(self._poll_ios_doc_picker)
+            urls = picker.URLs
+            if urls and urls.count() > 0:
+                url = urls.objectAtIndex_(0)
+                path = url.path.UTF8String()
+                if path:
+                    # Copy to app sandbox in case it's a security-scoped URL
+                    dest = os.path.join(self.user_data_dir, 'tmp.lift')
+                    import shutil
+                    shutil.copy2(path, dest)
+                    self.load_lift(dest)
+            self._ios_doc_picker = None
+        except Exception as ex:
+            print(f'iOS doc picker poll error: {ex}')
+            Clock.unschedule(self._poll_ios_doc_picker)
+            self._ios_doc_picker = None
 
     def _open_file_desktop(self):
         """Use tkinter file dialog on desktop."""
