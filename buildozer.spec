@@ -11,7 +11,7 @@ source.exclude_dirs = azt_images,env,.venv,venv,__pycache__
 version.regex = __version__ = ['"](.*)['"]
 version.filename = %(source.dir)s/main.py
 
-requirements = python3,kivy==2.3.1,pillow,sounddevice,soundfile,numpy,dulwich,certifi
+requirements = python3,kivy==2.3.1,pillow,sounddevice,soundfile,numpy,dulwich,certifi,filetype
 
 orientation = portrait
 fullscreen = 0
@@ -20,9 +20,15 @@ android.permissions = INTERNET,RECORD_AUDIO,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL
 #android.api = 33
 android.minapi = 26
 android.archs = arm64-v8a, armeabi-v7a
-p4a.branch = develop
+p4a.branch = master
+p4a.hook = %(source.dir)s/../buildozer_tweaks/p4a_hook.py
 android.api = 36
-android.ndk = 29
+#p4a.develop:
+android.ndk = 29 
+#p4a.master:
+#android.ndk = 27
+#NDK r27's cmake flags don't work with cmake 3.31 — IN_LIST requires cmake policy CMP0057. NDK r28 fixed this (but broke something else):
+#android.ndk = 28
 
 # Allow reading files from external storage (shared LIFT files)
 android.allow_backup = False
@@ -39,3 +45,4 @@ android.presplash_color = #1a1612
 [buildozer]
 log_level = 2
 warn_on_root = 1
+build_dir = .buildozer
