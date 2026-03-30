@@ -223,7 +223,7 @@ KV_TEMPLATE = '''
             allow_stretch: True
             keep_ratio: True
         Label:
-            text: app.title
+            text: APP_NAME
             font_size: sp(28)
             font_name: FONT
             bold: True
@@ -231,7 +231,7 @@ KV_TEMPLATE = '''
             size_hint_y: None
             height: dp(50)
         Label:
-            text: 'Open or create a LIFT lexicon'
+            text: APP_TAGLINE
             font_size: sp(16)
             font_name: FONT
             color: T.TEXT_DIM
@@ -239,31 +239,37 @@ KV_TEMPLATE = '''
             height: dp(30)
         Widget:
             size_hint_y: 0.08
-        RecBtn:
-            text: 'From Phone'
-            normal_color: T.ACCENT
-            on_release: app.open_file()
-        RecBtn:
-            text: 'From Internet'
-            normal_color: T.BTN_INACTIVE
-            on_release: app.open_url_dialog()
-        RecBtn:
-            text: 'Clone Repository'
-            normal_color: T.BTN_INACTIVE
-            on_release: app.clone_dialog()
-        RecBtn:
-            text: 'Start New'
-            normal_color: T.BTN_INACTIVE
-            on_release: app.show_start_over() #< should be Start a new wordlist
-        # ── Existing projects ─────────────────────────────────────
-        BoxLayout:
-            id: project_list
-            orientation: 'vertical'
-            size_hint_y: None
-            height: self.minimum_height
-            spacing: dp(6)
-        Widget:
+        ScrollView:
             size_hint_y: 1
+            do_scroll_x: False
+            BoxLayout:
+                orientation: 'vertical'
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: dp(20)
+                RecBtn:
+                    text: 'From Phone'
+                    normal_color: T.ACCENT
+                    on_release: app.open_file()
+                RecBtn:
+                    text: 'From Internet'
+                    normal_color: T.BTN_INACTIVE
+                    on_release: app.open_url_dialog()
+                RecBtn:
+                    text: 'Clone Repository'
+                    normal_color: T.BTN_INACTIVE
+                    on_release: app.clone_dialog()
+                RecBtn:
+                    text: 'Start New'
+                    normal_color: T.BTN_INACTIVE
+                    on_release: app.show_start_over() #< should be Start a new wordlist
+                # ── Existing projects ─────────────────────────────────────
+                BoxLayout:
+                    id: project_list
+                    orientation: 'vertical'
+                    size_hint_y: None
+                    height: self.minimum_height
+                    spacing: dp(6)
         Label:
             text: app.version_string
             font_size: sp(11)
@@ -2734,9 +2740,8 @@ class CollabScreen(Screen):
             def _show_code(dt):
                 inst = self.ids.get('device_instructions_label')
                 if inst:
-                    inst.text = (f'Go to [color=5cb3ff][ref={verification_uri}]'
-                                 f'{verification_uri}[/ref][/color]\n'
-                                 f'and enter this code:')
+                    inst.text = (f'Opening {verification_uri} …\n'
+                                 f'Enter this code:')
                     inst.height = dp(40)
                 lbl = self.ids.get('device_code_label')
                 if lbl:
@@ -2749,6 +2754,11 @@ class CollabScreen(Screen):
                 Clipboard.copy(user_code)
                 self._set_log('Code copied to clipboard — paste it on the GitHub page')
             Clock.schedule_once(_show_code, 0)
+
+            def _open_browser(dt):
+                import webbrowser
+                webbrowser.open(verification_uri)
+            Clock.schedule_once(_open_browser, 3)
 
             # Poll until authorized
             token_data = device_flow_poll(device_code, interval, expires_in)
