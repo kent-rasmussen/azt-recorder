@@ -987,6 +987,7 @@ KV_TEMPLATE = '''
             size_hint_y: None
             height: 0
             opacity: 0
+            disabled: True
             spacing: dp(6)
             Label:
                 id: selected_label
@@ -1516,6 +1517,7 @@ class LangPickerScreen(Screen):
         sel_box = self.ids.get('selection_box')
         if sel_box:
             sel_box.opacity = 1
+            sel_box.disabled = False
             sel_box.height = sel_box.minimum_height
             sel_box.bind(minimum_height=sel_box.setter('height'))
         lbl = self.ids.get('selected_label')
@@ -1617,6 +1619,7 @@ class LangPickerScreen(Screen):
         if sel_box:
             sel_box.opacity = 0
             sel_box.height = 0
+            sel_box.disabled = True
         region_title = self.ids.get('region_title')
         if region_title:
             region_title.height = 0
