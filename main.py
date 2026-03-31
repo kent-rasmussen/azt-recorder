@@ -252,11 +252,7 @@ KV_TEMPLATE = '''
                     normal_color: T.ACCENT
                     on_release: app.open_file()
                 RecBtn:
-                    text: 'From Internet'
-                    normal_color: T.BTN_INACTIVE
-                    on_release: app.open_url_dialog()
-                RecBtn:
-                    text: 'Clone Repository'
+                    text: 'Clone Internet Repository'
                     normal_color: T.BTN_INACTIVE
                     on_release: app.clone_dialog()
                 RecBtn:
@@ -625,148 +621,117 @@ KV_TEMPLATE = '''
                 size_hint_x: None
                 width: dp(44)
                 on_release: app.go_config()
-        ScrollView:
+        BoxLayout:
+            orientation: 'vertical'
+            padding: dp(20)
+            spacing: dp(14)
+            # ── Your name ─────────────────────────────────────────────
+            SectionLabel:
+                text: 'Your name [color=ff4444]*[/color]'
+                markup: True
+            TextInput:
+                id: name_input
+                hint_text: 'Your name (for commit attribution)'
+                font_size: sp(15)
+                font_name: FONT
+                size_hint_y: None
+                height: dp(48)
+                background_color: T.SURFACE
+                foreground_color: T.TEXT
+                cursor_color: T.ACCENT
+                multiline: False
+                on_text: root._update_connect_enabled()
+            # ── Host toggle ───────────────────────────────────────────
             BoxLayout:
+                size_hint_y: None
+                height: dp(40)
+                spacing: dp(8)
+                RecBtn:
+                    id: host_github_btn
+                    text: 'GitHub'
+                    font_size: sp(14)
+                    normal_color: T.GREEN
+                    on_release: root.set_host('github')
+                RecBtn:
+                    id: host_gitlab_btn
+                    text: 'GitLab'
+                    font_size: sp(14)
+                    normal_color: T.BTN_INACTIVE
+                    on_release: root.set_host('gitlab')
+            # ── GitHub section ────────────────────────────────────────
+            BoxLayout:
+                id: gh_section
                 orientation: 'vertical'
                 size_hint_y: None
                 height: self.minimum_height
-                padding: dp(20)
                 spacing: dp(14)
-                # ── Your name ─────────────────────────────────────────────
                 SectionLabel:
-                    text: 'Your name'
-                TextInput:
-                    id: name_input
-                    hint_text: 'Your name (for commit attribution)'
-                    font_size: sp(15)
+                    text: 'GitHub account'
+                Label:
+                    id: gh_status_label
+                    text: 'Not connected'
+                    font_size: sp(14)
                     font_name: FONT
+                    color: T.TEXT_DIM
                     size_hint_y: None
-                    height: dp(48)
-                    background_color: T.SURFACE
-                    foreground_color: T.TEXT
-                    cursor_color: T.ACCENT
-                    multiline: False
-                # ── Host toggle ───────────────────────────────────────────
+                    height: dp(28)
+                    halign: 'left'
+                    text_size: self.width, None
+                RecBtn:
+                    id: gh_connect_btn
+                    text: 'Connect to GitHub'
+                    normal_color: T.GREEN
+                    on_release: root.start_device_flow()
+                Label:
+                    id: device_instructions_label
+                    text: ''
+                    font_size: sp(13)
+                    font_name: FONT
+                    markup: True
+                    color: T.TEXT_DIM
+                    size_hint_y: None
+                    height: dp(0)
+                    halign: 'center'
+                    text_size: self.width, None
+                    on_ref_press: root.open_link(args[1])
                 BoxLayout:
+                    id: device_code_box
                     size_hint_y: None
-                    height: dp(40)
-                    spacing: dp(8)
-                    RecBtn:
-                        id: host_github_btn
-                        text: 'GitHub'
-                        font_size: sp(14)
-                        normal_color: T.GREEN
-                        on_release: root.set_host('github')
-                    RecBtn:
-                        id: host_gitlab_btn
-                        text: 'GitLab'
-                        font_size: sp(14)
-                        normal_color: T.BTN_INACTIVE
-                        on_release: root.set_host('gitlab')
-                # ── GitHub section ────────────────────────────────────────
-                BoxLayout:
-                    id: gh_section
-                    orientation: 'vertical'
-                    size_hint_y: None
-                    height: self.minimum_height
-                    spacing: dp(14)
-                    SectionLabel:
-                        text: 'GitHub account'
-                    Label:
-                        id: gh_status_label
-                        text: 'Not connected'
-                        font_size: sp(14)
-                        font_name: FONT
-                        color: T.TEXT_DIM
-                        size_hint_y: None
-                        height: dp(28)
-                        halign: 'left'
-                        text_size: self.width, None
-                    RecBtn:
-                        id: gh_connect_btn
-                        text: 'Connect to GitHub'
-                        normal_color: T.GREEN
-                        on_release: root.start_device_flow()
-                    Label:
-                        id: device_instructions_label
-                        text: ''
-                        font_size: sp(13)
-                        font_name: FONT
-                        markup: True
-                        color: T.TEXT_DIM
-                        size_hint_y: None
-                        height: dp(0)
-                        halign: 'center'
-                        text_size: self.width, None
-                        on_ref_press: root.open_link(args[1])
-                    BoxLayout:
-                        id: device_code_box
-                        size_hint_y: None
-                        height: dp(0)
-                        opacity: 0
-                        spacing: dp(8)
-                        padding: dp(20), 0
-                        Label:
-                            id: device_code_label
-                            text: ''
-                            font_size: sp(28)
-                            font_name: FONT
-                            bold: True
-                            color: T.TEXT
-                            halign: 'center'
-                            valign: 'middle'
-                            text_size: self.size
-                        RecBtn:
-                            id: copy_code_btn
-                            text: 'Copy'
-                            size_hint_x: None
-                            width: dp(64)
-                            font_size: sp(13)
-                            normal_color: T.BTN_INACTIVE
-                            on_release: root.copy_code()
-                # ── GitLab section ────────────────────────────────────────
-                BoxLayout:
-                    id: gl_section
-                    orientation: 'vertical'
-                    size_hint_y: None
-                    height: 0
+                    height: dp(0)
                     opacity: 0
-                    spacing: dp(14)
-                    SectionLabel:
-                        text: 'GitLab account'
-                    TextInput:
-                        id: gl_token_input
-                        hint_text: 'Personal access token'
-                        font_size: sp(14)
+                    spacing: dp(8)
+                    padding: dp(20), 0
+                    Label:
+                        id: device_code_label
+                        text: ''
+                        font_size: sp(28)
                         font_name: FONT
-                        size_hint_y: None
-                        height: dp(48)
-                        background_color: T.SURFACE
-                        foreground_color: T.TEXT
-                        cursor_color: T.ACCENT
-                        multiline: False
-                        password: True
-                    TextInput:
-                        id: gl_username_input
-                        hint_text: 'GitLab username'
-                        font_size: sp(14)
-                        font_name: FONT
-                        size_hint_y: None
-                        height: dp(48)
-                        background_color: T.SURFACE
-                        foreground_color: T.TEXT
-                        cursor_color: T.ACCENT
-                        multiline: False
+                        bold: True
+                        color: T.TEXT
+                        halign: 'center'
+                        valign: 'middle'
+                        text_size: self.size
                     RecBtn:
-                        text: 'Save GitLab credentials'
-                        normal_color: T.GREEN
-                        on_release: root.save_gitlab_credentials()
-                # ── Publish ───────────────────────────────────────────────
+                        id: copy_code_btn
+                        text: 'Copy'
+                        size_hint_x: None
+                        width: dp(64)
+                        font_size: sp(13)
+                        normal_color: T.BTN_INACTIVE
+                        on_release: root.copy_code()
+            # ── GitLab section ────────────────────────────────────────
+            BoxLayout:
+                id: gl_section
+                orientation: 'vertical'
+                size_hint_y: None
+                height: 0
+                opacity: 0
+                spacing: dp(14)
                 SectionLabel:
-                    text: 'Publish this project'
+                    text: 'GitLab account'
                 TextInput:
-                    id: langcode_input
-                    hint_text: 'Language code (repo name)'
+                    id: gl_token_input
+                    hint_text: 'Personal access token'
                     font_size: sp(14)
                     font_name: FONT
                     size_hint_y: None
@@ -775,38 +740,67 @@ KV_TEMPLATE = '''
                     foreground_color: T.TEXT
                     cursor_color: T.ACCENT
                     multiline: False
-                    on_text: root.update_publish_url()
-                Label:
-                    id: publish_url_label
-                    text: ''
-                    font_size: sp(12)
+                    password: True
+                TextInput:
+                    id: gl_username_input
+                    hint_text: 'GitLab username'
+                    font_size: sp(14)
                     font_name: FONT
-                    color: T.TEXT_DIM
                     size_hint_y: None
-                    height: dp(28)
-                    halign: 'left'
-                    text_size: self.width, None
+                    height: dp(48)
+                    background_color: T.SURFACE
+                    foreground_color: T.TEXT
+                    cursor_color: T.ACCENT
+                    multiline: False
                 RecBtn:
-                    text: 'Publish'
-                    normal_color: T.ACCENT
-                    on_release: root.do_publish()
-                # ── Log ───────────────────────────────────────────────────
-                SectionLabel:
-                    text: 'Last operation'
-                Label:
-                    id: log_label
-                    text: ''
-                    font_size: sp(12)
-                    font_name: FONT
-                    color: T.TEXT_DIM
-                    size_hint_y: None
-                    height: self.texture_size[1] + dp(16)
-                    halign: 'left'
-                    valign: 'top'
-                    text_size: self.width, None
-                Widget:
-                    size_hint_y: None
-                    height: dp(40)
+                    text: 'Save GitLab credentials'
+                    normal_color: T.GREEN
+                    on_release: root.save_gitlab_credentials()
+            # ── Publish ───────────────────────────────────────────────
+            SectionLabel:
+                text: 'Publish this project'
+            TextInput:
+                id: langcode_input
+                hint_text: 'Language code (repo name)'
+                font_size: sp(14)
+                font_name: FONT
+                size_hint_y: None
+                height: dp(48)
+                background_color: T.SURFACE
+                foreground_color: T.TEXT
+                cursor_color: T.ACCENT
+                multiline: False
+                on_text: root.update_publish_url()
+            Label:
+                id: publish_url_label
+                text: ''
+                font_size: sp(12)
+                font_name: FONT
+                color: T.TEXT_DIM
+                size_hint_y: None
+                height: dp(28)
+                halign: 'left'
+                text_size: self.width, None
+            RecBtn:
+                text: 'Publish'
+                normal_color: T.ACCENT
+                on_release: root.do_publish()
+            # ── Log ───────────────────────────────────────────────────
+            SectionLabel:
+                text: 'Last operation'
+            Label:
+                id: log_label
+                text: ''
+                font_size: sp(12)
+                font_name: FONT
+                color: T.TEXT_DIM
+                size_hint_y: None
+                height: self.texture_size[1] + dp(16)
+                halign: 'left'
+                valign: 'top'
+                text_size: self.width, None
+            Widget:
+                size_hint_y: 1
 
 <ImagePickerScreen>:
     canvas.before:
@@ -2598,6 +2592,51 @@ class CollabScreen(Screen):
         if gl_user and not gl_user.text:
             gl_user.text = prefs.get('gl_username', '')
         self.update_publish_url()
+        self._update_connect_enabled()
+        # Show name overlay on first visit (blank name)
+        name_w = self.ids.get('name_input')
+        if name_w and not name_w.text.strip():
+            self._show_name_overlay()
+
+    def _update_connect_enabled(self):
+        """Grey out connect/reconnect button when name is blank."""
+        name_w = self.ids.get('name_input')
+        has_name = bool(name_w and name_w.text.strip())
+        btn = self.ids.get('gh_connect_btn')
+        if btn:
+            btn.normal_color = theme.GREEN if has_name else theme.BTN_INACTIVE
+            btn.disabled = not has_name
+
+    def _show_name_overlay(self):
+        """Show a one-time overlay prompting the user to enter their name."""
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.label import Label
+        from kivy.uix.widget import Widget
+        overlay = BoxLayout(orientation='vertical', padding=dp(40), spacing=dp(20))
+        overlay.bind(size=lambda w, s: overlay.canvas.before.clear() or None)
+        with overlay.canvas.before:
+            from kivy.graphics import Color, Rectangle
+            Color(*theme.BG[:3], 0.95)
+            self._overlay_rect = Rectangle(pos=overlay.pos, size=overlay.size)
+        overlay.bind(pos=lambda w, p: setattr(self._overlay_rect, 'pos', p),
+                     size=lambda w, s: setattr(self._overlay_rect, 'size', s))
+        overlay.add_widget(Widget(size_hint_y=1))
+        msg = Label(
+            text="Type your name as you want it to\nappear online, then click 'Connect'",
+            font_size=sp(16), font_name=_FONT_NAME, color=theme.TEXT,
+            halign='center', valign='middle',
+            size_hint_y=None, height=dp(80))
+        msg.bind(size=msg.setter('text_size'))
+        overlay.add_widget(msg)
+        ok_btn = Builder.load_string(
+            'RecBtn:\n'
+            '    text: "OK"\n'
+            '    normal_color: T.ACCENT\n'
+        )
+        ok_btn.bind(on_release=lambda b: self.remove_widget(overlay))
+        overlay.add_widget(ok_btn)
+        overlay.add_widget(Widget(size_hint_y=1))
+        self.add_widget(overlay)
 
     @staticmethod
     def _langcode_from_project(app):
@@ -2833,6 +2872,7 @@ class CollabScreen(Screen):
             Clock.schedule_once(_done, 0)
 
         except Exception as ex:
+            err_msg = str(ex)
             def _err(dt):
                 lbl = self.ids.get('device_code_label')
                 if lbl:
@@ -2845,7 +2885,7 @@ class CollabScreen(Screen):
                 if inst:
                     inst.text = ''
                     inst.height = 0
-                self._set_log(f'Authorization failed: {ex}')
+                self._set_log(f'Authorization failed: {err_msg}')
             Clock.schedule_once(_err, 0)
 
     # ── Button handlers ────────────────────────────────────────────────────
@@ -3342,7 +3382,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.15.5'
+__version__ = '1.16.0'
 
 
 class LIFTRecorderApp(App):
@@ -4275,6 +4315,9 @@ class LIFTRecorderApp(App):
 
         def _on_sync_done(result):
             print(f'Sync: {result}')
+            if result and 'not a git repository' in result.lower():
+                Clock.schedule_once(lambda dt: self.go_collab(), 0)
+                return
             if 'Pushed' in (result or ''):
                 self._record_sync_time()
         run_async(_sync_and_reload,
