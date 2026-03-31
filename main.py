@@ -254,7 +254,7 @@ KV_TEMPLATE = '''
                 height: self.minimum_height
                 spacing: dp(20)
                 RecBtn:
-                    text: 'From Phone'
+                    text: 'I have one on my phone'
                     normal_color: T.ACCENT
                     on_release: app.open_file()
                 RecBtn:
