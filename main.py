@@ -981,96 +981,10 @@ KV_TEMPLATE = '''
             padding: [dp(10), dp(10)]
             on_text: root._on_search_text(self.text)
         # ── Selection details (hidden until a language is picked) ─────────
-        BoxLayout:
-            id: selection_box
-            orientation: 'vertical'
+        Widget:
+            id: selection_placeholder
             size_hint_y: None
             height: 0
-            opacity: 0
-            disabled: True
-            spacing: dp(6)
-            Label:
-                id: selected_label
-                text: ''
-                font_size: sp(15)
-                font_name: FONT
-                color: T.TEXT
-                size_hint_y: None
-                height: dp(32)
-                halign: 'left'
-                text_size: self.width, None
-            # Region picker (shown if >1 region)
-            Label:
-                id: region_title
-                text: 'Select region:'
-                font_size: sp(14)
-                font_name: FONT
-                color: T.TEXT_DIM
-                size_hint_y: None
-                height: 0
-                opacity: 0
-                halign: 'left'
-                text_size: self.width, None
-            BoxLayout:
-                id: region_box
-                orientation: 'vertical'
-                size_hint_y: None
-                height: self.minimum_height
-                spacing: dp(4)
-            # Dialect toggle
-            BoxLayout:
-                size_hint_y: None
-                height: dp(40)
-                spacing: dp(8)
-                CheckBox:
-                    id: dialect_check
-                    size_hint_x: None
-                    width: dp(40)
-                    active: False
-                    on_active: root._toggle_dialect(self.active)
-                Label:
-                    text: "I'm working on a dialect"
-                    font_size: sp(14)
-                    font_name: FONT
-                    color: T.TEXT
-                    halign: 'left'
-                    valign: 'middle'
-                    text_size: self.size
-            TextInput:
-                id: dialect_input
-                hint_text: 'Variant code (2-8 chars)'
-                font_size: sp(14)
-                font_name: FONT
-                multiline: False
-                size_hint_y: None
-                height: 0
-                opacity: 0
-                background_color: T.SURFACE
-                foreground_color: T.TEXT
-                hint_text_color: T.HINT
-                cursor_color: T.ACCENT
-                padding: [dp(10), dp(10)]
-                on_text: root._update_code()
-            # Assembled code display
-            Label:
-                id: code_label
-                text: ''
-                font_size: sp(16)
-                font_name: FONT
-                bold: True
-                color: T.GREEN
-                size_hint_y: None
-                height: dp(28)
-                halign: 'left'
-                text_size: self.width, None
-            # ── Continue button ───────────────────────────────────────────
-            RecBtn:
-                id: continue_btn
-                text: 'Continue'
-                normal_color: T.GREEN
-                size_hint_y: None
-                height: dp(52)
-                on_release: root._on_continue()
         # ── Results ───────────────────────────────────────────────────────
         ScrollView:
             id: results_scroll
@@ -1411,6 +1325,7 @@ class LangPickerScreen(Screen):
     _selected = None        # chosen langtag entry dict
     _selected_region = ''   # chosen region code (or '')
     _dialect_code = ''      # user-entered variant
+    _selection_box = None   # built on first use, added/removed from tree
 
     def on_enter(self):
         self._selected = None
@@ -1509,18 +1424,134 @@ class LangPickerScreen(Screen):
             parts.append(f'- {region}')
         return '  '.join(parts)
 
+    _SELECTION_KV = '''
+BoxLayout:
+    orientation: 'vertical'
+    size_hint_y: None
+    height: self.minimum_height
+    spacing: dp(6)
+    Label:
+        id: selected_label
+        text: ''
+        font_size: sp(15)
+        font_name: FONT
+        color: T.TEXT
+        size_hint_y: None
+        height: dp(32)
+        halign: 'left'
+        text_size: self.width, None
+    Label:
+        id: region_title
+        text: 'Select region:'
+        font_size: sp(14)
+        font_name: FONT
+        color: T.TEXT_DIM
+        size_hint_y: None
+        height: 0
+        opacity: 0
+        halign: 'left'
+        text_size: self.width, None
+    BoxLayout:
+        id: region_box
+        orientation: 'vertical'
+        size_hint_y: None
+        height: self.minimum_height
+        spacing: dp(4)
+    BoxLayout:
+        size_hint_y: None
+        height: dp(40)
+        spacing: dp(8)
+        CheckBox:
+            id: dialect_check
+            size_hint_x: None
+            width: dp(40)
+            active: False
+        Label:
+            text: "I'm working on a dialect"
+            font_size: sp(14)
+            font_name: FONT
+            color: T.TEXT
+            halign: 'left'
+            valign: 'middle'
+            text_size: self.size
+    TextInput:
+        id: dialect_input
+        hint_text: 'Variant code (2-8 chars)'
+        font_size: sp(14)
+        font_name: FONT
+        multiline: False
+        size_hint_y: None
+        height: 0
+        opacity: 0
+        background_color: T.SURFACE
+        foreground_color: T.TEXT
+        hint_text_color: T.HINT
+        cursor_color: T.ACCENT
+        padding: [dp(10), dp(10)]
+    Label:
+        id: code_label
+        text: ''
+        font_size: sp(16)
+        font_name: FONT
+        bold: True
+        color: T.GREEN
+        size_hint_y: None
+        height: dp(28)
+        halign: 'left'
+        text_size: self.width, None
+    RecBtn:
+        id: continue_btn
+        text: 'Continue'
+        normal_color: T.GREEN
+        size_hint_y: None
+        height: dp(52)
+'''
+
+    def _get_selection_box(self):
+        """Build (once) and return the selection box widget."""
+        if self._selection_box is None:
+            self._selection_box = Builder.load_string(self._SELECTION_KV)
+            # Wire up events
+            dc = self._selection_box.ids.get('dialect_check')
+            if dc:
+                dc.bind(active=lambda w, v: self._toggle_dialect(v))
+            di = self._selection_box.ids.get('dialect_input')
+            if di:
+                di.bind(text=lambda w, t: self._update_code())
+            cb = self._selection_box.ids.get('continue_btn')
+            if cb:
+                cb.bind(on_release=lambda w: self._on_continue())
+        return self._selection_box
+
+    def _show_selection(self):
+        """Insert selection box into the layout above results."""
+        box = self._get_selection_box()
+        parent = self.ids.get('selection_placeholder').parent
+        if box.parent is None:
+            placeholder = self.ids.get('selection_placeholder')
+            idx = list(parent.children).index(placeholder)
+            parent.add_widget(box, index=idx)
+
+    def _remove_selection(self):
+        """Remove selection box from the layout."""
+        if self._selection_box and self._selection_box.parent:
+            self._selection_box.parent.remove_widget(self._selection_box)
+
+    @property
+    def _sel_ids(self):
+        """Access ids on the selection box (mirrors self.ids for selection widgets)."""
+        if self._selection_box:
+            return self._selection_box.ids
+        return {}
+
     def _select_language(self, entry):
         from kivy.metrics import dp, sp
         from kivy.uix.button import Button
         self._selected = entry
         self._selected_region = ''
-        sel_box = self.ids.get('selection_box')
-        if sel_box:
-            sel_box.opacity = 1
-            sel_box.disabled = False
-            sel_box.height = sel_box.minimum_height
-            sel_box.bind(minimum_height=sel_box.setter('height'))
-        lbl = self.ids.get('selected_label')
+        self._show_selection()
+        ids = self._sel_ids
+        lbl = ids.get('selected_label')
         if lbl:
             lbl.text = self._format_entry(entry)
         # Clear results and search
@@ -1541,8 +1572,8 @@ class LangPickerScreen(Screen):
             if r not in all_regions:
                 all_regions.append(r)
 
-        region_box = self.ids.get('region_box')
-        region_title = self.ids.get('region_title')
+        region_box = ids.get('region_box')
+        region_title = ids.get('region_title')
         if region_box:
             region_box.clear_widgets()
         if len(all_regions) > 1:
@@ -1583,7 +1614,7 @@ class LangPickerScreen(Screen):
                 region_title.opacity = 0
 
         self._update_code()
-        cb = self.ids.get('continue_btn')
+        cb = ids.get('continue_btn')
         if cb:
             cb.disabled = False
 
@@ -1591,7 +1622,7 @@ class LangPickerScreen(Screen):
         from kivy.metrics import dp
         self._selected_region = region_code
         # Highlight selected region in the region box
-        region_box = self.ids.get('region_box')
+        region_box = self._sel_ids.get('region_box')
         if region_box:
             for child in region_box.children:
                 if region_code and region_code in child.text:
@@ -1604,7 +1635,7 @@ class LangPickerScreen(Screen):
 
     def _toggle_dialect(self, active):
         from kivy.metrics import dp
-        di = self.ids.get('dialect_input')
+        di = self._sel_ids.get('dialect_input')
         if di:
             di.height = dp(44) if active else 0
             di.opacity = 1 if active else 0
@@ -1615,40 +1646,40 @@ class LangPickerScreen(Screen):
 
     def _hide_selection(self):
         from kivy.metrics import dp
-        sel_box = self.ids.get('selection_box')
-        if sel_box:
-            sel_box.opacity = 0
-            sel_box.height = 0
-            sel_box.disabled = True
-        region_title = self.ids.get('region_title')
+        self._remove_selection()
+        ids = self._sel_ids
+        if not ids:
+            return
+        region_title = ids.get('region_title')
         if region_title:
             region_title.height = 0
             region_title.opacity = 0
-        region_box = self.ids.get('region_box')
+        region_box = ids.get('region_box')
         if region_box:
             region_box.clear_widgets()
-        di = self.ids.get('dialect_input')
+        di = ids.get('dialect_input')
         if di:
             di.height = 0
             di.opacity = 0
             di.text = ''
-        dc = self.ids.get('dialect_check')
+        dc = ids.get('dialect_check')
         if dc:
             dc.active = False
-        cl = self.ids.get('code_label')
+        cl = ids.get('code_label')
         if cl:
             cl.text = ''
-        cb = self.ids.get('continue_btn')
+        cb = ids.get('continue_btn')
         if cb:
             cb.disabled = True
 
     def _update_code(self):
         if not self._selected:
             return
+        ids = self._sel_ids
         code = self._selected.get('t', '')
         if self._selected_region:
             code += '-' + self._selected_region
-        di = self.ids.get('dialect_input')
+        di = ids.get('dialect_input')
         if di and di.text.strip():
             variant = di.text.strip().lower()
             # Clamp to 2-8 alphanumeric chars
@@ -1658,7 +1689,7 @@ class LangPickerScreen(Screen):
                 code += '-x-' + variant
         else:
             self._dialect_code = ''
-        cl = self.ids.get('code_label')
+        cl = ids.get('code_label')
         if cl:
             cl.text = f'Language code: {code}'
 
