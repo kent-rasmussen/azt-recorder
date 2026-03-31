@@ -2852,7 +2852,7 @@ class CollabScreen(Screen):
                 url = app_install_url(install_id)
             except Exception as install_ex:
                 print(f'[collab] app install check failed: {install_ex}')
-                installed = True  # assume installed, don't block the user
+                installed = False  # can't verify — prompt user to install
                 url = GITHUB_APP_INSTALL_URL
 
             _installed = installed
