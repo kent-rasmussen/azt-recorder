@@ -194,6 +194,9 @@ def device_flow_poll(device_code, interval=5, expires_in=900):
                 result = json.loads(resp.read())
         except HTTPError:
             continue
+        except OSError:
+            # Network glitch (e.g. ECONNREFUSED) — retry
+            continue
         if 'access_token' in result:
             return result
         error = result.get('error', '')
