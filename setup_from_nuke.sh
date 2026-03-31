@@ -28,7 +28,7 @@ echo "Installing buildozer ..."
 
 # 5. Install app runtime dependencies for local dev/testing
 echo "Installing app dependencies (kivy, pillow) ..."
-"$VENV_DIR/bin/pip" install kivy pillow
+"$VENV_DIR/bin/pip" install kivy pillow typing_extensions
 
 # 6. Clean stale buildozer internals (may have hardcoded paths from another project)
 BUILD_BASE="$SCRIPT_DIR/.buildozer/android/platform/build-arm64-v8a_armeabi-v7a/build"

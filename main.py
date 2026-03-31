@@ -223,7 +223,7 @@ KV_TEMPLATE = '''
             allow_stretch: True
             keep_ratio: True
         Label:
-            text: APP_NAME
+            text: app.title
             font_size: sp(28)
             font_name: FONT
             bold: True
@@ -231,7 +231,7 @@ KV_TEMPLATE = '''
             size_hint_y: None
             height: dp(50)
         Label:
-            text: APP_TAGLINE
+            text: app.subtitle
             font_size: sp(16)
             font_name: FONT
             color: T.TEXT_DIM
@@ -323,7 +323,7 @@ KV_TEMPLATE = '''
                 BoxLayout:
                     center: self.parent.center
                     size_hint: None, 1
-                    width: dp(100)
+                    width: dp(160)
                     spacing: dp(4)
                     Image:
                         source: 'icons/sync_dark.png'
@@ -334,7 +334,7 @@ KV_TEMPLATE = '''
                     Label:
                         id: sync_status_label
                         text: ''
-                        font_size: sp(20)
+                        font_size: sp(13)
                         font_name: FONT
                         color: T.TEXT_MID
                         halign: 'left'
@@ -2584,9 +2584,11 @@ class CollabScreen(Screen):
         w = self.ids.get('name_input')
         if w and not w.text:
             w.text = prefs.get('collab_name', '')
+        # Derive langcode from current project's git remote, fall back to pref
+        langcode = self._langcode_from_project(app) or prefs.get('collab_langcode', '')
         w = self.ids.get('langcode_input')
-        if w and not w.text:
-            w.text = prefs.get('collab_langcode', '')
+        if w:
+            w.text = langcode
         # Restore host selection
         host = prefs.get('collab_host', 'github')
         self.set_host(host, save=False)
@@ -2596,6 +2598,24 @@ class CollabScreen(Screen):
         if gl_user and not gl_user.text:
             gl_user.text = prefs.get('gl_username', '')
         self.update_publish_url()
+
+    @staticmethod
+    def _langcode_from_project(app):
+        """Extract repo name (langcode) from the current project's git remote."""
+        try:
+            project_dir = app.recorder.db.dir
+            from dulwich.repo import Repo
+            repo = Repo(project_dir)
+            remote_url = repo.get_config().get(
+                (b'remote', b'origin'), b'url'
+            ).decode('utf-8')
+            # Extract repo name from URL like https://github.com/user/langcode.git
+            name = remote_url.rstrip('/').rsplit('/', 1)[-1]
+            if name.endswith('.git'):
+                name = name[:-4]
+            return name
+        except Exception:
+            return ''
 
     def set_host(self, host, save=True):
         """Toggle between github and gitlab sections."""
@@ -3322,11 +3342,12 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.15.4'
+__version__ = '1.15.5'
 
 
 class LIFTRecorderApp(App):
-    title = APP_TAGLINE
+    title = APP_NAME
+    subtitle = APP_TAGLINE
     icon = APP_ICON
     version_string = StringProperty(f'version {__version__}')
     recorder: RecorderController = None
@@ -4077,7 +4098,7 @@ class LIFTRecorderApp(App):
         elif days == 1:
             return f'yesterday {time_str}'
         else:
-            return f'-{days}d {time_str}'
+            return f'{days} days ago {time_str}'
 
     def _update_sync_status(self):
         """Push sync status text into the recorder top bar."""
