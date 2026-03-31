@@ -1,6 +1,6 @@
-# LIFT Recorder
+# A-Z+T Recorder
 
-A mobile field recorder for LIFT XML lexicon databases. Works on **Android** (primary) and **iOS** / desktop (secondary).
+A mobile field recorder for LIFT XML lexicon databases. Part of the A-Z+T suite of linguistic tools. Works on **Android** (primary) and **iOS** / desktop (secondary).
 
 Records the highest quality audio the device supports, stores files in an `audio/` directory next to the `.lift` file, and writes filenames back into the LIFT XML using `Entry.lc.textvaluebylang(lang=db.audiolang)` — i.e. a `<citation><form lang="{vernlang}-Zxxx-x-audio">` element.
 
@@ -18,6 +18,12 @@ Records the highest quality audio the device supports, stores files in an `audio
   - Filter by CAWL number or range (e.g. `1-100`, `42`, `200-300`)
   - Search by gloss text
   - Show only unrecorded entries
+  - Five colour themes (Earth, Ocean, Forest, Slate, Light)
+- **Collaboration** via GitHub or GitLab:
+  - GitHub App device flow (no PATs needed — just enter a code)
+  - Auto-create repos, auto-sync on navigation
+  - Clone existing repositories from the welcome screen
+- **Image picker** with openclipart, FreeSVG, and Wikimedia Commons sources
 - Recorded filename written back into LIFT XML immediately after each recording
 
 ## File layout expected
@@ -53,7 +59,14 @@ This is exactly `Entry.lc.textvaluebylang(lang=self.db.audiolang)` as used in `a
 ## Setup (desktop / development)
 
 ```bash
-pip install kivy sounddevice soundfile numpy pillow
+# Quick setup (creates venv, installs everything):
+bash setup_from_nuke.sh
+
+# Or manually:
+python3 -m venv env
+source env/bin/activate
+pip install --upgrade pip setuptools
+pip install buildozer kivy pillow typing_extensions
 python main.py
 ```
 
@@ -91,7 +104,7 @@ Accessed via the ⚙ button in the top-right corner of the recorder screen.
 | Gloss search | Show only entries whose glosses contain this text |
 | Only unrecorded | Skip entries that already have audio |
 
-Changes take effect when you press **Apply & Go**.
+Changes take effect when you close the settings screen (X button).
 
 ## Private-use lang tag handling
 

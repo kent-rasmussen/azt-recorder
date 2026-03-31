@@ -980,21 +980,12 @@ KV_TEMPLATE = '''
             cursor_color: T.ACCENT
             padding: [dp(10), dp(10)]
             on_text: root._on_search_text(self.text)
-        # ── Results ───────────────────────────────────────────────────────
-        ScrollView:
-            id: results_scroll
-            BoxLayout:
-                id: results_box
-                orientation: 'vertical'
-                size_hint_y: None
-                height: self.minimum_height
-                spacing: dp(4)
         # ── Selection details (hidden until a language is picked) ─────────
         BoxLayout:
             id: selection_box
             orientation: 'vertical'
             size_hint_y: None
-            height: self.minimum_height
+            height: 0
             opacity: 0
             spacing: dp(6)
             Label:
@@ -1071,16 +1062,23 @@ KV_TEMPLATE = '''
                 height: dp(28)
                 halign: 'left'
                 text_size: self.width, None
-        # ── Continue button ───────────────────────────────────────────────
-        RecBtn:
-            id: continue_btn
-            text: 'Continue'
-            normal_color: T.GREEN
-            size_hint_y: None
-            height: dp(52)
-            opacity: 0.3
-            disabled: True
-            on_release: root._on_continue()
+            # ── Continue button ───────────────────────────────────────────
+            RecBtn:
+                id: continue_btn
+                text: 'Continue'
+                normal_color: T.GREEN
+                size_hint_y: None
+                height: dp(52)
+                on_release: root._on_continue()
+        # ── Results ───────────────────────────────────────────────────────
+        ScrollView:
+            id: results_scroll
+            BoxLayout:
+                id: results_box
+                orientation: 'vertical'
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: dp(4)
 
 <GlossRow>:
     size_hint_y: None
@@ -1518,6 +1516,8 @@ class LangPickerScreen(Screen):
         sel_box = self.ids.get('selection_box')
         if sel_box:
             sel_box.opacity = 1
+            sel_box.height = sel_box.minimum_height
+            sel_box.bind(minimum_height=sel_box.setter('height'))
         lbl = self.ids.get('selected_label')
         if lbl:
             lbl.text = self._format_entry(entry)
@@ -1584,7 +1584,6 @@ class LangPickerScreen(Screen):
         cb = self.ids.get('continue_btn')
         if cb:
             cb.disabled = False
-            cb.opacity = 1
 
     def _select_region(self, region_code):
         from kivy.metrics import dp
@@ -1617,6 +1616,7 @@ class LangPickerScreen(Screen):
         sel_box = self.ids.get('selection_box')
         if sel_box:
             sel_box.opacity = 0
+            sel_box.height = 0
         region_title = self.ids.get('region_title')
         if region_title:
             region_title.height = 0
@@ -1638,7 +1638,6 @@ class LangPickerScreen(Screen):
         cb = self.ids.get('continue_btn')
         if cb:
             cb.disabled = True
-            cb.opacity = 0.3
 
     def _update_code(self):
         if not self._selected:
@@ -3399,7 +3398,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.16.0'
+__version__ = '1.17.0'
 
 
 class LIFTRecorderApp(App):
