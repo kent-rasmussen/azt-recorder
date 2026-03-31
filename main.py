@@ -1395,7 +1395,7 @@ class LangPickerScreen(Screen):
         btn = Button(
             text=self._format_entry(entry),
             font_size=sp(13),
-            font_name=_FONT_NAME,
+            font_name='Roboto',
             size_hint_y=None,
             height=dp(48),
             halign='left',
