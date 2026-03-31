@@ -11,7 +11,7 @@ source.exclude_dirs = azt_images,env,.venv,venv,__pycache__
 version.regex = __version__ = ['"](.*)['"]
 version.filename = %(source.dir)s/main.py
 
-requirements = python3,kivy==2.3.1,pillow,sounddevice,soundfile,numpy,dulwich,certifi,filetype
+requirements = python3,kivy==2.3.1,pillow,sounddevice,soundfile,numpy,dulwich,certifi,filetype,typing_extensions
 
 orientation = portrait
 fullscreen = 0
