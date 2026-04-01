@@ -2877,19 +2877,9 @@ class CollabScreen(Screen):
             prefs['collab_token'] = access_token
             app._save_prefs_dict(prefs)
 
-            # Check if the app is installed (best-effort)
-            try:
-                install_info = check_app_installed(access_token)
-                installed = install_info['installed']
-                install_id = install_info['installation_id']
-                url = app_install_url(install_id)
-            except Exception as install_ex:
-                print(f'[collab] app install check failed: {install_ex}')
-                installed = False  # can't verify — prompt user to install
-                url = GITHUB_APP_INSTALL_URL
-
-            _installed = installed
-            _url = url
+            # Always prompt to install/update the GitHub App after authorization.
+            # Even if already installed, the user may need to grant "All repositories".
+            _url = GITHUB_APP_INSTALL_URL
             _username = username
             def _done(dt):
                 lbl = self.ids.get('device_code_label')
@@ -2901,24 +2891,17 @@ class CollabScreen(Screen):
                     box.opacity = 0
                 inst = self.ids.get('device_instructions_label')
                 if inst:
-                    if not _installed:
-                        inst.text = (
-                            'Now install the app to grant repository access.\n'
-                            'Tap [color=5cb3ff][ref='
-                            f'{_url}]Install[/ref][/color]'
-                            ' and select "All repositories".'
-                        )
-                        inst.height = dp(50)
-                    else:
-                        inst.text = ''
-                        inst.height = 0
+                    inst.text = (
+                        'Now install the app to grant repository access.\n'
+                        'Tap [color=5cb3ff][ref='
+                        f'{_url}]Install[/ref][/color]'
+                        ' and select "All repositories".'
+                    )
+                    inst.height = dp(50)
                 self._update_gh_status()
-                if _installed:
-                    self._set_log(f'Connected as {_username}')
-                else:
-                    self._set_log(f'Connected as {_username} — install app for repo access')
-                    import webbrowser
-                    webbrowser.open(_url)
+                self._set_log(f'Connected as {_username} — install app for repo access')
+                import webbrowser
+                webbrowser.open(_url)
             Clock.schedule_once(_done, 0)
 
         except Exception as ex:
@@ -3432,7 +3415,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.17.1'
+__version__ = '1.17.2'
 
 
 class LIFTRecorderApp(App):
