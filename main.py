@@ -470,14 +470,19 @@ KV_TEMPLATE = '''
                 height: self.minimum_height
                 padding: dp(20)
                 spacing: dp(20)
-                # Gloss languages — 3-column grid
-                SectionLabel:
-                    text: 'Gloss languages'
+                # ── Gloss languages (collapsed by default) ────────────
+                RecBtn:
+                    id: gloss_toggle_btn
+                    text: 'Change gloss languages'
+                    normal_color: T.ACCENT
+                    font_size: sp(14)
+                    on_release: root.toggle_gloss_panel()
                 GridLayout:
                     id: lang_box
                     cols: 3
                     size_hint_y: None
-                    height: self.minimum_height
+                    height: 0
+                    opacity: 0
                     spacing: dp(6)
                 # ── Word filter (collapsed by default) ────────────────
                 BoxLayout:
@@ -588,19 +593,39 @@ KV_TEMPLATE = '''
                 Widget:
                     size_hint_y: None
                     height: dp(16)
-                SectionLabel:
-                    text: 'Image repository'
+                # ── Image repository (collapsed by default) ────────────
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(44)
+                    spacing: dp(8)
+                    RecBtn:
+                        id: imgrepo_toggle_btn
+                        text: 'Change image repository'
+                        normal_color: T.ACCENT
+                        font_size: sp(14)
+                        on_release: root.toggle_imgrepo_panel()
+                    Label:
+                        id: imgrepo_summary_label
+                        text: ''
+                        font_size: sp(11)
+                        font_name: FONT
+                        color: T.TEXT_DIM
+                        halign: 'left'
+                        valign: 'middle'
+                        text_size: self.size
                 TextInput:
                     id: image_repo_input
                     hint_text: 'https://github.com/kent-rasmussen/images_CAWL'
                     font_size: sp(12)
                     font_name: FONT
                     size_hint_y: None
-                    height: dp(48)
+                    height: 0
+                    opacity: 0
                     background_color: T.SURFACE
                     foreground_color: T.TEXT
                     cursor_color: T.ACCENT
                     multiline: False
+                    disabled: True
                 Widget:
                     size_hint_y: None
                     height: dp(8)
@@ -2370,9 +2395,11 @@ class ConfigScreen(Screen):
         if toggle:
             toggle.active = show_past
         self.only_unrecorded = not show_past
-        # Update filter summary; panel always starts collapsed
+        # All panels start collapsed
         self._update_filter_summary()
         self._collapse_filter_panel()
+        self._collapse_gloss_panel()
+        self._collapse_imgrepo_panel(ir)
         # Build recording options
         self._build_rec_options(app)
 
@@ -2400,6 +2427,92 @@ class ConfigScreen(Screen):
         app.recorder.active_gloss_langs = sorted(langs)
 
     _filter_open = False
+    _gloss_open = False
+    _imgrepo_open = False
+
+    def _collapse_gloss_panel(self):
+        lang_box = self.ids.get('lang_box')
+        btn = self.ids.get('gloss_toggle_btn')
+        if lang_box:
+            lang_box.clear_widgets()
+            lang_box.height = 0
+            lang_box.opacity = 0
+        if btn:
+            btn.normal_color = theme.ACCENT
+        self._gloss_open = False
+
+    def _collapse_imgrepo_panel(self, inp=None):
+        if inp is None:
+            inp = self.ids.get('image_repo_input')
+        btn = self.ids.get('imgrepo_toggle_btn')
+        if inp:
+            inp.height = 0
+            inp.opacity = 0
+            inp.disabled = True
+            inp.focus = False
+        if btn:
+            btn.normal_color = theme.ACCENT
+        lbl = self.ids.get('imgrepo_summary_label')
+        if lbl and inp:
+            repo = inp.text.strip()
+            if '/' in repo:
+                repo = '/'.join(repo.rstrip('/').rsplit('/', 2)[-2:])
+            lbl.text = repo
+        self._imgrepo_open = False
+
+    def toggle_gloss_panel(self):
+        lang_box = self.ids.get('lang_box')
+        btn = self.ids.get('gloss_toggle_btn')
+        if not lang_box:
+            return
+        if self._gloss_open:
+            lang_box.clear_widgets()
+            lang_box.height = 0
+            lang_box.opacity = 0
+            self._gloss_open = False
+            if btn:
+                btn.normal_color = theme.ACCENT
+        else:
+            self.build_lang_toggles()
+            lang_box.height = lang_box.minimum_height
+            lang_box.opacity = 1
+            self._gloss_open = True
+            if btn:
+                btn.normal_color = theme.BTN_INACTIVE
+
+    def toggle_imgrepo_panel(self):
+        inp = self.ids.get('image_repo_input')
+        btn = self.ids.get('imgrepo_toggle_btn')
+        if not inp:
+            return
+        if self._imgrepo_open:
+            # Save on close
+            app = App.get_running_app()
+            prefs = app._load_prefs()
+            prefs['image_repo'] = inp.text.strip()
+            app._save_prefs_dict(prefs)
+            inp.height = 0
+            inp.opacity = 0
+            inp.disabled = True
+            inp.focus = False
+            self._imgrepo_open = False
+            if btn:
+                btn.normal_color = theme.ACCENT
+            # Update summary
+            lbl = self.ids.get('imgrepo_summary_label')
+            if lbl:
+                repo = inp.text.strip()
+                # Show just owner/repo from full URL
+                if '/' in repo:
+                    repo = '/'.join(repo.rstrip('/').rsplit('/', 2)[-2:])
+                lbl.text = repo
+        else:
+            inp.height = dp(48)
+            inp.opacity = 1
+            inp.disabled = False
+            self._imgrepo_open = True
+            if btn:
+                btn.normal_color = theme.BTN_INACTIVE
 
     def _expand_filter_panel(self):
         panel = self.ids.get('filter_panel')
@@ -3607,7 +3720,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.19.0'
+__version__ = '1.19.1'
 
 
 class LIFTRecorderApp(App):
