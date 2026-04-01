@@ -489,7 +489,7 @@ KV_TEMPLATE = '''
                         text: 'Filter words'
                         normal_color: T.BTN_INACTIVE
                         font_size: sp(14)
-                        on_release: root.toggle_filter_panel()
+                        on_release: print('[FILTER BTN] released') or root.toggle_filter_panel()
                     Label:
                         id: filter_summary_label
                         text: ''
@@ -2403,12 +2403,15 @@ class ConfigScreen(Screen):
 
     def _expand_filter_panel(self):
         panel = self.ids.get('filter_panel')
+        print(f'[FILTER] _expand called, panel={panel}')
         if not panel:
+            print('[FILTER] panel is None!')
             return
         # dp(36)*2 labels + dp(48)*2 inputs + dp(56) toggle + dp(8)*4 spacing
         panel.height = dp(256)
         panel.opacity = 1
         self._filter_open = True
+        print(f'[FILTER] expanded to h={panel.height}, o={panel.opacity}')
 
     def _collapse_filter_panel(self):
         panel = self.ids.get('filter_panel')
