@@ -774,35 +774,41 @@ KV_TEMPLATE = '''
                         text: 'Save GitLab credentials'
                         normal_color: T.GREEN
                         on_release: root.save_gitlab_credentials()
-                # ── Publish ───────────────────────────────────────────────
-                SectionLabel:
-                    text: 'Publish this project'
-                TextInput:
-                    id: langcode_input
-                    hint_text: 'Language code (repo name)'
-                    font_size: sp(14)
-                    font_name: FONT
+                # ── Publish (hidden when a git remote already exists) ────
+                BoxLayout:
+                    id: publish_section
+                    orientation: 'vertical'
                     size_hint_y: None
-                    height: dp(48)
-                    background_color: T.SURFACE
-                    foreground_color: T.TEXT
-                    cursor_color: T.ACCENT
-                    multiline: False
-                    on_text: root.update_publish_url()
-                Label:
-                    id: publish_url_label
-                    text: ''
-                    font_size: sp(12)
-                    font_name: FONT
-                    color: T.TEXT_DIM
-                    size_hint_y: None
-                    height: dp(28)
-                    halign: 'left'
-                    text_size: self.width, None
-                RecBtn:
-                    text: 'Publish'
-                    normal_color: T.ACCENT
-                    on_release: root.do_publish()
+                    height: self.minimum_height
+                    spacing: dp(14)
+                    SectionLabel:
+                        text: 'Publish this project'
+                    TextInput:
+                        id: langcode_input
+                        hint_text: 'Language code (repo name)'
+                        font_size: sp(14)
+                        font_name: FONT
+                        size_hint_y: None
+                        height: dp(48)
+                        background_color: T.SURFACE
+                        foreground_color: T.TEXT
+                        cursor_color: T.ACCENT
+                        multiline: False
+                        on_text: root.update_publish_url()
+                    Label:
+                        id: publish_url_label
+                        text: ''
+                        font_size: sp(12)
+                        font_name: FONT
+                        color: T.TEXT_DIM
+                        size_hint_y: None
+                        height: dp(28)
+                        halign: 'left'
+                        text_size: self.width, None
+                    RecBtn:
+                        text: 'Publish'
+                        normal_color: T.ACCENT
+                        on_release: root.do_publish()
                 # ── Log ───────────────────────────────────────────────────
                 SectionLabel:
                     text: 'Last operation'
@@ -2631,9 +2637,27 @@ class CollabScreen(Screen):
             w.text = prefs.get('collab_name', '')
         # Derive langcode from current project's git remote, fall back to pref
         langcode = self._langcode_from_project(app) or prefs.get('collab_langcode', '')
+        has_remote = bool(self._langcode_from_project(app))
         w = self.ids.get('langcode_input')
         if w:
             w.text = langcode
+        # Hide publish section when a git remote already exists
+        pub = self.ids.get('publish_section')
+        if pub:
+            if has_remote:
+                pub.height = 0
+                pub.opacity = 0
+                lang_inp = self.ids.get('langcode_input')
+                if lang_inp:
+                    lang_inp.disabled = True
+                    lang_inp.height = 0
+            else:
+                pub.height = pub.minimum_height
+                pub.opacity = 1
+                lang_inp = self.ids.get('langcode_input')
+                if lang_inp:
+                    lang_inp.disabled = False
+                    lang_inp.height = dp(48)
         # Restore host selection
         host = prefs.get('collab_host', 'github')
         self.set_host(host, save=False)
