@@ -2419,6 +2419,9 @@ class ConfigScreen(Screen):
         panel.height = dp(256)
         panel.opacity = 1
         self._filter_open = True
+        btn = self.ids.get('filter_toggle_btn')
+        if btn:
+            btn.normal_color = theme.BTN_INACTIVE
 
     def _collapse_filter_panel(self):
         panel = self.ids.get('filter_panel')
@@ -2438,11 +2441,24 @@ class ConfigScreen(Screen):
         panel.height = 0
         panel.opacity = 0
         self._filter_open = False
+        btn = self.ids.get('filter_toggle_btn')
+        if btn:
+            btn.normal_color = theme.ACCENT
 
     def toggle_filter_panel(self):
         """Expand or collapse the word filter panel."""
         if self._filter_open:
             self._collapse_filter_panel()
+            self._update_filter_summary()
+            # Apply filters immediately
+            app = App.get_running_app()
+            if app.recorder:
+                cawl_in = self.ids.get('cawl_input')
+                if cawl_in:
+                    app.recorder.cawl_filter = cawl_in.text.strip()
+                gs = self.ids.get('gloss_search_input')
+                if gs:
+                    app.recorder.gloss_search = gs.text.strip()
         else:
             self._expand_filter_panel()
 
@@ -3591,7 +3607,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.18.2'
+__version__ = '1.19.0'
 
 
 class LIFTRecorderApp(App):
