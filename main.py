@@ -489,7 +489,7 @@ KV_TEMPLATE = '''
                         text: 'Filter words'
                         normal_color: T.BTN_INACTIVE
                         font_size: sp(14)
-                        on_release: print('[FILTER BTN] released') or root.toggle_filter_panel()
+                        on_release: root.toggle_filter_panel()
                     Label:
                         id: filter_summary_label
                         text: ''
@@ -2403,20 +2403,38 @@ class ConfigScreen(Screen):
 
     def _expand_filter_panel(self):
         panel = self.ids.get('filter_panel')
-        print(f'[FILTER] _expand called, panel={panel}')
         if not panel:
-            print('[FILTER] panel is None!')
             return
+        # Restore child heights before expanding
+        for cid in ('cawl_input', 'gloss_search_input'):
+            w = self.ids.get(cid)
+            if w:
+                w.height = dp(48)
+                w.disabled = False
+        toggle = self.ids.get('unrecorded_toggle')
+        if toggle:
+            toggle.height = dp(56)
+            toggle.opacity = 1
         # dp(36)*2 labels + dp(48)*2 inputs + dp(56) toggle + dp(8)*4 spacing
         panel.height = dp(256)
         panel.opacity = 1
         self._filter_open = True
-        print(f'[FILTER] expanded to h={panel.height}, o={panel.opacity}')
 
     def _collapse_filter_panel(self):
         panel = self.ids.get('filter_panel')
         if not panel:
             return
+        # Zero out TextInput heights so they can't intercept touches
+        for cid in ('cawl_input', 'gloss_search_input'):
+            w = self.ids.get(cid)
+            if w:
+                w.height = 0
+                w.disabled = True
+                w.focus = False
+        toggle = self.ids.get('unrecorded_toggle')
+        if toggle:
+            toggle.height = 0
+            toggle.opacity = 0
         panel.height = 0
         panel.opacity = 0
         self._filter_open = False
