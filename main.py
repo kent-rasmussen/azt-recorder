@@ -443,21 +443,6 @@ KV_TEMPLATE = '''
                 text_size: self.size
                 padding_x: dp(8)
                 size_hint_x: 1
-            Button:
-                size_hint_x: None
-                width: dp(44)
-                background_color: T.TRANSPARENT
-                background_normal: ''
-                on_release: app.share_apk()
-                Image:
-                    source: 'icons/share_dark.png'
-                    size: dp(28), dp(28)
-                    size_hint: None, None
-                    center: self.parent.center
-                    allow_stretch: True
-                    keep_ratio: True
-            BoxLayout:
-                size_hint_x: 1
             IconBtn:
                 text: 'X'
                 size_hint_x: None
@@ -469,8 +454,54 @@ KV_TEMPLATE = '''
                 size_hint_y: None
                 height: self.minimum_height
                 padding: dp(20)
-                spacing: dp(20)
-                # ── Gloss languages (collapsed by default) ────────────
+                spacing: dp(14)
+                # ── Share this app ─────────────────────────────────────
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(44)
+                    spacing: dp(8)
+                    Image:
+                        source: 'icons/share_dark.png'
+                        size_hint: None, None
+                        size: dp(28), dp(28)
+                        pos_hint: {'center_y': 0.5}
+                    Label:
+                        text: 'Share this app'
+                        font_size: sp(15)
+                        font_name: FONT
+                        color: T.TEXT
+                        halign: 'left'
+                        valign: 'middle'
+                        text_size: self.size
+                    RecBtn:
+                        text: 'Share'
+                        size_hint_x: None
+                        width: dp(80)
+                        font_size: sp(14)
+                        normal_color: T.SURFACE
+                        on_release: app.share_apk()
+                # ── Recording task selector ────────────────────────────
+                BoxLayout:
+                    id: rec_task_row
+                    size_hint_y: None
+                    height: 0
+                    opacity: 0
+                    spacing: dp(8)
+                    Label:
+                        text: 'Recording:'
+                        font_size: sp(15)
+                        font_name: FONT
+                        color: T.TEXT_DIM
+                        size_hint_x: None
+                        size: self.texture_size
+                        valign: 'middle'
+                    RecBtn:
+                        id: rec_task_btn
+                        text: ''
+                        font_size: sp(15)
+                        normal_color: T.SURFACE
+                        on_release: root._show_rec_overlay()
+                # ── Three blue collapsible buttons ─────────────────────
                 RecBtn:
                     id: gloss_toggle_btn
                     text: 'Change gloss languages'
@@ -484,7 +515,6 @@ KV_TEMPLATE = '''
                     height: 0
                     opacity: 0
                     spacing: dp(6)
-                # ── Word filter (collapsed by default) ────────────────
                 BoxLayout:
                     size_hint_y: None
                     height: dp(44)
@@ -492,7 +522,7 @@ KV_TEMPLATE = '''
                     RecBtn:
                         id: filter_toggle_btn
                         text: 'Filter words'
-                        normal_color: T.BTN_INACTIVE
+                        normal_color: T.ACCENT
                         font_size: sp(14)
                         on_release: root.toggle_filter_panel()
                     Label:
@@ -553,47 +583,10 @@ KV_TEMPLATE = '''
                         foreground_color: T.TEXT
                         cursor_color: T.ACCENT
                         multiline: False
-                    # Show past work — toggle (logically reversed from only_unrecorded)
                     UnrecordedToggle:
                         id: unrecorded_toggle
                         active: False
                         on_active: root.toggle_show_past(self.active)
-                # Recording task selector
-                BoxLayout:
-                    id: rec_task_row
-                    size_hint_y: None
-                    height: 0
-                    opacity: 0
-                    spacing: dp(8)
-                    Label:
-                        text: 'Recording:'
-                        font_size: sp(15)
-                        font_name: FONT
-                        color: T.TEXT_DIM
-                        size_hint_x: None
-                        size: self.texture_size
-                        valign: 'middle'
-                    RecBtn:
-                        id: rec_task_btn
-                        text: ''
-                        font_size: sp(15)
-                        normal_color: T.SURFACE
-                        on_release: root._show_rec_overlay()
-                # Bottom spacer
-                Widget:
-                    size_hint_y: None
-                    height: dp(16)
-                Widget:
-                    size_hint_y: None
-                    height: dp(8)
-                RecBtn:
-                    text: 'Setup Collaboration'
-                    normal_color: T.SURFACE
-                    on_release: app.go_collab()
-                Widget:
-                    size_hint_y: None
-                    height: dp(16)
-                # ── Image repository (collapsed by default) ────────────
                 BoxLayout:
                     size_hint_y: None
                     height: dp(44)
@@ -626,13 +619,18 @@ KV_TEMPLATE = '''
                     cursor_color: T.ACCENT
                     multiline: False
                     disabled: True
+                # ── Navigation ─────────────────────────────────────────
                 Widget:
                     size_hint_y: None
                     height: dp(8)
                 RecBtn:
+                    text: 'Setup Collaboration'
+                    normal_color: T.SURFACE
+                    on_release: app.go_collab()
+                RecBtn:
                     text: 'Start over'
                     normal_color: T.BTN_INACTIVE
-                    on_release: app.go_welcome() #new_from_template < should be "Open or create a LIFT lexicon" (WelcomeScreen)
+                    on_release: app.go_welcome()
                 Widget:
                     size_hint_y: None
                     height: dp(40)
@@ -3720,7 +3718,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.19.1'
+__version__ = '1.19.2'
 
 
 class LIFTRecorderApp(App):
