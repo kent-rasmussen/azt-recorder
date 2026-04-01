@@ -462,9 +462,8 @@ KV_TEMPLATE = '''
                     spacing: dp(8)
                     Image:
                         source: 'icons/share_dark.png'
-                        size_hint: None, None
-                        size: dp(28), dp(28)
-                        pos_hint: {'center_y': 0.5}
+                        size_hint: None, 1
+                        width: dp(28)
                     Label:
                         text: 'Share this app'
                         font_size: sp(15)
