@@ -2804,7 +2804,7 @@ class CollabScreen(Screen):
         self.update_publish_url()
 
     def _update_gh_status(self):
-        """Update the GitHub connection status label."""
+        """Update the GitHub connection status label and install button."""
         app = App.get_running_app()
         prefs = app._load_prefs()
         username = prefs.get('gh_username', '')
@@ -2820,6 +2820,17 @@ class CollabScreen(Screen):
                 lbl.color = theme.TEXT_DIM
         if btn:
             btn.text = 'Reconnect' if (username and token) else 'Connect to GitHub'
+        # Hide install button + instructions if app is already installed
+        installed = prefs.get('gh_app_installed', False)
+        install_btn = self.ids.get('install_app_btn')
+        inst = self.ids.get('device_instructions_label')
+        if installed:
+            if install_btn:
+                install_btn.height = 0
+                install_btn.opacity = 0
+            if inst:
+                inst.text = ''
+                inst.height = 0
 
     # ── Internal helpers ───────────────────────────────────────────────────
 
