@@ -2717,6 +2717,8 @@ class CollabScreen(Screen):
         active_color = theme.GREEN
         inactive_color = theme.BTN_INACTIVE
 
+        gl_token = self.ids.get('gl_token_input')
+        gl_user = self.ids.get('gl_username_input')
         if host == 'gitlab':
             if gh_btn:
                 gh_btn.normal_color = inactive_color
@@ -2728,6 +2730,11 @@ class CollabScreen(Screen):
             if gl_sec:
                 gl_sec.height = gl_sec.minimum_height
                 gl_sec.opacity = 1
+            for inp in (gl_token, gl_user):
+                if inp:
+                    inp.disabled = False
+                    inp.size_hint_y = None
+                    inp.height = dp(48)
         else:
             if gh_btn:
                 gh_btn.normal_color = active_color
@@ -2739,6 +2746,14 @@ class CollabScreen(Screen):
             if gl_sec:
                 gl_sec.height = 0
                 gl_sec.opacity = 0
+            # Collapse and disable GitLab TextInputs so they can't
+            # intercept touches while the section is hidden
+            for inp in (gl_token, gl_user):
+                if inp:
+                    inp.disabled = True
+                    inp.focus = False
+                    inp.size_hint_y = None
+                    inp.height = 0
 
         if save:
             app = App.get_running_app()
