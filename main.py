@@ -456,29 +456,16 @@ KV_TEMPLATE = '''
                 padding: dp(20)
                 spacing: dp(14)
                 # ── Share this app ─────────────────────────────────────
-                BoxLayout:
-                    size_hint_y: None
-                    height: dp(44)
-                    spacing: dp(8)
+                RecBtn:
+                    text: '     Share this app'
+                    normal_color: T.SURFACE
+                    on_release: app.share_apk()
                     Image:
                         source: 'icons/share_dark.png'
-                        size_hint: None, 1
-                        width: dp(28)
-                    Label:
-                        text: 'Share this app'
-                        font_size: sp(15)
-                        font_name: FONT
-                        color: T.TEXT
-                        halign: 'left'
-                        valign: 'middle'
-                        text_size: self.size
-                    RecBtn:
-                        text: 'Share'
-                        size_hint_x: None
-                        width: dp(80)
-                        font_size: sp(14)
-                        normal_color: T.SURFACE
-                        on_release: app.share_apk()
+                        size_hint: None, None
+                        size: dp(24), dp(24)
+                        x: self.parent.center_x - dp(82)
+                        center_y: self.parent.center_y
                 # ── Recording task selector ────────────────────────────
                 BoxLayout:
                     id: rec_task_row
