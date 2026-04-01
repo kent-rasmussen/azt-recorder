@@ -479,13 +479,33 @@ KV_TEMPLATE = '''
                     size_hint_y: None
                     height: self.minimum_height
                     spacing: dp(6)
-                # CAWL filter
-                SectionLabel:
-                    text: 'Word filter'
+                # ── Word filter (collapsed by default) ────────────────
                 BoxLayout:
+                    size_hint_y: None
+                    height: dp(44)
+                    spacing: dp(8)
+                    RecBtn:
+                        id: filter_toggle_btn
+                        text: 'Filter words'
+                        normal_color: T.BTN_INACTIVE
+                        font_size: sp(14)
+                        on_release: root.toggle_filter_panel()
+                    Label:
+                        id: filter_summary_label
+                        text: ''
+                        font_size: sp(12)
+                        font_name: FONT
+                        color: T.TEXT_DIM
+                        halign: 'left'
+                        valign: 'middle'
+                        text_size: self.size
+                        markup: True
+                BoxLayout:
+                    id: filter_panel
                     orientation: 'vertical'
                     size_hint_y: None
-                    height: self.minimum_height
+                    height: 0
+                    opacity: 0
                     spacing: dp(8)
                     Label:
                         text: 'CAWL number or range (e.g. 1-100, 42, leave blank for all)'
@@ -528,11 +548,11 @@ KV_TEMPLATE = '''
                         foreground_color: T.TEXT
                         cursor_color: T.ACCENT
                         multiline: False
-                # Show past work — toggle (logically reversed from only_unrecorded)
-                UnrecordedToggle:
-                    id: unrecorded_toggle
-                    active: False
-                    on_active: root.toggle_show_past(self.active)
+                    # Show past work — toggle (logically reversed from only_unrecorded)
+                    UnrecordedToggle:
+                        id: unrecorded_toggle
+                        active: False
+                        on_active: root.toggle_show_past(self.active)
                 # Recording task selector
                 BoxLayout:
                     id: rec_task_row
@@ -2350,6 +2370,19 @@ class ConfigScreen(Screen):
         if toggle:
             toggle.active = show_past
         self.only_unrecorded = not show_past
+        # Update filter summary and collapse panel (expand if filters active)
+        self._update_filter_summary()
+        panel = self.ids.get('filter_panel')
+        has_filter = bool((app.recorder.cawl_filter or '').strip()
+                          or (app.recorder.gloss_search or '').strip()
+                          or app.recorder.only_unrecorded)
+        if panel:
+            if has_filter:
+                panel.height = panel.minimum_height
+                panel.opacity = 1
+            else:
+                panel.height = 0
+                panel.opacity = 0
         # Build recording options
         self._build_rec_options(app)
 
@@ -2375,6 +2408,38 @@ class ConfigScreen(Screen):
         else:
             langs.discard(lang)
         app.recorder.active_gloss_langs = sorted(langs)
+
+    def toggle_filter_panel(self):
+        """Expand or collapse the word filter panel."""
+        panel = self.ids.get('filter_panel')
+        if not panel:
+            return
+        if panel.opacity == 0:
+            panel.height = panel.minimum_height
+            panel.opacity = 1
+        else:
+            panel.height = 0
+            panel.opacity = 0
+
+    def _update_filter_summary(self):
+        """Show a one-line summary of active filters next to the button."""
+        lbl = self.ids.get('filter_summary_label')
+        if not lbl:
+            return
+        app = App.get_running_app()
+        if not app.recorder:
+            lbl.text = ''
+            return
+        parts = []
+        cawl = app.recorder.cawl_filter or ''
+        if cawl.strip():
+            parts.append(f'CAWL: {cawl.strip()}')
+        gloss = app.recorder.gloss_search or ''
+        if gloss.strip():
+            parts.append(f'gloss: "{gloss.strip()}"')
+        if app.recorder.only_unrecorded:
+            parts.append('unrecorded only')
+        lbl.text = ', '.join(parts) if parts else ''
 
     def apply_cawl(self, text):
         App.get_running_app().recorder.cawl_filter = text.strip()
@@ -2926,7 +2991,7 @@ class CollabScreen(Screen):
                     box.opacity = 1
                 from kivy.core.clipboard import Clipboard
                 Clipboard.copy(user_code)
-                self._set_log('Code copied to clipboard — paste it on the GitHub page')
+                self._set_log('Code copied to clipboard — type it on the GitHub page')
             Clock.schedule_once(_show_code, 0)
 
             def _open_browser(dt):
@@ -3501,7 +3566,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.18.0'
+__version__ = '1.18.1'
 
 
 class LIFTRecorderApp(App):
