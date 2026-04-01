@@ -2458,11 +2458,14 @@ class ConfigScreen(Screen):
                 btn.normal_color = theme.ACCENT
         else:
             self.build_lang_toggles()
-            lang_box.height = lang_box.minimum_height
             lang_box.opacity = 1
             self._gloss_open = True
             if btn:
                 btn.normal_color = theme.BTN_INACTIVE
+            # Defer height read so minimum_height is recalculated after layout
+            def _set_h(dt):
+                lang_box.height = lang_box.minimum_height
+            Clock.schedule_once(_set_h, 0)
 
     def toggle_imgrepo_panel(self):
         inp = self.ids.get('image_repo_input')
@@ -3704,7 +3707,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.19.2'
+__version__ = '1.19.3'
 
 
 class LIFTRecorderApp(App):
