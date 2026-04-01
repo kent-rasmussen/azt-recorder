@@ -2423,12 +2423,15 @@ class ConfigScreen(Screen):
     def toggle_filter_panel(self):
         """Expand or collapse the word filter panel."""
         panel = self.ids.get('filter_panel')
+        print(f'[filter] toggle called, panel={panel}, opacity={panel.opacity if panel else "N/A"}')
         if not panel:
             return
         if panel.opacity == 0:
             self._expand_filter_panel()
+            print(f'[filter] expanded, height={panel.height}')
         else:
             self._collapse_filter_panel()
+            print(f'[filter] collapsed')
 
     def _update_filter_summary(self):
         """Show a one-line summary of active filters next to the button."""
@@ -3575,7 +3578,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.18.1'
+__version__ = '1.18.2'
 
 
 class LIFTRecorderApp(App):
