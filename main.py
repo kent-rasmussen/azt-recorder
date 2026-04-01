@@ -2370,15 +2370,9 @@ class ConfigScreen(Screen):
         if toggle:
             toggle.active = show_past
         self.only_unrecorded = not show_past
-        # Update filter summary and collapse panel (expand if filters active)
+        # Update filter summary; panel always starts collapsed
         self._update_filter_summary()
-        has_filter = bool((app.recorder.cawl_filter or '').strip()
-                          or (app.recorder.gloss_search or '').strip()
-                          or app.recorder.only_unrecorded)
-        if has_filter:
-            self._expand_filter_panel()
-        else:
-            self._collapse_filter_panel()
+        self._collapse_filter_panel()
         # Build recording options
         self._build_rec_options(app)
 
@@ -2405,6 +2399,8 @@ class ConfigScreen(Screen):
             langs.discard(lang)
         app.recorder.active_gloss_langs = sorted(langs)
 
+    _filter_open = False
+
     def _expand_filter_panel(self):
         panel = self.ids.get('filter_panel')
         if not panel:
@@ -2412,6 +2408,7 @@ class ConfigScreen(Screen):
         # dp(36)*2 labels + dp(48)*2 inputs + dp(56) toggle + dp(8)*4 spacing
         panel.height = dp(256)
         panel.opacity = 1
+        self._filter_open = True
 
     def _collapse_filter_panel(self):
         panel = self.ids.get('filter_panel')
@@ -2419,19 +2416,14 @@ class ConfigScreen(Screen):
             return
         panel.height = 0
         panel.opacity = 0
+        self._filter_open = False
 
     def toggle_filter_panel(self):
         """Expand or collapse the word filter panel."""
-        panel = self.ids.get('filter_panel')
-        print(f'[filter] toggle called, panel={panel}, opacity={panel.opacity if panel else "N/A"}')
-        if not panel:
-            return
-        if panel.opacity == 0:
-            self._expand_filter_panel()
-            print(f'[filter] expanded, height={panel.height}')
-        else:
+        if self._filter_open:
             self._collapse_filter_panel()
-            print(f'[filter] collapsed')
+        else:
+            self._expand_filter_panel()
 
     def _update_filter_summary(self):
         """Show a one-line summary of active filters next to the button."""
