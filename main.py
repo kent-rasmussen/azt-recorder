@@ -704,7 +704,14 @@ KV_TEMPLATE = '''
                         height: dp(0)
                         halign: 'center'
                         text_size: self.width, None
-                        on_ref_press: root.open_link(args[1])
+                    RecBtn:
+                        id: install_app_btn
+                        text: 'Install GitHub App'
+                        normal_color: T.GREEN
+                        size_hint_y: None
+                        height: dp(0)
+                        opacity: 0
+                        on_release: root.open_install_page()
                     BoxLayout:
                         id: device_code_box
                         size_hint_y: None
@@ -2782,6 +2789,12 @@ class CollabScreen(Screen):
         import webbrowser
         webbrowser.open(str(url))
 
+    def open_install_page(self):
+        """Open the GitHub App installation page."""
+        from collab import GITHUB_APP_INSTALL_URL
+        import webbrowser
+        webbrowser.open(GITHUB_APP_INSTALL_URL)
+
     def copy_code(self):
         """Copy the device code to clipboard."""
         lbl = self.ids.get('device_code_label')
@@ -2818,10 +2831,19 @@ class CollabScreen(Screen):
 
     def start_device_flow(self):
         """Begin GitHub device flow authentication."""
+        # Defocus any TextInput so keyboard doesn't pop up
+        name_input = self.ids.get('name_input')
+        if name_input:
+            name_input.focus = False
         from collab import GITHUB_APP_CLIENT_ID
         if not GITHUB_APP_CLIENT_ID:
             self._set_log('GitHub App client_id not configured.')
             return
+        # Reset install status on reconnect
+        app = App.get_running_app()
+        prefs = app._load_prefs()
+        prefs['gh_app_installed'] = False
+        app._save_prefs_dict(prefs)
         self._set_log('Starting GitHub authorization...')
         import threading
         threading.Thread(target=self._device_flow_worker, daemon=True).start()
@@ -2877,10 +2899,9 @@ class CollabScreen(Screen):
             prefs['collab_token'] = access_token
             app._save_prefs_dict(prefs)
 
-            # Always prompt to install/update the GitHub App after authorization.
-            # Even if already installed, the user may need to grant "All repositories".
             _url = GITHUB_APP_INSTALL_URL
             _username = username
+            _app_installed = app._load_prefs().get('gh_app_installed', False)
             def _done(dt):
                 lbl = self.ids.get('device_code_label')
                 if lbl:
@@ -2889,19 +2910,30 @@ class CollabScreen(Screen):
                 if box:
                     box.height = 0
                     box.opacity = 0
-                inst = self.ids.get('device_instructions_label')
-                if inst:
-                    inst.text = (
-                        'Now install the app to grant repository access.\n'
-                        'Tap [color=5cb3ff][ref='
-                        f'{_url}]Install[/ref][/color]'
-                        ' and select "All repositories".'
-                    )
-                    inst.height = dp(50)
                 self._update_gh_status()
-                self._set_log(f'Connected as {_username} — install app for repo access')
-                import webbrowser
-                webbrowser.open(_url)
+                inst = self.ids.get('device_instructions_label')
+                install_btn = self.ids.get('install_app_btn')
+                if _app_installed:
+                    if inst:
+                        inst.text = ''
+                        inst.height = 0
+                    if install_btn:
+                        install_btn.height = 0
+                        install_btn.opacity = 0
+                    self._set_log(f'Connected as {_username}')
+                else:
+                    if inst:
+                        inst.text = (
+                            'Now install the app to grant repository access.\n'
+                            'Select "All repositories".'
+                        )
+                        inst.height = dp(40)
+                    if install_btn:
+                        install_btn.height = dp(48)
+                        install_btn.opacity = 1
+                    self._set_log(f'Connected as {_username} — install app for repo access')
+                    import webbrowser
+                    webbrowser.open(_url)
             Clock.schedule_once(_done, 0)
 
         except Exception as ex:
@@ -2918,6 +2950,10 @@ class CollabScreen(Screen):
                 if inst:
                     inst.text = ''
                     inst.height = 0
+                install_btn = self.ids.get('install_app_btn')
+                if install_btn:
+                    install_btn.height = 0
+                    install_btn.opacity = 0
                 self._set_log(f'Authorization failed: {err_msg}')
             Clock.schedule_once(_err, 0)
 
@@ -3415,7 +3451,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.17.2'
+__version__ = '1.18.0'
 
 
 class LIFTRecorderApp(App):
@@ -4181,6 +4217,13 @@ class LIFTRecorderApp(App):
         if lbl:
             lbl.text = self._sync_status_text()
 
+    def _mark_gh_app_installed(self):
+        """Mark GitHub App as installed after a successful push."""
+        prefs = self._load_prefs()
+        if not prefs.get('gh_app_installed'):
+            prefs['gh_app_installed'] = True
+            self._save_prefs_dict(prefs)
+
     def _get_sync_credentials(self):
         """Return (git_username, token) for sync, respecting host toggle."""
         prefs = self._load_prefs()
@@ -4194,22 +4237,29 @@ class LIFTRecorderApp(App):
         return 'x-access-token', token
 
     def _auto_commit_sync(self):
-        """Background: commit new audio and .lift changes, sync if online."""
+        """Background: pull + commit new audio/.lift changes + push."""
         if not self.recorder:
             return
         prefs = self._load_prefs()
         name = prefs.get('collab_name', '') or 'Recorder'
         project_dir = self.recorder.db.dir
         git_user, token = self._get_sync_credentials()
+        if not token:
+            return
+        saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''
         import threading
         def _worker():
             try:
-                from collab import commit_audio_and_sync
-                result = commit_audio_and_sync(
-                    project_dir, name, git_user, token)
+                from collab import sync_repo
+                result = sync_repo(project_dir, git_user, token, name)
                 print(f'[auto-sync] {result}')
-                if 'pushed' in result.lower() or 'Pushed' in result:
+                if 'pushed' in result.lower() or 'pulled' in result.lower():
                     Clock.schedule_once(lambda dt: self._record_sync_time(), 0)
+                    if 'pushed' in result.lower():
+                        self._mark_gh_app_installed()
+                if 'pulled' in result.lower():
+                    Clock.schedule_once(
+                        lambda dt: self._reload_and_restore(saved_guid), 0)
             except Exception as ex:
                 print(f'[auto-sync] error: {ex}')
         threading.Thread(target=_worker, daemon=True).start()
@@ -4353,6 +4403,7 @@ class LIFTRecorderApp(App):
                 return
             if 'Pushed' in (result or ''):
                 self._record_sync_time()
+                self._mark_gh_app_installed()
         run_async(_sync_and_reload,
                   self.recorder.db.dir, git_user, token, name,
                   on_done=_on_sync_done)
