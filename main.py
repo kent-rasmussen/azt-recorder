@@ -2372,17 +2372,13 @@ class ConfigScreen(Screen):
         self.only_unrecorded = not show_past
         # Update filter summary and collapse panel (expand if filters active)
         self._update_filter_summary()
-        panel = self.ids.get('filter_panel')
         has_filter = bool((app.recorder.cawl_filter or '').strip()
                           or (app.recorder.gloss_search or '').strip()
                           or app.recorder.only_unrecorded)
-        if panel:
-            if has_filter:
-                panel.height = panel.minimum_height
-                panel.opacity = 1
-            else:
-                panel.height = 0
-                panel.opacity = 0
+        if has_filter:
+            self._expand_filter_panel()
+        else:
+            self._collapse_filter_panel()
         # Build recording options
         self._build_rec_options(app)
 
@@ -2409,17 +2405,30 @@ class ConfigScreen(Screen):
             langs.discard(lang)
         app.recorder.active_gloss_langs = sorted(langs)
 
+    def _expand_filter_panel(self):
+        panel = self.ids.get('filter_panel')
+        if not panel:
+            return
+        # dp(36)*2 labels + dp(48)*2 inputs + dp(56) toggle + dp(8)*4 spacing
+        panel.height = dp(256)
+        panel.opacity = 1
+
+    def _collapse_filter_panel(self):
+        panel = self.ids.get('filter_panel')
+        if not panel:
+            return
+        panel.height = 0
+        panel.opacity = 0
+
     def toggle_filter_panel(self):
         """Expand or collapse the word filter panel."""
         panel = self.ids.get('filter_panel')
         if not panel:
             return
         if panel.opacity == 0:
-            panel.height = panel.minimum_height
-            panel.opacity = 1
+            self._expand_filter_panel()
         else:
-            panel.height = 0
-            panel.opacity = 0
+            self._collapse_filter_panel()
 
     def _update_filter_summary(self):
         """Show a one-line summary of active filters next to the button."""
