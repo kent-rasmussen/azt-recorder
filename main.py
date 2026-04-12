@@ -16,6 +16,7 @@ import warnings
 
 from appinfo import APP_NAME, APP_TAGLINE, APP_USER_AGENT, APP_ICON
 import theme
+from i18n import _ as _tr, set_language, current_language, available_languages
 
 os.environ.setdefault('KIVY_NO_ENV_CONFIG', '1')
 warnings.filterwarnings('ignore', message='.*olefile.*')
@@ -174,6 +175,7 @@ KV_TEMPLATE = '''
 #:import dp kivy.metrics.dp
 #:import sp kivy.metrics.sp
 #:import T theme
+#:import _ i18n._
 #:set FONT '{font_name}'
 
 <RootScreen>:
@@ -254,15 +256,15 @@ KV_TEMPLATE = '''
                 height: self.minimum_height
                 spacing: dp(20)
                 RecBtn:
-                    text: 'I have one on my phone'
+                    text: _('I have one on my phone')
                     normal_color: T.ACCENT
                     on_release: app.open_file()
                 RecBtn:
-                    text: 'Clone Internet Repository'
+                    text: _('Clone Internet Repository')
                     normal_color: T.BTN_INACTIVE
                     on_release: app.clone_dialog()
                 RecBtn:
-                    text: 'Start New'
+                    text: _('Start New')
                     normal_color: T.BTN_INACTIVE
                     on_release: app.show_start_over() #< should be Start a new wordlist
                 # ── Existing projects ─────────────────────────────────────
@@ -457,7 +459,7 @@ KV_TEMPLATE = '''
                 spacing: dp(14)
                 # ── Share this app ─────────────────────────────────────
                 RecBtn:
-                    text: '     Share this app'
+                    text: _('     Share this app')
                     normal_color: T.SURFACE
                     on_release: app.share_apk()
                     Image:
@@ -474,7 +476,7 @@ KV_TEMPLATE = '''
                     opacity: 0
                     spacing: dp(8)
                     Label:
-                        text: 'Recording:'
+                        text: _('Recording:')
                         font_size: sp(15)
                         font_name: FONT
                         color: T.TEXT_DIM
@@ -490,7 +492,7 @@ KV_TEMPLATE = '''
                 # ── Three blue collapsible buttons ─────────────────────
                 RecBtn:
                     id: gloss_toggle_btn
-                    text: 'Change gloss languages'
+                    text: _('Change gloss languages')
                     normal_color: T.ACCENT
                     font_size: sp(14)
                     on_release: root.toggle_gloss_panel()
@@ -507,7 +509,7 @@ KV_TEMPLATE = '''
                     spacing: dp(8)
                     RecBtn:
                         id: filter_toggle_btn
-                        text: 'Filter words'
+                        text: _('Filter words')
                         normal_color: T.ACCENT
                         font_size: sp(14)
                         on_release: root.toggle_filter_panel()
@@ -529,7 +531,7 @@ KV_TEMPLATE = '''
                     opacity: 0
                     spacing: dp(8)
                     Label:
-                        text: 'CAWL number or range (e.g. 1-100, 42, leave blank for all)'
+                        text: _('CAWL number or range (e.g. 1-100, 42, leave blank for all)')
                         font_size: sp(13)
                         font_name: FONT
                         color: T.TEXT_DIM
@@ -539,7 +541,7 @@ KV_TEMPLATE = '''
                         text_size: self.width, None
                     TextInput:
                         id: cawl_input
-                        hint_text: 'e.g. 1-500'
+                        hint_text: _('e.g. 1-500')
                         font_size: sp(16)
                         font_name: FONT
                         size_hint_y: None
@@ -550,7 +552,7 @@ KV_TEMPLATE = '''
                         multiline: False
                         on_text_validate: root.apply_cawl(self.text)
                     Label:
-                        text: 'Gloss search (filter by gloss text)'
+                        text: _('Gloss search (filter by gloss text)')
                         font_size: sp(13)
                         font_name: FONT
                         color: T.TEXT_DIM
@@ -560,7 +562,7 @@ KV_TEMPLATE = '''
                         text_size: self.width, None
                     TextInput:
                         id: gloss_search_input
-                        hint_text: 'search gloss text…'
+                        hint_text: _('search gloss text…')
                         font_size: sp(16)
                         font_name: FONT
                         size_hint_y: None
@@ -579,7 +581,7 @@ KV_TEMPLATE = '''
                     spacing: dp(8)
                     RecBtn:
                         id: imgrepo_toggle_btn
-                        text: 'Change image repository'
+                        text: _('Change image repository')
                         normal_color: T.ACCENT
                         font_size: sp(14)
                         on_release: root.toggle_imgrepo_panel()
@@ -605,16 +607,24 @@ KV_TEMPLATE = '''
                     cursor_color: T.ACCENT
                     multiline: False
                     disabled: True
+                # ── UI Language ─────────────────────────────────────────
+                SectionLabel:
+                    text: _('UI Language')
+                BoxLayout:
+                    id: lang_selector_row
+                    size_hint_y: None
+                    height: dp(44)
+                    spacing: dp(8)
                 # ── Navigation ─────────────────────────────────────────
                 Widget:
                     size_hint_y: None
                     height: dp(8)
                 RecBtn:
-                    text: 'Setup Collaboration'
+                    text: _('Setup Collaboration')
                     normal_color: T.SURFACE
                     on_release: app.go_collab()
                 RecBtn:
-                    text: 'Start over'
+                    text: _('Start over')
                     normal_color: T.BTN_INACTIVE
                     on_release: app.go_welcome()
                 Widget:
@@ -642,7 +652,7 @@ KV_TEMPLATE = '''
                     pos: self.pos
                     size: self.size
             Label:
-                text: 'Setup'
+                text: _('Setup')
                 font_size: sp(17)
                 font_name: FONT
                 bold: True
@@ -658,7 +668,6 @@ KV_TEMPLATE = '''
                 on_release: app.go_config()
         ScrollView:
             do_scroll_x: False
-            do_scroll_y: False
             BoxLayout:
                 orientation: 'vertical'
                 size_hint_y: None
@@ -667,11 +676,11 @@ KV_TEMPLATE = '''
                 spacing: dp(14)
                 # ── Your name ─────────────────────────────────────────────
                 SectionLabel:
-                    text: 'Your name [color=ff4444]*[/color]'
+                    text: _('Your name [color=ff4444]*[/color]')
                     markup: True
                 TextInput:
                     id: name_input
-                    hint_text: 'Your name (for commit attribution)'
+                    hint_text: _('Your name (for commit attribution)')
                     font_size: sp(15)
                     font_name: FONT
                     size_hint_y: None
@@ -688,13 +697,13 @@ KV_TEMPLATE = '''
                     spacing: dp(8)
                     RecBtn:
                         id: host_github_btn
-                        text: 'GitHub'
+                        text: _('GitHub')
                         font_size: sp(14)
                         normal_color: T.GREEN
                         on_release: root.set_host('github')
                     RecBtn:
                         id: host_gitlab_btn
-                        text: 'GitLab'
+                        text: _('GitLab')
                         font_size: sp(14)
                         normal_color: T.BTN_INACTIVE
                         on_release: root.set_host('gitlab')
@@ -706,10 +715,10 @@ KV_TEMPLATE = '''
                     height: self.minimum_height
                     spacing: dp(14)
                     SectionLabel:
-                        text: 'GitHub account'
+                        text: _('GitHub account')
                     Label:
                         id: gh_status_label
-                        text: 'Not connected'
+                        text: _('Not connected')
                         font_size: sp(14)
                         font_name: FONT
                         color: T.TEXT_DIM
@@ -719,7 +728,7 @@ KV_TEMPLATE = '''
                         text_size: self.width, None
                     RecBtn:
                         id: gh_connect_btn
-                        text: 'Connect to GitHub'
+                        text: _('Connect to GitHub')
                         normal_color: T.GREEN
                         on_release: root.start_device_flow()
                     Label:
@@ -735,7 +744,7 @@ KV_TEMPLATE = '''
                         text_size: self.width, None
                     RecBtn:
                         id: install_app_btn
-                        text: 'Install GitHub App'
+                        text: _('Install GitHub App')
                         normal_color: T.GREEN
                         size_hint_y: None
                         height: dp(0)
@@ -760,7 +769,7 @@ KV_TEMPLATE = '''
                             text_size: self.size
                         RecBtn:
                             id: copy_code_btn
-                            text: 'Copy'
+                            text: _('Copy')
                             size_hint_x: None
                             width: dp(64)
                             font_size: sp(13)
@@ -775,10 +784,10 @@ KV_TEMPLATE = '''
                     opacity: 0
                     spacing: dp(14)
                     SectionLabel:
-                        text: 'GitLab account'
+                        text: _('GitLab account')
                     TextInput:
                         id: gl_token_input
-                        hint_text: 'Personal access token'
+                        hint_text: _('Personal access token')
                         font_size: sp(14)
                         font_name: FONT
                         size_hint_y: None
@@ -790,7 +799,7 @@ KV_TEMPLATE = '''
                         password: True
                     TextInput:
                         id: gl_username_input
-                        hint_text: 'GitLab username'
+                        hint_text: _('GitLab username')
                         font_size: sp(14)
                         font_name: FONT
                         size_hint_y: None
@@ -800,7 +809,7 @@ KV_TEMPLATE = '''
                         cursor_color: T.ACCENT
                         multiline: False
                     RecBtn:
-                        text: 'Save GitLab credentials'
+                        text: _('Save GitLab credentials')
                         normal_color: T.GREEN
                         on_release: root.save_gitlab_credentials()
                 # ── Publish (hidden when a git remote already exists) ────
@@ -811,10 +820,10 @@ KV_TEMPLATE = '''
                     height: self.minimum_height
                     spacing: dp(14)
                     SectionLabel:
-                        text: 'Publish this project'
+                        text: _('Publish this project')
                     TextInput:
                         id: langcode_input
-                        hint_text: 'Language code (repo name)'
+                        hint_text: _('Language code (repo name)')
                         font_size: sp(14)
                         font_name: FONT
                         size_hint_y: None
@@ -835,12 +844,12 @@ KV_TEMPLATE = '''
                         halign: 'left'
                         text_size: self.width, None
                     RecBtn:
-                        text: 'Publish'
+                        text: _('Publish')
                         normal_color: T.ACCENT
                         on_release: root.do_publish()
                 # ── Log ───────────────────────────────────────────────────
                 SectionLabel:
-                    text: 'Last operation'
+                    text: _('Last operation')
                 Label:
                     id: log_label
                     text: ''
@@ -893,17 +902,17 @@ KV_TEMPLATE = '''
             padding: dp(12), dp(2)
             spacing: dp(6)
             RecBtn:
-                text: 'openclipart'
+                text: _('openclipart')
                 normal_color: T.GREEN
                 font_size: sp(12)
                 on_release: root.fetch_openclipart()
             RecBtn:
-                text: 'FreeSVG'
+                text: _('FreeSVG')
                 normal_color: T.TEAL
                 font_size: sp(12)
                 on_release: root.fetch_freesvg()
             RecBtn:
-                text: 'Wikimedia'
+                text: _('Wikimedia')
                 normal_color: T.BLUE
                 font_size: sp(12)
                 on_release: root.fetch_wikimedia()
@@ -914,17 +923,17 @@ KV_TEMPLATE = '''
             padding: dp(12), dp(2)
             spacing: dp(6)
             RecBtn:
-                text: 'Photo'
+                text: _('Photo')
                 normal_color: T.BTN_INACTIVE
                 font_size: sp(12)
                 on_release: root.take_photo()
             RecBtn:
-                text: 'File'
+                text: _('File')
                 normal_color: T.BTN_INACTIVE
                 font_size: sp(12)
                 on_release: root.pick_from_file()
             RecBtn:
-                text: 'Cancel'
+                text: _('Cancel')
                 normal_color: T.SURFACE
                 font_size: sp(12)
                 on_release: app.go_recorder()
@@ -1000,7 +1009,7 @@ KV_TEMPLATE = '''
         spacing: dp(10)
         # ── Title ─────────────────────────────────────────────────────────
         Label:
-            text: 'Choose your language'
+            text: _('Choose your language')
             font_size: sp(22)
             font_name: FONT
             bold: True
@@ -1010,7 +1019,7 @@ KV_TEMPLATE = '''
         # ── Search ────────────────────────────────────────────────────────
         TextInput:
             id: lang_search
-            hint_text: 'Type a language name...'
+            hint_text: _('Type a language name...')
             font_size: sp(16)
             font_name: FONT
             multiline: False
@@ -1091,7 +1100,7 @@ KV_TEMPLATE = '''
             color: T.ACCENT
             on_active: root.active = self.active
         Label:
-            text: 'Show past work'
+            text: _('Show past work')
             font_size: sp(16)
             font_name: FONT
             bold: True
@@ -1484,7 +1493,7 @@ BoxLayout:
         text_size: self.width, None
     Label:
         id: region_title
-        text: 'Select region:'
+        text: _('Select region:')
         font_size: sp(14)
         font_name: FONT
         color: T.TEXT_DIM
@@ -1509,7 +1518,7 @@ BoxLayout:
             width: dp(40)
             active: False
         Label:
-            text: "I'm working on a dialect"
+            text: _("I'm working on a dialect")
             font_size: sp(14)
             font_name: FONT
             color: T.TEXT
@@ -1518,7 +1527,7 @@ BoxLayout:
             text_size: self.size
     TextInput:
         id: dialect_input
-        hint_text: 'Variant code (2-8 chars)'
+        hint_text: _('Variant code (2-8 chars)')
         font_size: sp(14)
         font_name: FONT
         multiline: False
@@ -1543,7 +1552,7 @@ BoxLayout:
         text_size: self.width, None
     RecBtn:
         id: continue_btn
-        text: 'Continue'
+        text: _('Continue')
         normal_color: T.GREEN
         size_hint_y: None
         height: dp(52)
@@ -1625,7 +1634,7 @@ BoxLayout:
             rnames = self._region_names or {}
             # "All/multiple" option
             btn = Button(
-                text='Multiple / all regions',
+                text=_tr('Multiple / all regions'),
                 font_size=sp(13),
                 font_name=_FONT_NAME,
                 size_hint_y=None,
@@ -1750,7 +1759,7 @@ BoxLayout:
         code = self._assembled_code()
         app._pending_vernlang = code
         # Show overlay immediately so user knows the button worked
-        app._show_loading_overlay(f'Setting up wordlist for {code}...')
+        app._show_loading_overlay(_tr('Setting up wordlist for {code}...').format(code=code))
         app.new_from_template()
 
 
@@ -1899,7 +1908,7 @@ class ImagePickerScreen(Screen):
             root_tk = tk.Tk()
             root_tk.withdraw()
             path = filedialog.askopenfilename(
-                title='Select image',
+                title=_tr('Select image'),
                 filetypes=[('Images', '*.png *.jpg *.jpeg *.bmp *.gif'),
                            ('All files', '*.*')],
             )
@@ -2007,7 +2016,7 @@ class ImagePickerScreen(Screen):
             entry['illustration_href'] = filename
             def _update_ui(dt):
                 app.refresh_recorder_ui()
-                app._show_toast('Image updated')
+                app._show_toast(_tr('Image updated'))
             Clock.schedule_once(_update_ui, 0)
         except Exception as ex:
             print(f'[image-picker] local image error: {ex}')
@@ -2069,7 +2078,7 @@ class ImagePickerScreen(Screen):
                     lambda dt: self._append_web_images(urls, cell_h, 'openclipart'), 0)
             else:
                 Clock.schedule_once(
-                    lambda dt: app._show_toast('No images found on openclipart'), 0)
+                    lambda dt: app._show_toast(_tr('No images found on openclipart')), 0)
         except Exception as ex:
             print(f'[openclipart] fetch error: {ex}')
 
@@ -2118,7 +2127,7 @@ class ImagePickerScreen(Screen):
                     lambda dt: self._append_web_images(urls, cell_h, 'FreeSVG'), 0)
             else:
                 Clock.schedule_once(
-                    lambda dt: app._show_toast('No images found on FreeSVG'), 0)
+                    lambda dt: app._show_toast(_tr('No images found on FreeSVG')), 0)
         except Exception as ex:
             print(f'[freesvg] fetch error: {ex}')
 
@@ -2180,7 +2189,7 @@ class ImagePickerScreen(Screen):
                     lambda dt: self._append_web_images(urls, cell_h, 'Wikimedia'), 0)
             else:
                 Clock.schedule_once(
-                    lambda dt: app._show_toast('No public domain images on Wikimedia'), 0)
+                    lambda dt: app._show_toast(_tr('No public domain images on Wikimedia')), 0)
         except Exception as ex:
             print(f'[wikimedia] fetch error: {ex}')
 
@@ -2199,7 +2208,7 @@ class ImagePickerScreen(Screen):
         self._add_image_buttons(grid, urls, cell_h)
         if new_urls:
             app = App.get_running_app()
-            app._show_toast(f'{len(new_urls)} images from {source_name}')
+            app._show_toast(_tr('{count} images from {source}').format(count=len(new_urls), source=source_name))
 
     def take_photo(self):
         """Launch camera to take a photo."""
@@ -2360,6 +2369,7 @@ class ConfigScreen(Screen):
 
     def on_enter(self):
         app = App.get_running_app()
+        self._build_lang_selector()
         if not app.recorder:
             return
         self.build_lang_toggles()
@@ -2386,6 +2396,45 @@ class ConfigScreen(Screen):
         self._collapse_imgrepo_panel(ir)
         # Build recording options
         self._build_rec_options(app)
+
+    def _build_lang_selector(self):
+        """Populate the UI language selector row with one button per language."""
+        from kivy.uix.button import Button
+        row = self.ids.get('lang_selector_row')
+        if row is None:
+            return
+        row.clear_widgets()
+        cur = current_language()
+        for code, name in available_languages():
+            btn = Button(
+                text=name,
+                font_size=sp(14),
+                font_name=_FONT_NAME,
+                size_hint_x=1,
+                background_color=theme.ACCENT if code == cur else theme.SURFACE,
+                color=theme.TEXT,
+            )
+            btn.bind(on_release=lambda b, c=code: self._set_ui_language(c))
+            row.add_widget(btn)
+
+    def _set_ui_language(self, lang_code):
+        """Change the UI language and rebuild all screens."""
+        app = App.get_running_app()
+        set_language(lang_code)
+        prefs = app._load_prefs()
+        prefs['ui_language'] = lang_code
+        app._save_prefs_dict(prefs)
+        app.subtitle = _tr(APP_TAGLINE)
+        # Rebuild all screens so translated strings take effect
+        sm = app.root.ids.sm
+        current = sm.current
+        screens_info = [(s.name, type(s)) for s in list(sm.screens)]
+        sm.clear_widgets()
+        for name, cls in screens_info:
+            sm.add_widget(cls(name=name))
+        sm.current = current
+        # Re-link config_screen reference
+        app.config_screen = sm.get_screen('config')
 
     def build_lang_toggles(self):
         app = App.get_running_app()
@@ -2645,12 +2694,12 @@ class ConfigScreen(Screen):
         ))
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
         cancel_btn = Button(
-            text='Cancel', font_size=sp(14), font_name=_FONT_NAME,
+            text=_tr('Cancel'), font_size=sp(14), font_name=_FONT_NAME,
             background_normal='', background_color=theme.SURFACE,
             color=theme.TEXT,
         )
         ok_btn = Button(
-            text='OK', font_size=sp(14), font_name=_FONT_NAME,
+            text=_tr('OK'), font_size=sp(14), font_name=_FONT_NAME,
             background_normal='', background_color=theme.GREEN,
             color=theme.TEXT,
         )
@@ -2902,7 +2951,7 @@ class CollabScreen(Screen):
                      size=lambda w, s: setattr(bg_rect, 'size', s))
         overlay.add_widget(Widget(size_hint_y=1))
         msg = Label(
-            text="Type your name as you want it to\nappear online, then click 'Connect'",
+            text=_tr("Type your name as you want it to\nappear online, then click 'Connect'"),
             font_size=sp(16), font_name=_FONT_NAME, color=theme.TEXT,
             halign='center', valign='middle',
             size_hint_y=None, height=dp(80))
@@ -3001,12 +3050,12 @@ class CollabScreen(Screen):
         token = token_w.text.strip() if token_w else ''
         username = user_w.text.strip() if user_w else ''
         if not token or not username:
-            self._set_log('Enter both GitLab username and token.')
+            self._set_log(_tr('Enter both GitLab username and token.'))
             return
         prefs['gl_token'] = token
         prefs['gl_username'] = username
         app._save_prefs_dict(prefs)
-        self._set_log(f'GitLab credentials saved for {username}')
+        self._set_log(_tr('GitLab credentials saved for {username}').format(username=username))
         self.update_publish_url()
 
     def _update_gh_status(self):
@@ -3019,13 +3068,13 @@ class CollabScreen(Screen):
         btn = self.ids.get('gh_connect_btn')
         if lbl:
             if username and token:
-                lbl.text = f'Connected as {username}'
+                lbl.text = _tr('Connected as {username}').format(username=username)
                 lbl.color = theme.GREEN
             else:
-                lbl.text = 'Not connected'
+                lbl.text = _tr('Not connected')
                 lbl.color = theme.TEXT_DIM
         if btn:
-            btn.text = 'Reconnect' if (username and token) else 'Connect to GitHub'
+            btn.text = _tr('Reconnect') if (username and token) else _tr('Connect to GitHub')
         # Hide install button + instructions if app is already installed
         installed = prefs.get('gh_app_installed', False)
         install_btn = self.ids.get('install_app_btn')
@@ -3057,7 +3106,7 @@ class CollabScreen(Screen):
         if lbl and lbl.text:
             from kivy.core.clipboard import Clipboard
             Clipboard.copy(lbl.text)
-            self._set_log('Code copied to clipboard')
+            self._set_log(_tr('Code copied to clipboard'))
 
     def _save_settings(self):
         app = App.get_running_app()
@@ -3093,14 +3142,14 @@ class CollabScreen(Screen):
             name_input.focus = False
         from collab import GITHUB_APP_CLIENT_ID
         if not GITHUB_APP_CLIENT_ID:
-            self._set_log('GitHub App client_id not configured.')
+            self._set_log(_tr('GitHub App client_id not configured.'))
             return
         # Reset install status on reconnect
         app = App.get_running_app()
         prefs = app._load_prefs()
         prefs['gh_app_installed'] = False
         app._save_prefs_dict(prefs)
-        self._set_log('Starting GitHub authorization...')
+        self._set_log(_tr('Starting GitHub authorization...'))
         import threading
         threading.Thread(target=self._device_flow_worker, daemon=True).start()
 
@@ -3132,7 +3181,7 @@ class CollabScreen(Screen):
                     box.opacity = 1
                 from kivy.core.clipboard import Clipboard
                 Clipboard.copy(user_code)
-                self._set_log('Code copied to clipboard — type it on the GitHub page')
+                self._set_log(_tr('Code copied to clipboard \u2014 type it on the GitHub page'))
             Clock.schedule_once(_show_code, 0)
 
             def _open_browser(dt):
@@ -3176,7 +3225,7 @@ class CollabScreen(Screen):
                     if install_btn:
                         install_btn.height = 0
                         install_btn.opacity = 0
-                    self._set_log(f'Connected as {_username}')
+                    self._set_log(_tr('Connected as {username}').format(username=_username))
                 else:
                     if inst:
                         inst.text = (
@@ -3187,7 +3236,7 @@ class CollabScreen(Screen):
                     if install_btn:
                         install_btn.height = dp(48)
                         install_btn.opacity = 1
-                    self._set_log(f'Connected as {_username} — install app for repo access')
+                    self._set_log(_tr('Connected as {username} \u2014 install app for repo access').format(username=_username))
                     import webbrowser
                     webbrowser.open(_url)
             Clock.schedule_once(_done, 0)
@@ -3210,7 +3259,7 @@ class CollabScreen(Screen):
                 if install_btn:
                     install_btn.height = 0
                     install_btn.opacity = 0
-                self._set_log(f'Authorization failed: {err_msg}')
+                self._set_log(_tr('Authorization failed: {error}').format(error=err_msg))
             Clock.schedule_once(_err, 0)
 
     # ── Button handlers ────────────────────────────────────────────────────
@@ -3248,26 +3297,26 @@ class CollabScreen(Screen):
     def do_publish(self):
         app = App.get_running_app()
         if not app.recorder:
-            self._set_log('No project loaded.')
+            self._set_log(_tr('No project loaded.'))
             return
         self._save_settings()
         user, token = self._get_credentials_for_host()
         host = getattr(self, '_host', 'github')
         if not token:
             host_name = 'GitLab' if host == 'gitlab' else 'GitHub'
-            self._set_log(f'Connect to {host_name} first.')
+            self._set_log(_tr('Connect to {host} first.').format(host=host_name))
             return
         name_w = self.ids.get('name_input')
         name = (name_w.text.strip() if name_w else '') or 'Recorder'
         lbl = self.ids.get('publish_url_label')
         remote_url = lbl.text.strip() if lbl else ''
         if not remote_url:
-            self._set_log('Enter a language code first.')
+            self._set_log(_tr('Enter a language code first.'))
             return
         # GitLab uses username + PAT directly; GitHub uses x-access-token
         git_user = user if host == 'gitlab' else 'x-access-token'
         from collab import init_repo
-        self._run('Publishing...', init_repo,
+        self._run(_tr('Publishing...'), init_repo,
                   app.recorder.db.dir, remote_url,
                   git_user, token,
                   'main', name)
@@ -3433,11 +3482,11 @@ class RecorderController:
         if not e:
             return ''
         if self._recording:
-            return 'Recording...'
+            return _tr('Recording...')
         fn = e.get('audio_filename')
         if fn:
             return fn
-        return 'Not yet recorded'
+        return _tr('Not yet recorded')
 
     # ── Recording ──────────────────────────────────────────────────────────────
 
@@ -3707,16 +3756,21 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.19.3'
+__version__ = '1.20.0'
 
 
 class LIFTRecorderApp(App):
     title = APP_NAME
-    subtitle = APP_TAGLINE
+    subtitle = StringProperty(_tr(APP_TAGLINE))
     icon = APP_ICON
     version_string = StringProperty(f'version {__version__}')
     recorder: RecorderController = None
     config_screen: ConfigScreen = None
+
+    # Expose _() to KV templates as app._()
+    @staticmethod
+    def _tr(msg):
+        return _tr(msg)
 
     # ── Project discovery ────────────────────────────────────────────────────
 
@@ -3779,9 +3833,11 @@ class LIFTRecorderApp(App):
 
     def build(self):
         try:
-            # Apply saved theme before KV is parsed
+            # Apply saved theme and language before KV is parsed
             prefs = self._load_prefs()
             theme.set_theme(prefs.get('theme', 'Ocean'))
+            set_language(prefs.get('ui_language', 'en'))
+            self.subtitle = _tr(APP_TAGLINE)
             Builder.load_string(KV)
             self.root = RootScreen()
             return self.root
@@ -3831,7 +3887,7 @@ class LIFTRecorderApp(App):
 
         content = BoxLayout(orientation='vertical', spacing=dp(12), padding=dp(12))
         content.add_widget(Label(
-            text='Paste the URL to a .lift file:',
+            text=_tr('Paste the URL to a .lift file:'),
             size_hint_y=None, height=dp(30),
             font_size=sp(14), color=theme.TEXT,
         ))
@@ -3842,15 +3898,15 @@ class LIFTRecorderApp(App):
         )
         content.add_widget(url_input)
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
-        cancel_btn = Button(text='Cancel', font_size=sp(14))
-        open_btn = Button(text='Open', font_size=sp(14),
+        cancel_btn = Button(text=_tr('Cancel'), font_size=sp(14))
+        open_btn = Button(text=_tr('Open'), font_size=sp(14),
                           background_color=theme.ACCENT)
         btn_row.add_widget(cancel_btn)
         btn_row.add_widget(open_btn)
         content.add_widget(btn_row)
 
         popup = Popup(
-            title='Open LIFT from URL',
+            title=_tr('Open LIFT from URL'),
             content=content,
             size_hint=(0.9, None), height=dp(220),
             auto_dismiss=True,
@@ -4061,7 +4117,7 @@ class LIFTRecorderApp(App):
         from kivy.uix.popup import Popup
         from kivy.uix.label import Label
         popup = Popup(
-            title='Error',
+            title=_tr('Error'),
             content=Label(text=msg, font_size=sp(14)),
             size_hint=(0.8, None), height=dp(180),
         )
@@ -4260,7 +4316,7 @@ class LIFTRecorderApp(App):
             root_tk = tk.Tk()
             root_tk.withdraw()
             path = filedialog.askopenfilename(
-                title='Open LIFT file',
+                title=_tr('Open LIFT file'),
                 filetypes=[('LIFT files', '*.lift'), ('All files', '*.*')],
             )
             root_tk.destroy()
@@ -4335,7 +4391,7 @@ class LIFTRecorderApp(App):
             db = LIFTDatabase(path, image_repo=self._image_repo(),
                               image_cache_dir=self._get_image_cache_dir())
         except Exception as ex:
-            self._show_error(f'Could not open file:\n{ex}')
+            self._show_error(_tr('Could not open file:\n{error}').format(error=ex))
             return
         self._save_prefs(path)
         # Apply language code: from picker, from prefs, or from filename
@@ -4542,21 +4598,21 @@ class LIFTRecorderApp(App):
             text_size=(dp(280), None),
         ))
         content.add_widget(Label(
-            text='Start a new wordlist with this template?',
+            text=_tr('Start a new wordlist with this template?'),
             font_size=sp(14), font_name=_FONT_NAME,
             color=theme.TEXT_DIM,
             size_hint_y=None, height=dp(30),
         ))
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
-        cancel_btn = Button(text='Cancel', font_size=sp(14))
-        go_btn = Button(text='Yes', font_size=sp(14),
+        cancel_btn = Button(text=_tr('Cancel'), font_size=sp(14))
+        go_btn = Button(text=_tr('Yes'), font_size=sp(14),
                         background_color=theme.ACCENT)
         btn_row.add_widget(go_btn)
         btn_row.add_widget(cancel_btn)
         content.add_widget(btn_row)
 
         popup = Popup(
-            title='Start a new wordlist',
+            title=_tr('Start a new wordlist'),
             content=content,
             size_hint=(0.9, None), height=dp(240),
             auto_dismiss=True,
@@ -4611,7 +4667,7 @@ class LIFTRecorderApp(App):
                 uri = resolver.insert(
                     MediaStoreDownloads.EXTERNAL_CONTENT_URI, values)
                 if not uri:
-                    self._show_error('Share failed: could not create MediaStore entry')
+                    self._show_error(_tr('Share failed: could not create MediaStore entry'))
                     return
                 # Copy APK bytes into the MediaStore entry
                 fos = resolver.openOutputStream(uri)
@@ -4633,9 +4689,9 @@ class LIFTRecorderApp(App):
                 activity.startActivity(chooser)
             except Exception as ex:
                 print(f'Share APK error: {ex}')
-                self._show_error(f'Could not share APK:\n{ex}')
+                self._show_error(_tr('Could not share APK:\n{error}').format(error=ex))
         else:
-            self._show_error('APK sharing is only available on Android.')
+            self._show_error(_tr('APK sharing is only available on Android.'))
 
     def do_sync(self):
         if not self.recorder:
@@ -4851,15 +4907,15 @@ class LIFTRecorderApp(App):
         )
         content.add_widget(num_input)
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
-        clear_btn = Button(text='Clear', font_size=sp(14))
-        ok_btn = Button(text='OK', font_size=sp(14),
+        clear_btn = Button(text=_tr('Clear'), font_size=sp(14))
+        ok_btn = Button(text=_tr('OK'), font_size=sp(14),
                         background_color=theme.ACCENT)
         btn_row.add_widget(clear_btn)
         btn_row.add_widget(ok_btn)
         content.add_widget(btn_row)
 
         popup = Popup(
-            title=f'Go to entry (1-{total})',
+            title=_tr('Go to entry (1-{total})').format(total=total),
             content=content,
             size_hint=(0.8, None), height=dp(180),
             auto_dismiss=True,
@@ -4902,7 +4958,7 @@ class LIFTRecorderApp(App):
         prefs = self._load_prefs()
         content = BoxLayout(orientation='vertical', spacing=dp(10), padding=dp(12))
         content.add_widget(Label(
-            text='Clone a git repository containing a LIFT file:',
+            text=_tr('Clone a git repository containing a LIFT file:'),
             size_hint_y=None, height=dp(30),
             font_size=sp(13), color=theme.TEXT,
         ))
@@ -4916,7 +4972,7 @@ class LIFTRecorderApp(App):
         )
         owner_input = TextInput(
             text=prefs.get('clone_owner', ''),
-            hint_text='Owner (username)',
+            hint_text=_tr('Owner (username)'),
             multiline=False, size_hint_x=0.65, font_size=sp(14),
         )
         host_row.add_widget(host_spinner)
@@ -4925,7 +4981,7 @@ class LIFTRecorderApp(App):
 
         # Repo name
         repo_input = TextInput(
-            text='', hint_text='Repository name',
+            text='', hint_text=_tr('Repository name'),
             multiline=False, size_hint_y=None, height=dp(44), font_size=sp(14),
         )
         content.add_widget(repo_input)
@@ -4955,15 +5011,15 @@ class LIFTRecorderApp(App):
         repo_input.bind(text=_update_url)
 
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
-        cancel_btn = Button(text='Cancel', font_size=sp(14))
-        clone_btn = Button(text='Clone', font_size=sp(14),
+        cancel_btn = Button(text=_tr('Cancel'), font_size=sp(14))
+        clone_btn = Button(text=_tr('Clone'), font_size=sp(14),
                            background_color=theme.ACCENT)
         btn_row.add_widget(cancel_btn)
         btn_row.add_widget(clone_btn)
         content.add_widget(btn_row)
 
         popup = Popup(
-            title='Clone Repository',
+            title=_tr('Clone Repository'),
             content=content,
             size_hint=(0.9, None), height=dp(340),
             auto_dismiss=True,
@@ -4984,7 +5040,7 @@ class LIFTRecorderApp(App):
             repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')
             dest = os.path.join(self.user_data_dir, 'projects', repo_name)
 
-            self._show_loading_overlay('Cloning repository...')
+            self._show_loading_overlay(_tr('Cloning repository...'))
             import threading
             from collab import clone_repo
 

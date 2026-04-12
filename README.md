@@ -23,6 +23,7 @@ Records the highest quality audio the device supports, stores files in an `audio
   - GitHub App device flow (no PATs needed — just enter a code)
   - Auto-create repos, auto-sync on navigation
   - Clone existing repositories from the welcome screen
+- **Internationalisation** — UI language selector in Settings; French included, easy to add more
 - **Image picker** with openclipart, FreeSVG, and Wikimedia Commons sources
 - Recorded filename written back into LIFT XML immediately after each recording
 

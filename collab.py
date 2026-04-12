@@ -36,6 +36,7 @@ logging.getLogger('dulwich').setLevel(logging.WARNING)
 # Required permissions: Repository → Administration: Write, Contents: Write
 # Set these after creating the app:
 from appinfo import APP_SLUG
+from i18n import _ as _tr
 
 GITHUB_APP_CLIENT_ID = 'Iv23li66Fo9MBReatv6i'  # set after registering the GitHub App
 GITHUB_APP_NAME = APP_SLUG
@@ -206,12 +207,12 @@ def device_flow_poll(device_code, interval=5, expires_in=900):
             interval = result.get('interval', interval + 5)
             continue
         elif error == 'expired_token':
-            raise RuntimeError('Authorization expired. Please try again.')
+            raise RuntimeError(_tr('Authorization expired. Please try again.'))
         elif error == 'access_denied':
-            raise RuntimeError('Authorization denied by user.')
+            raise RuntimeError(_tr('Authorization denied by user.'))
         else:
             raise RuntimeError(f'Device flow error: {error}')
-    raise RuntimeError('Authorization timed out.')
+    raise RuntimeError(_tr('Authorization timed out.'))
 
 
 def refresh_access_token(refresh_token):
@@ -328,7 +329,7 @@ GITHUB_APP_INSTALL_URL = f'https://github.com/apps/{GITHUB_APP_NAME}/installatio
 def _diagnose_403(token, remote_url):
     """Diagnose a 403 push/pull failure. Returns a human-readable message."""
     if not token:
-        return 'Not connected to GitHub. Go to Setup > Connect to GitHub.'
+        return _tr('Not connected to GitHub. Go to Setup > Connect to GitHub.')
     info = check_app_installed(token)
     if not info['installed']:
         return (f'App not installed. Visit {GITHUB_APP_INSTALL_URL} '
@@ -620,16 +621,16 @@ def init_repo(project_dir, remote_url, username, token,
     repo = _get_repo(project_dir)
     if repo is None:
         repo = porcelain.init(project_dir)
-        log.append('Initialized git repository.')
+        log.append(_tr('Initialized git repository.'))
     else:
-        log.append('Repository already initialized.')
+        log.append(_tr('Repository already initialized.'))
 
     # .gitignore
     gitignore = os.path.join(project_dir, '.gitignore')
     if not os.path.exists(gitignore):
         with open(gitignore, 'w') as fh:
             fh.write('__pycache__/\n*.pyc\n.buildozer/\nenv/\n.DS_Store\nimage_cache/\n')
-        log.append('Created .gitignore.')
+        log.append(_tr('Created .gitignore.'))
 
     # Stage + commit
     _stage_all(repo, project_dir)
@@ -765,7 +766,7 @@ def clone_repo(remote_url, dest_dir, username, token, on_progress=None):
     if lift_path:
         log.append(f'Found: {os.path.basename(lift_path)}')
     else:
-        log.append('No .lift file found in cloned repository.')
+        log.append(_tr('No .lift file found in cloned repository.'))
     return lift_path, '\n'.join(log)
 
 
@@ -778,20 +779,20 @@ def pull_repo(project_dir, username, token):
     log = []
     repo = _get_repo(project_dir)
     if repo is None:
-        return 'Not a git repository.'
+        return _tr('Not a git repository.')
     try:
         remote_url = repo.get_config().get(
             (b'remote', b'origin'), b'url'
         ).decode('utf-8')
     except KeyError:
-        return 'No remote configured. Publish the project first.'
+        return _tr('No remote configured. Publish the project first.')
     try:
         porcelain.pull(
             repo, remote_url,
             username=username, password=token,
             errstream=io.BytesIO(),
         )
-        log.append('Pulled latest changes from origin.')
+        log.append(_tr('Pulled latest changes from origin.'))
     except Exception as exc:
         log.append(f'Pull failed: {exc}')
     return '\n'.join(log)
@@ -808,13 +809,13 @@ def commit_and_push_branch(project_dir, username, token, contributor_name):
     log = []
     repo = _get_repo(project_dir)
     if repo is None:
-        return 'Not a git repository. Publish the project first.'
+        return _tr('Not a git repository. Publish the project first.')
     try:
         remote_url = repo.get_config().get(
             (b'remote', b'origin'), b'url'
         ).decode('utf-8')
     except KeyError:
-        return 'No remote configured. Publish the project first.'
+        return _tr('No remote configured. Publish the project first.')
 
     safe = (contributor_name.lower()
             .replace(' ', '_').replace('/', '_') or 'contributor')
@@ -832,7 +833,7 @@ def commit_and_push_branch(project_dir, username, token, contributor_name):
 
     # Stage all
     _stage_all(repo, project_dir)
-    log.append('Staged all changes.')
+    log.append(_tr('Staged all changes.'))
 
     # Commit
     author = _default_author(contributor_name)
@@ -843,11 +844,11 @@ def commit_and_push_branch(project_dir, username, token, contributor_name):
             message=_enc(f'Audio recordings by {contributor_name}'),
             author=author, committer=committer,
         )
-        log.append('Committed.')
+        log.append(_tr('Committed.'))
     except Exception as exc:
         msg = str(exc).lower()
         if 'nothing' in msg or 'empty' in msg or 'no changes' in msg:
-            log.append('Nothing new to commit.')
+            log.append(_tr('Nothing new to commit.'))
         else:
             log.append(f'Commit: {exc}')
 
@@ -860,7 +861,7 @@ def commit_and_push_branch(project_dir, username, token, contributor_name):
             errstream=io.BytesIO(),
         )
         log.append(f'Pushed {branch_name}.')
-        log.append('Open your git host to create a pull request.')
+        log.append(_tr('Open your git host to create a pull request.'))
     except Exception as exc:
         log.append(f'Push failed: {exc}')
 
@@ -878,13 +879,13 @@ def sync_repo(project_dir, username, token, contributor_name):
     log = []
     repo = _get_repo(project_dir)
     if repo is None:
-        return 'Not a git repository. Publish the project first.'
+        return _tr('Not a git repository. Publish the project first.')
     try:
         remote_url = repo.get_config().get(
             (b'remote', b'origin'), b'url'
         ).decode('utf-8')
     except KeyError:
-        return 'No remote configured. Publish the project first.'
+        return _tr('No remote configured. Publish the project first.')
 
     # Pull
     try:
@@ -893,7 +894,7 @@ def sync_repo(project_dir, username, token, contributor_name):
             username=username, password=token,
             errstream=io.BytesIO(),
         )
-        log.append('Pulled latest changes.')
+        log.append(_tr('Pulled latest changes.'))
     except Exception as exc:
         if '403' in str(exc):
             log.append(f'Pull failed: {_diagnose_403(token, remote_url)}')
@@ -915,11 +916,11 @@ def sync_repo(project_dir, username, token, contributor_name):
                 message=_enc(f'Audio recordings by {contributor_name}'),
                 author=author, committer=committer,
             )
-            log.append('Committed local changes.')
+            log.append(_tr('Committed local changes.'))
         except Exception as exc:
             log.append(f'Commit: {exc}')
     else:
-        log.append('No local changes to commit.')
+        log.append(_tr('No local changes to commit.'))
 
     # Push
     try:
@@ -999,7 +1000,7 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
     from dulwich import porcelain
     repo = _get_repo(project_dir)
     if repo is None:
-        return 'No repo'
+        return _tr('No repo')
 
     # Stage audio and .lift changes only
     n = _stage_audio(repo, project_dir)
@@ -1014,7 +1015,7 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
                 return sync_repo(project_dir, username, token, contributor_name)
             except Exception:
                 pass
-        return 'No new audio'
+        return _tr('No new audio')
 
     # Commit
     author = _default_author(contributor_name)
@@ -1030,7 +1031,7 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
 
     # Sync if there's internet
     if not _has_internet():
-        return 'Committed locally (offline)'
+        return _tr('Committed locally (offline)')
 
     try:
         _ensure_ssl()
@@ -1038,7 +1039,7 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
             (b'remote', b'origin'), b'url'
         ).decode('utf-8')
     except KeyError:
-        return 'Committed (no remote configured)'
+        return _tr('Committed (no remote configured)')
 
     try:
         branch = porcelain.active_branch(repo).decode('utf-8', errors='replace')
@@ -1066,7 +1067,7 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
             username=username, password=token,
             errstream=io.BytesIO(),
         )
-        return f'Committed and pushed {n} file(s)'
+        return _tr('Committed and pushed {n} file(s)').format(n=n)
     except Exception as exc:
         if '403' in str(exc):
             return f'Committed locally, push failed: {_diagnose_403(token, remote_url)}'

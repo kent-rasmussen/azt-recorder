@@ -3,7 +3,7 @@ title = A-Z+T Recorder
 package.name = azt_recorder
 package.domain = org.atoznback
 source.dir = .
-source.include_exts = py,png,jpg,kv,atlas,lift,ttf,gz
+source.include_exts = py,png,jpg,kv,atlas,lift,ttf,gz,mo,po
 # azt_images/ is 320 MB — too large to bundle in the APK (causes OOM on device).
 # Images are accessed from external storage via lift.py's bundled_images_dir logic.
 source.exclude_dirs = azt_images,env,.venv,venv,__pycache__

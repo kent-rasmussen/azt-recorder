@@ -1,0 +1,394 @@
+# French translations for A-Z+T Recorder
+# Copyright (C) 2026 A-Z+T Project
+# This file is distributed under the same license as the A-Z+T Recorder package.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: azt-recorder 1.20.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-12 00:00+0000\n"
+"PO-Revision-Date: 2026-04-12 00:00+0000\n"
+"Last-Translator: \n"
+"Language-Team: French\n"
+"Language: fr\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\n"
+
+# ── App identity ──────────────────────────────────────────────────────────────
+
+msgid "Record My Wordlist"
+msgstr "Enregistrer ma liste de mots"
+
+# ── Welcome screen ────────────────────────────────────────────────────────────
+
+msgid "I have one on my phone"
+msgstr "J'en ai un sur mon téléphone"
+
+msgid "Clone Internet Repository"
+msgstr "Cloner un dépôt Internet"
+
+msgid "Start New"
+msgstr "Nouveau projet"
+
+# ── Recorder screen ──────────────────────────────────────────────────────────
+
+msgid "Recording:"
+msgstr "Enregistrement :"
+
+msgid "     Share this app"
+msgstr "     Partager cette appli"
+
+msgid "Change gloss languages"
+msgstr "Changer les langues de glose"
+
+msgid "Filter words"
+msgstr "Filtrer les mots"
+
+msgid "CAWL number or range (e.g. 1-100, 42, leave blank for all)"
+msgstr "Numéro ou plage CAWL (ex. 1-100, 42, vide = tous)"
+
+msgid "e.g. 1-500"
+msgstr "ex. 1-500"
+
+msgid "Gloss search (filter by gloss text)"
+msgstr "Recherche de glose (filtrer par texte de glose)"
+
+msgid "search gloss text…"
+msgstr "rechercher une glose…"
+
+msgid "Change image repository"
+msgstr "Changer le dépôt d’images"
+
+msgid "Setup Collaboration"
+msgstr "Configurer la collaboration"
+
+msgid "Start over"
+msgstr "Recommencer"
+
+msgid "Show past work"
+msgstr "Afficher le travail passé"
+
+# ── Config / Setup screen ────────────────────────────────────────────────────
+
+msgid "Setup"
+msgstr "Paramètres"
+
+msgid "Your name [color=ff4444]*[/color]"
+msgstr "Votre nom [color=ff4444]*[/color]"
+
+msgid "Your name (for commit attribution)"
+msgstr "Votre nom (pour l’attribution des contributions)"
+
+msgid "GitHub"
+msgstr "GitHub"
+
+msgid "GitLab"
+msgstr "GitLab"
+
+msgid "GitHub account"
+msgstr "Compte GitHub"
+
+msgid "Not connected"
+msgstr "Non connecté"
+
+msgid "Connect to GitHub"
+msgstr "Se connecter à GitHub"
+
+msgid "Reconnect"
+msgstr "Se reconnecter"
+
+msgid "Install GitHub App"
+msgstr "Installer l’appli GitHub"
+
+msgid "Copy"
+msgstr "Copier"
+
+msgid "GitLab account"
+msgstr "Compte GitLab"
+
+msgid "Personal access token"
+msgstr "Jeton d’accès personnel"
+
+msgid "GitLab username"
+msgstr "Nom d’utilisateur GitLab"
+
+msgid "Save GitLab credentials"
+msgstr "Enregistrer les identifiants GitLab"
+
+msgid "Publish this project"
+msgstr "Publier ce projet"
+
+msgid "Language code (repo name)"
+msgstr "Code de langue (nom du dépôt)"
+
+msgid "Publish"
+msgstr "Publier"
+
+msgid "Last operation"
+msgstr "Dernière opération"
+
+msgid "UI Language"
+msgstr "Langue de l’interface"
+
+# ── Image picker screen ──────────────────────────────────────────────────────
+
+msgid "openclipart"
+msgstr "openclipart"
+
+msgid "FreeSVG"
+msgstr "FreeSVG"
+
+msgid "Wikimedia"
+msgstr "Wikimedia"
+
+msgid "Photo"
+msgstr "Photo"
+
+msgid "File"
+msgstr "Fichier"
+
+# ── Language picker screen ───────────────────────────────────────────────────
+
+msgid "Choose your language"
+msgstr "Choisissez votre langue"
+
+msgid "Type a language name..."
+msgstr "Tapez un nom de langue…"
+
+# ── Dialect / region selection ───────────────────────────────────────────────
+
+msgid "Select region:"
+msgstr "Sélectionnez la région :"
+
+msgid "I'm working on a dialect"
+msgstr "Je travaille sur un dialecte"
+
+msgid "Variant code (2-8 chars)"
+msgstr "Code de variante (2-8 caract.)"
+
+msgid "Continue"
+msgstr "Continuer"
+
+msgid "Multiple / all regions"
+msgstr "Plusieurs / toutes les régions"
+
+# ── Recorder status ──────────────────────────────────────────────────────────
+
+msgid "Recording..."
+msgstr "Enregistrement en cours…"
+
+msgid "Not yet recorded"
+msgstr "Pas encore enregistré"
+
+# ── Common buttons ───────────────────────────────────────────────────────────
+
+msgid "Cancel"
+msgstr "Annuler"
+
+msgid "Open"
+msgstr "Ouvrir"
+
+msgid "Yes"
+msgstr "Oui"
+
+msgid "OK"
+msgstr "OK"
+
+msgid "Clone"
+msgstr "Cloner"
+
+msgid "Clear"
+msgstr "Effacer"
+
+# ── Popups / dialogs ─────────────────────────────────────────────────────────
+
+msgid "Open LIFT from URL"
+msgstr "Ouvrir un LIFT depuis une URL"
+
+msgid "Paste the URL to a .lift file:"
+msgstr "Collez l’URL d’un fichier .lift :"
+
+msgid "Error"
+msgstr "Erreur"
+
+msgid "Start a new wordlist"
+msgstr "Créer une nouvelle liste de mots"
+
+msgid "Start a new wordlist with this template?"
+msgstr "Créer une nouvelle liste de mots avec ce modèle ?"
+
+msgid "Go to entry (1-{total})"
+msgstr "Aller à l’entrée (1-{total})"
+
+msgid "Clone Repository"
+msgstr "Cloner un dépôt"
+
+msgid "Clone a git repository containing a LIFT file:"
+msgstr "Cloner un dépôt git contenant un fichier LIFT :"
+
+msgid "Owner (username)"
+msgstr "Propriétaire (nom d’utilisateur)"
+
+msgid "Repository name"
+msgstr "Nom du dépôt"
+
+msgid "Select image"
+msgstr "Sélectionner une image"
+
+msgid "Open LIFT file"
+msgstr "Ouvrir un fichier LIFT"
+
+msgid "Type your name as you want it to\nappear online, then click 'Connect'"
+msgstr "Tapez votre nom tel que vous voulez\nqu’il apparaisse en ligne, puis cliquez sur « Se connecter »"
+
+# ── Loading / status messages ────────────────────────────────────────────────
+
+msgid "Setting up wordlist for {code}..."
+msgstr "Préparation de la liste de mots pour {code}…"
+
+msgid "Publishing..."
+msgstr "Publication en cours…"
+
+msgid "Cloning repository..."
+msgstr "Clonage du dépôt en cours…"
+
+# ── Toast / feedback messages ────────────────────────────────────────────────
+
+msgid "Image updated"
+msgstr "Image mise à jour"
+
+msgid "No images found on openclipart"
+msgstr "Aucune image trouvée sur openclipart"
+
+msgid "No images found on FreeSVG"
+msgstr "Aucune image trouvée sur FreeSVG"
+
+msgid "No public domain images on Wikimedia"
+msgstr "Aucune image du domaine public sur Wikimedia"
+
+msgid "{count} images from {source}"
+msgstr "{count} images depuis {source}"
+
+msgid "Enter both GitLab username and token."
+msgstr "Saisissez le nom d’utilisateur et le jeton GitLab."
+
+msgid "GitLab credentials saved for {username}"
+msgstr "Identifiants GitLab enregistrés pour {username}"
+
+msgid "Code copied to clipboard"
+msgstr "Code copié dans le presse-papiers"
+
+msgid "GitHub App client_id not configured."
+msgstr "Le client_id de l’appli GitHub n’est pas configuré."
+
+msgid "Starting GitHub authorization..."
+msgstr "Démarrage de l’autorisation GitHub…"
+
+msgid "Code copied to clipboard — type it on the GitHub page"
+msgstr "Code copié dans le presse-papiers — saisissez-le sur la page GitHub"
+
+msgid "Connected as {username}"
+msgstr "Connecté en tant que {username}"
+
+msgid "Connected as {username} — install app for repo access"
+msgstr "Connecté en tant que {username} — installez l’appli pour accéder aux dépôts"
+
+msgid "Authorization failed: {error}"
+msgstr "Échec de l’autorisation : {error}"
+
+msgid "No project loaded."
+msgstr "Aucun projet chargé."
+
+msgid "Connect to {host} first."
+msgstr "Connectez-vous d’abord à {host}."
+
+msgid "Enter a language code first."
+msgstr "Saisissez d’abord un code de langue."
+
+msgid "Could not open file:\n{error}"
+msgstr "Impossible d’ouvrir le fichier :\n{error}"
+
+msgid "Share failed: could not create MediaStore entry"
+msgstr "Échec du partage : impossible de créer l’entrée MediaStore"
+
+msgid "Could not share APK:\n{error}"
+msgstr "Impossible de partager l’APK :\n{error}"
+
+msgid "APK sharing is only available on Android."
+msgstr "Le partage de l’APK n’est disponible que sur Android."
+
+# ── Collab messages ──────────────────────────────────────────────────────────
+
+msgid "Authorization expired. Please try again."
+msgstr "Autorisation expirée. Veuillez réessayer."
+
+msgid "Authorization denied by user."
+msgstr "Autorisation refusée par l’utilisateur."
+
+msgid "Authorization timed out."
+msgstr "Délai d’autorisation dépassé."
+
+msgid "Not connected to GitHub. Go to Setup > Connect to GitHub."
+msgstr "Non connecté à GitHub. Allez dans Paramètres > Se connecter à GitHub."
+
+msgid "Not a git repository."
+msgstr "Ce n’est pas un dépôt git."
+
+msgid "No remote configured. Publish the project first."
+msgstr "Aucun dépôt distant configuré. Publiez d’abord le projet."
+
+msgid "Not a git repository. Publish the project first."
+msgstr "Ce n’est pas un dépôt git. Publiez d’abord le projet."
+
+msgid "No .lift file found in cloned repository."
+msgstr "Aucun fichier .lift trouvé dans le dépôt cloné."
+
+msgid "No new audio"
+msgstr "Pas de nouvel audio"
+
+msgid "Committed locally (offline)"
+msgstr "Validé localement (hors ligne)"
+
+msgid "Committed (no remote configured)"
+msgstr "Validé (aucun dépôt distant configuré)"
+
+msgid "Committed and pushed {n} file(s)"
+msgstr "{n} fichier(s) validé(s) et envoyé(s)"
+
+msgid "No repo"
+msgstr "Pas de dépôt"
+
+msgid "Initialized git repository."
+msgstr "Dépôt git initialisé."
+
+msgid "Repository already initialized."
+msgstr "Dépôt déjà initialisé."
+
+msgid "Created .gitignore."
+msgstr "Fichier .gitignore créé."
+
+msgid "Pulled latest changes from origin."
+msgstr "Dernières modifications récupérées depuis origin."
+
+msgid "Pulled latest changes."
+msgstr "Dernières modifications récupérées."
+
+msgid "Staged all changes."
+msgstr "Toutes les modifications indexées."
+
+msgid "Committed."
+msgstr "Validé."
+
+msgid "Nothing new to commit."
+msgstr "Rien de nouveau à valider."
+
+msgid "Committed local changes."
+msgstr "Modifications locales validées."
+
+msgid "No local changes to commit."
+msgstr "Aucune modification locale à valider."
+
+msgid "Open your git host to create a pull request."
+msgstr "Ouvrez votre hébergeur git pour créer une demande de fusion."
