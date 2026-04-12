@@ -37,8 +37,8 @@ msgstr "Nouveau projet"
 msgid "Recording:"
 msgstr "Enregistrement :"
 
-msgid "     Share this app"
-msgstr "     Partager cette appli"
+msgid "Share this app"
+msgstr "Partager cette appli"
 
 msgid "Change gloss languages"
 msgstr "Changer les langues de glose"
@@ -392,3 +392,65 @@ msgstr "Aucune modification locale à valider."
 
 msgid "Open your git host to create a pull request."
 msgstr "Ouvrez votre hébergeur git pour créer une demande de fusion."
+
+# ── Newly added strings ──────────────────────────────────────────────────────
+
+msgid "Language code: {code}"
+msgstr "Code de langue : {code}"
+
+msgid "unrecorded only"
+msgstr "non enregistrés uniquement"
+
+msgid "Committed ({sha})."
+msgstr "Validé ({sha})."
+
+msgid "Commit: {error}"
+msgstr "Validation : {error}"
+
+msgid "Remote updated to {url}"
+msgstr "Dépôt distant mis à jour : {url}"
+
+msgid "Remote: {url}"
+msgstr "Dépôt distant : {url}"
+
+msgid "Remote set to {url}"
+msgstr "Dépôt distant défini : {url}"
+
+msgid "Pushed to {url} (branch: {branch})."
+msgstr "Envoyé à {url} (branche : {branch})."
+
+msgid "Push failed: {error}"
+msgstr "Échec de l'envoi : {error}"
+
+msgid "Cloned to {dir}"
+msgstr "Cloné dans {dir}"
+
+msgid "Clone failed: {error}"
+msgstr "Échec du clonage : {error}"
+
+msgid "Found: {file}"
+msgstr "Trouvé : {file}"
+
+msgid "Pull failed: {error}"
+msgstr "Échec de la récupération : {error}"
+
+msgid "On branch {branch}."
+msgstr "Sur la branche {branch}."
+
+msgid "Branch error: {error}"
+msgstr "Erreur de branche : {error}"
+
+msgid "Pushed {branch}."
+msgstr "Branche {branch} envoyée."
+
+msgid "Pushed to {branch}."
+msgstr "Envoyé sur {branch}."
+
+msgid "Commit failed: {error}"
+msgstr "Échec de la validation : {error}"
+
+msgid "Committed locally, sync failed: {error}"
+msgstr "Validé localement, synchronisation échouée : {error}"
+
+msgid "Committed locally, push failed: {error}"
+msgstr "Validé localement, envoi échoué : {error}"

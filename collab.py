@@ -643,9 +643,9 @@ def init_repo(project_dir, remote_url, username, token,
             author=author, committer=committer,
         )
         sha_str = sha[:8].decode() if isinstance(sha, bytes) else str(sha)[:8]
-        log.append(f'Committed ({sha_str}).')
+        log.append(_tr('Committed ({sha}).').format(sha=sha_str))
     except Exception as exc:
-        log.append(f'Commit: {exc}')
+        log.append(_tr('Commit: {error}').format(error=exc))
 
     # Set or update remote origin
     try:
@@ -654,12 +654,12 @@ def init_repo(project_dir, remote_url, username, token,
             config = repo.get_config()
             config.set((b'remote', b'origin'), b'url', _enc(remote_url))
             config.write_to_path()
-            log.append(f'Remote updated to {remote_url}')
+            log.append(_tr('Remote updated to {url}').format(url=remote_url))
         else:
-            log.append(f'Remote: {existing}')
+            log.append(_tr('Remote: {url}').format(url=existing))
     except KeyError:
         porcelain.remote_add(repo, 'origin', remote_url)
-        log.append(f'Remote set to {remote_url}')
+        log.append(_tr('Remote set to {url}').format(url=remote_url))
 
     # Ensure HEAD points to the desired branch
     desired_ref = _enc(f'refs/heads/{branch}')
@@ -687,9 +687,9 @@ def init_repo(project_dir, remote_url, username, token,
             username=username, password=token,
             errstream=io.BytesIO(),
         )
-        log.append(f'Pushed to {remote_url} (branch: {branch}).')
+        log.append(_tr('Pushed to {url} (branch: {branch}).').format(url=remote_url, branch=branch))
     except Exception as exc:
-        log.append(f'Push failed: {exc}')
+        log.append(_tr('Push failed: {error}').format(error=exc))
 
     return '\n'.join(log)
 
@@ -757,14 +757,14 @@ def clone_repo(remote_url, dest_dir, username, token, on_progress=None):
             username=username, password=token,
             errstream=errstream,
         )
-        log.append(f'Cloned to {dest_dir}')
+        log.append(_tr('Cloned to {dir}').format(dir=dest_dir))
     except Exception as exc:
-        log.append(f'Clone failed: {exc}')
+        log.append(_tr('Clone failed: {error}').format(error=exc))
         return None, '\n'.join(log)
 
     lift_path = _find_lift(dest_dir)
     if lift_path:
-        log.append(f'Found: {os.path.basename(lift_path)}')
+        log.append(_tr('Found: {file}').format(file=os.path.basename(lift_path)))
     else:
         log.append(_tr('No .lift file found in cloned repository.'))
     return lift_path, '\n'.join(log)
@@ -794,7 +794,7 @@ def pull_repo(project_dir, username, token):
         )
         log.append(_tr('Pulled latest changes from origin.'))
     except Exception as exc:
-        log.append(f'Pull failed: {exc}')
+        log.append(_tr('Pull failed: {error}').format(error=exc))
     return '\n'.join(log)
 
 
@@ -827,9 +827,9 @@ def commit_and_push_branch(project_dir, username, token, contributor_name):
         if branch_ref not in repo.refs:
             repo.refs[branch_ref] = repo.head()
         repo.refs.set_symbolic_ref(b'HEAD', branch_ref)
-        log.append(f'On branch {branch_name}.')
+        log.append(_tr('On branch {branch}.').format(branch=branch_name))
     except Exception as exc:
-        log.append(f'Branch error: {exc}')
+        log.append(_tr('Branch error: {error}').format(error=exc))
 
     # Stage all
     _stage_all(repo, project_dir)
@@ -850,7 +850,7 @@ def commit_and_push_branch(project_dir, username, token, contributor_name):
         if 'nothing' in msg or 'empty' in msg or 'no changes' in msg:
             log.append(_tr('Nothing new to commit.'))
         else:
-            log.append(f'Commit: {exc}')
+            log.append(_tr('Commit: {error}').format(error=exc))
 
     # Push
     refspec = _enc(f'refs/heads/{branch_name}:refs/heads/{branch_name}')
@@ -860,10 +860,10 @@ def commit_and_push_branch(project_dir, username, token, contributor_name):
             username=username, password=token,
             errstream=io.BytesIO(),
         )
-        log.append(f'Pushed {branch_name}.')
+        log.append(_tr('Pushed {branch}.').format(branch=branch_name))
         log.append(_tr('Open your git host to create a pull request.'))
     except Exception as exc:
-        log.append(f'Push failed: {exc}')
+        log.append(_tr('Push failed: {error}').format(error=exc))
 
     return '\n'.join(log)
 
@@ -897,9 +897,9 @@ def sync_repo(project_dir, username, token, contributor_name):
         log.append(_tr('Pulled latest changes.'))
     except Exception as exc:
         if '403' in str(exc):
-            log.append(f'Pull failed: {_diagnose_403(token, remote_url)}')
+            log.append(_tr('Pull failed: {error}').format(error=_diagnose_403(token, remote_url)))
             return '\n'.join(log)  # no point continuing
-        log.append(f'Pull failed: {exc}')
+        log.append(_tr('Pull failed: {error}').format(error=exc))
 
     # Stage all
     _stage_all(repo, project_dir)
@@ -918,7 +918,7 @@ def sync_repo(project_dir, username, token, contributor_name):
             )
             log.append(_tr('Committed local changes.'))
         except Exception as exc:
-            log.append(f'Commit: {exc}')
+            log.append(_tr('Commit: {error}').format(error=exc))
     else:
         log.append(_tr('No local changes to commit.'))
 
@@ -934,12 +934,12 @@ def sync_repo(project_dir, username, token, contributor_name):
             username=username, password=token,
             errstream=io.BytesIO(),
         )
-        log.append(f'Pushed to {branch}.')
+        log.append(_tr('Pushed to {branch}.').format(branch=branch))
     except Exception as exc:
         if '403' in str(exc):
-            log.append(f'Push failed: {_diagnose_403(token, remote_url)}')
+            log.append(_tr('Push failed: {error}').format(error=_diagnose_403(token, remote_url)))
         else:
-            log.append(f'Push failed: {exc}')
+            log.append(_tr('Push failed: {error}').format(error=exc))
 
     return '\n'.join(log)
 
@@ -1027,7 +1027,7 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
             author=author, committer=committer,
         )
     except Exception as exc:
-        return f'Commit failed: {exc}'
+        return _tr('Commit failed: {error}').format(error=exc)
 
     # Sync if there's internet
     if not _has_internet():
@@ -1055,7 +1055,7 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
         )
     except Exception as exc:
         if '403' in str(exc):
-            return f'Committed locally, sync failed: {_diagnose_403(token, remote_url)}'
+            return _tr('Committed locally, sync failed: {error}').format(error=_diagnose_403(token, remote_url))
         # Non-fatal — local commit is safe, push may still work
         print(f'[auto-sync] pull warning: {exc}')
 
@@ -1070,8 +1070,8 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
         return _tr('Committed and pushed {n} file(s)').format(n=n)
     except Exception as exc:
         if '403' in str(exc):
-            return f'Committed locally, push failed: {_diagnose_403(token, remote_url)}'
-        return f'Committed locally, push failed: {exc}'
+            return _tr('Committed locally, push failed: {error}').format(error=_diagnose_403(token, remote_url))
+        return _tr('Committed locally, push failed: {error}').format(error=exc)
 
 
 # ---------------------------------------------------------------------------

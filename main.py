@@ -459,14 +459,18 @@ KV_TEMPLATE = '''
                 spacing: dp(14)
                 # ── Share this app ─────────────────────────────────────
                 RecBtn:
-                    text: _('     Share this app')
+                    text: _('Share this app')
+                    halign: 'left'
+                    padding: [dp(52), 0]
+                    text_size: self.size
+                    valign: 'middle'
                     normal_color: T.SURFACE
                     on_release: app.share_apk()
                     Image:
                         source: 'icons/share_dark.png'
                         size_hint: None, None
                         size: dp(24), dp(24)
-                        x: self.parent.center_x - dp(82)
+                        x: self.parent.x + dp(16)
                         center_y: self.parent.center_y
                 # ── Recording task selector ────────────────────────────
                 BoxLayout:
@@ -1742,7 +1746,7 @@ BoxLayout:
             self._dialect_code = ''
         cl = ids.get('code_label')
         if cl:
-            cl.text = f'Language code: {code}'
+            cl.text = _tr('Language code: {code}').format(code=code)
 
     def _assembled_code(self):
         if not self._selected:
@@ -2628,7 +2632,7 @@ class ConfigScreen(Screen):
         if gloss.strip():
             parts.append(f'gloss: "{gloss.strip()}"')
         if app.recorder.only_unrecorded:
-            parts.append('unrecorded only')
+            parts.append(_tr('unrecorded only'))
         lbl.text = ', '.join(parts) if parts else ''
 
     def apply_cawl(self, text):
@@ -3756,7 +3760,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.20.0'
+__version__ = '1.20.1'
 
 
 class LIFTRecorderApp(App):
