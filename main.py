@@ -88,7 +88,7 @@ if 'ANDROID_PRIVATE' in os.environ:
 
 from kivy.app import App
 from kivy.lang import Builder
-from kivy.uix.screenmanager import ScreenManager, Screen, SlideTransition
+from kivy.uix.screenmanager import ScreenManager, Screen, SlideTransition, NoTransition
 from kivy.core.window import Window
 from kivy.utils import platform
 from kivy.clock import Clock
@@ -219,70 +219,89 @@ KV_TEMPLATE = '''
             size: self.size
     BoxLayout:
         orientation: 'vertical'
-        padding: dp(40)
-        spacing: dp(20)
-        Widget:
-            size_hint_y: 0.05
-        Image:
-            source: app.icon #'icons/icon.png'
-            size_hint: None, None
-            size: dp(240), dp(240)
-            pos_hint: {{'center_x': 0.5}}
-            allow_stretch: True
-            keep_ratio: True
-        Label:
-            text: app.title
-            font_size: sp(28)
-            font_name: FONT
-            bold: True
-            color: T.ACCENT
+        # ── Gear row (no padding so it hugs the right edge) ──────
+        BoxLayout:
             size_hint_y: None
-            height: dp(50)
-        Label:
-            text: app.subtitle
-            font_size: sp(16)
-            font_name: FONT
-            color: T.TEXT_DIM
-            size_hint_y: None
-            height: dp(30)
-        Widget:
-            size_hint_y: 0.08
-        ScrollView:
-            size_hint_y: 1
-            do_scroll_x: False
-            BoxLayout:
-                orientation: 'vertical'
+            height: dp(44)
+            padding: 0, dp(4), dp(8), 0
+            Widget:
+            Button:
+                size_hint: None, None
+                size: dp(44), dp(44)
+                background_color: T.TRANSPARENT
+                background_normal: ''
+                on_release: app.go_config()
+                Image:
+                    source: 'icons/gear.png'
+                    size: dp(28), dp(28)
+                    size_hint: None, None
+                    center: self.parent.center
+                    allow_stretch: True
+                    keep_ratio: True
+        # ── Main content ─────────────────────────────────────────
+        BoxLayout:
+            orientation: 'vertical'
+            padding: dp(40), 0, dp(40), dp(20)
+            spacing: dp(12)
+            Image:
+                source: app.icon #'icons/icon.png'
+                size_hint: None, None
+                size: dp(200), dp(200)
+                pos_hint: {{'center_x': 0.5}}
+            Label:
+                text: app.title
+                font_size: sp(28)
+                font_name: FONT
+                bold: True
+                color: T.ACCENT
                 size_hint_y: None
-                height: self.minimum_height
-                spacing: dp(20)
-                RecBtn:
-                    text: _('I have one on my phone')
-                    normal_color: T.ACCENT
-                    on_release: app.open_file()
-                RecBtn:
-                    text: _('Clone Internet Repository')
-                    normal_color: T.BTN_INACTIVE
-                    on_release: app.clone_dialog()
-                RecBtn:
-                    text: _('Start New')
-                    normal_color: T.BTN_INACTIVE
-                    on_release: app.show_start_over() #< should be Start a new wordlist
-                # ── Existing projects ─────────────────────────────────────
+                height: dp(40)
+            Label:
+                text: app.subtitle
+                font_size: sp(16)
+                font_name: FONT
+                color: T.TEXT_DIM
+                size_hint_y: None
+                height: dp(24)
+            Widget:
+                size_hint_y: None
+                height: dp(8)
+            ScrollView:
+                size_hint_y: 1
+                do_scroll_x: False
                 BoxLayout:
-                    id: project_list
                     orientation: 'vertical'
                     size_hint_y: None
                     height: self.minimum_height
-                    spacing: dp(6)
-        Label:
-            text: app.version_string
-            font_size: sp(11)
-            font_name: FONT
-            color: T.TEXT_FAINT
-            size_hint_y: None
-            height: dp(20)
-            halign: 'center'
-            text_size: self.size
+                    spacing: dp(20)
+                    RecBtn:
+                        text: _('I have one on my phone')
+                        normal_color: T.ACCENT
+                        on_release: app.open_file()
+                    RecBtn:
+                        text: _('Clone Internet Repository')
+                        normal_color: T.BTN_INACTIVE
+                        on_release: app.clone_dialog()
+                    RecBtn:
+                        text: _('Start New')
+                        normal_color: T.BTN_INACTIVE
+                        on_release: app.show_start_over() #< should be Start a new wordlist
+                    # ── Existing projects ─────────────────────────────────────
+                    BoxLayout:
+                        id: project_list
+                        orientation: 'vertical'
+                        size_hint_y: None
+                        height: self.minimum_height
+                        spacing: dp(6)
+            Label:
+                text: app.version_string
+                font_size: sp(11)
+                font_name: FONT
+                color: T.TEXT_FAINT
+                size_hint_y: None
+                height: dp(20)
+                halign: 'center'
+                text_size: self.size
 
 <RecorderScreen>:
     canvas.before:
@@ -472,145 +491,153 @@ KV_TEMPLATE = '''
                         size: dp(24), dp(24)
                         x: self.parent.x + dp(16)
                         center_y: self.parent.center_y
-                # ── Recording task selector ────────────────────────────
+                # ── Database-dependent settings (hidden when no project) ──
                 BoxLayout:
-                    id: rec_task_row
-                    size_hint_y: None
-                    height: 0
-                    opacity: 0
-                    spacing: dp(8)
-                    Label:
-                        text: _('Recording:')
-                        font_size: sp(15)
-                        font_name: FONT
-                        color: T.TEXT_DIM
-                        size_hint_x: None
-                        size: self.texture_size
-                        valign: 'middle'
-                    RecBtn:
-                        id: rec_task_btn
-                        text: ''
-                        font_size: sp(15)
-                        normal_color: T.SURFACE
-                        on_release: root._show_rec_overlay()
-                # ── Three blue collapsible buttons ─────────────────────
-                RecBtn:
-                    id: gloss_toggle_btn
-                    text: _('Change gloss languages')
-                    normal_color: T.ACCENT
-                    font_size: sp(14)
-                    on_release: root.toggle_gloss_panel()
-                GridLayout:
-                    id: lang_box
-                    cols: 3
-                    size_hint_y: None
-                    height: 0
-                    opacity: 0
-                    spacing: dp(6)
-                BoxLayout:
-                    size_hint_y: None
-                    height: dp(44)
-                    spacing: dp(8)
-                    RecBtn:
-                        id: filter_toggle_btn
-                        text: _('Filter words')
-                        normal_color: T.ACCENT
-                        font_size: sp(14)
-                        on_release: root.toggle_filter_panel()
-                    Label:
-                        id: filter_summary_label
-                        text: ''
-                        font_size: sp(12)
-                        font_name: FONT
-                        color: T.TEXT_DIM
-                        halign: 'left'
-                        valign: 'middle'
-                        text_size: self.size
-                        markup: True
-                BoxLayout:
-                    id: filter_panel
+                    id: db_settings_box
                     orientation: 'vertical'
                     size_hint_y: None
                     height: 0
                     opacity: 0
-                    spacing: dp(8)
-                    Label:
-                        text: _('CAWL number or range (e.g. 1-100, 42, leave blank for all)')
-                        font_size: sp(13)
-                        font_name: FONT
-                        color: T.TEXT_DIM
+                    spacing: dp(14)
+                    # ── Recording task selector ────────────────────────────
+                    BoxLayout:
+                        id: rec_task_row
                         size_hint_y: None
-                        height: dp(36)
-                        halign: 'left'
-                        text_size: self.width, None
-                    TextInput:
-                        id: cawl_input
-                        hint_text: _('e.g. 1-500')
-                        font_size: sp(16)
-                        font_name: FONT
-                        size_hint_y: None
-                        height: dp(48)
-                        background_color: T.SURFACE
-                        foreground_color: T.TEXT
-                        cursor_color: T.ACCENT
-                        multiline: False
-                        on_text_validate: root.apply_cawl(self.text)
-                    Label:
-                        text: _('Gloss search (filter by gloss text)')
-                        font_size: sp(13)
-                        font_name: FONT
-                        color: T.TEXT_DIM
-                        size_hint_y: None
-                        height: dp(36)
-                        halign: 'left'
-                        text_size: self.width, None
-                    TextInput:
-                        id: gloss_search_input
-                        hint_text: _('search gloss text…')
-                        font_size: sp(16)
-                        font_name: FONT
-                        size_hint_y: None
-                        height: dp(48)
-                        background_color: T.SURFACE
-                        foreground_color: T.TEXT
-                        cursor_color: T.ACCENT
-                        multiline: False
-                    UnrecordedToggle:
-                        id: unrecorded_toggle
-                        active: False
-                        on_active: root.toggle_show_past(self.active)
-                BoxLayout:
-                    size_hint_y: None
-                    height: dp(44)
-                    spacing: dp(8)
+                        height: 0
+                        opacity: 0
+                        spacing: dp(8)
+                        Label:
+                            text: _('Recording:')
+                            font_size: sp(15)
+                            font_name: FONT
+                            color: T.TEXT_DIM
+                            size_hint_x: None
+                            size: self.texture_size
+                            valign: 'middle'
+                        RecBtn:
+                            id: rec_task_btn
+                            text: ''
+                            font_size: sp(15)
+                            normal_color: T.SURFACE
+                            on_release: root._show_rec_overlay()
+                    # ── Three blue collapsible buttons ─────────────────────
                     RecBtn:
-                        id: imgrepo_toggle_btn
-                        text: _('Change image repository')
+                        id: gloss_toggle_btn
+                        text: _('Change gloss languages')
                         normal_color: T.ACCENT
                         font_size: sp(14)
-                        on_release: root.toggle_imgrepo_panel()
-                    Label:
-                        id: imgrepo_summary_label
-                        text: ''
-                        font_size: sp(11)
+                        on_release: root.toggle_gloss_panel()
+                    GridLayout:
+                        id: lang_box
+                        cols: 3
+                        size_hint_y: None
+                        height: 0
+                        opacity: 0
+                        spacing: dp(6)
+                    BoxLayout:
+                        size_hint_y: None
+                        height: dp(44)
+                        spacing: dp(8)
+                        RecBtn:
+                            id: filter_toggle_btn
+                            text: _('Filter words')
+                            normal_color: T.ACCENT
+                            font_size: sp(14)
+                            on_release: root.toggle_filter_panel()
+                        Label:
+                            id: filter_summary_label
+                            text: ''
+                            font_size: sp(12)
+                            font_name: FONT
+                            color: T.TEXT_DIM
+                            halign: 'left'
+                            valign: 'middle'
+                            text_size: self.size
+                            markup: True
+                    BoxLayout:
+                        id: filter_panel
+                        orientation: 'vertical'
+                        size_hint_y: None
+                        height: 0
+                        opacity: 0
+                        spacing: dp(8)
+                        Label:
+                            text: _('CAWL number or range (e.g. 1-100, 42, leave blank for all)')
+                            font_size: sp(13)
+                            font_name: FONT
+                            color: T.TEXT_DIM
+                            size_hint_y: None
+                            height: dp(36)
+                            halign: 'left'
+                            text_size: self.width, None
+                        TextInput:
+                            id: cawl_input
+                            hint_text: _('e.g. 1-500')
+                            font_size: sp(16)
+                            font_name: FONT
+                            size_hint_y: None
+                            height: dp(48)
+                            background_color: T.SURFACE
+                            foreground_color: T.TEXT
+                            cursor_color: T.ACCENT
+                            multiline: False
+                            on_text_validate: root.apply_cawl(self.text)
+                        Label:
+                            text: _('Gloss search (filter by gloss text)')
+                            font_size: sp(13)
+                            font_name: FONT
+                            color: T.TEXT_DIM
+                            size_hint_y: None
+                            height: dp(36)
+                            halign: 'left'
+                            text_size: self.width, None
+                        TextInput:
+                            id: gloss_search_input
+                            hint_text: _('search gloss text…')
+                            font_size: sp(16)
+                            font_name: FONT
+                            size_hint_y: None
+                            height: dp(48)
+                            background_color: T.SURFACE
+                            foreground_color: T.TEXT
+                            cursor_color: T.ACCENT
+                            multiline: False
+                        UnrecordedToggle:
+                            id: unrecorded_toggle
+                            active: False
+                            on_active: root.toggle_show_past(self.active)
+                    BoxLayout:
+                        size_hint_y: None
+                        height: dp(44)
+                        spacing: dp(8)
+                        RecBtn:
+                            id: imgrepo_toggle_btn
+                            text: _('Change image repository')
+                            normal_color: T.ACCENT
+                            font_size: sp(14)
+                            on_release: root.toggle_imgrepo_panel()
+                        Label:
+                            id: imgrepo_summary_label
+                            text: ''
+                            font_size: sp(11)
+                            font_name: FONT
+                            color: T.TEXT_DIM
+                            halign: 'left'
+                            valign: 'middle'
+                            text_size: self.size
+                    TextInput:
+                        id: image_repo_input
+                        hint_text: 'https://github.com/kent-rasmussen/images_CAWL'
+                        font_size: sp(12)
                         font_name: FONT
-                        color: T.TEXT_DIM
-                        halign: 'left'
-                        valign: 'middle'
-                        text_size: self.size
-                TextInput:
-                    id: image_repo_input
-                    hint_text: 'https://github.com/kent-rasmussen/images_CAWL'
-                    font_size: sp(12)
-                    font_name: FONT
-                    size_hint_y: None
-                    height: 0
-                    opacity: 0
-                    background_color: T.SURFACE
-                    foreground_color: T.TEXT
-                    cursor_color: T.ACCENT
-                    multiline: False
-                    disabled: True
+                        size_hint_y: None
+                        height: 0
+                        opacity: 0
+                        background_color: T.SURFACE
+                        foreground_color: T.TEXT
+                        cursor_color: T.ACCENT
+                        multiline: False
+                        disabled: True
                 # ── UI Language ─────────────────────────────────────────
                 SectionLabel:
                     text: _('UI Language')
@@ -619,18 +646,23 @@ KV_TEMPLATE = '''
                     size_hint_y: None
                     height: dp(44)
                     spacing: dp(8)
-                # ── Navigation ─────────────────────────────────────────
-                Widget:
-                    size_hint_y: None
-                    height: dp(8)
+                # ── Setup Collaboration (always visible) ──────────────
                 RecBtn:
                     text: _('Setup Collaboration')
                     normal_color: T.SURFACE
                     on_release: app.go_collab()
-                RecBtn:
-                    text: _('Start over')
-                    normal_color: T.BTN_INACTIVE
-                    on_release: app.go_welcome()
+                # ── Navigation (database-dependent) ───────────────────
+                BoxLayout:
+                    id: db_nav_box
+                    orientation: 'vertical'
+                    size_hint_y: None
+                    height: 0
+                    opacity: 0
+                    spacing: dp(14)
+                    RecBtn:
+                        text: _('Start over')
+                        normal_color: T.BTN_INACTIVE
+                        on_release: app.go_welcome()
                 Widget:
                     size_hint_y: None
                     height: dp(40)
@@ -656,7 +688,7 @@ KV_TEMPLATE = '''
                     pos: self.pos
                     size: self.size
             Label:
-                text: _('Setup')
+                text: _('Setup Collaboration')
                 font_size: sp(17)
                 font_name: FONT
                 bold: True
@@ -669,7 +701,7 @@ KV_TEMPLATE = '''
                 text: 'X'
                 size_hint_x: None
                 width: dp(44)
-                on_release: app.go_config()
+                on_release: root.close_collab()
         ScrollView:
             do_scroll_x: False
             BoxLayout:
@@ -816,12 +848,13 @@ KV_TEMPLATE = '''
                         text: _('Save GitLab credentials')
                         normal_color: T.GREEN
                         on_release: root.save_gitlab_credentials()
-                # ── Publish (hidden when a git remote already exists) ────
+                # ── Publish (hidden when no database or remote exists) ─
                 BoxLayout:
                     id: publish_section
                     orientation: 'vertical'
                     size_hint_y: None
-                    height: self.minimum_height
+                    height: 0
+                    opacity: 0
                     spacing: dp(14)
                     SectionLabel:
                         text: _('Publish this project')
@@ -2374,6 +2407,20 @@ class ConfigScreen(Screen):
     def on_enter(self):
         app = App.get_running_app()
         self._build_lang_selector()
+        has_db = app.recorder is not None
+        # Show/hide database-dependent sections.
+        # When hiding: zero height on every descendant so nothing has a
+        # hit area (disabled=True alone doesn't block touches in Kivy).
+        for box_id in ('db_settings_box', 'db_nav_box'):
+            box = self.ids.get(box_id)
+            if not box:
+                continue
+            if has_db:
+                box.opacity = 1
+                Clock.schedule_once(
+                    lambda dt, b=box: setattr(b, 'height', b.minimum_height), 0)
+            else:
+                self._hide_box_tree(box)
         if not app.recorder:
             return
         self.build_lang_toggles()
@@ -2401,6 +2448,20 @@ class ConfigScreen(Screen):
         # Build recording options
         self._build_rec_options(app)
 
+    @staticmethod
+    def _hide_box_tree(widget):
+        """Zero the height/opacity of a widget and all descendants so
+        nothing has a touch hit-area when the section is hidden."""
+        widget.height = 0
+        widget.opacity = 0
+        for child in widget.children:
+            if hasattr(child, 'height'):
+                child.height = 0
+                child.opacity = 0
+            # Recurse into nested containers
+            if hasattr(child, 'children') and child.children:
+                ConfigScreen._hide_box_tree(child)
+
     def _build_lang_selector(self):
         """Populate the UI language selector row with one button per language."""
         from kivy.uix.button import Button
@@ -2423,6 +2484,8 @@ class ConfigScreen(Screen):
 
     def _set_ui_language(self, lang_code):
         """Change the UI language and rebuild all screens."""
+        if lang_code == current_language():
+            return
         app = App.get_running_app()
         set_language(lang_code)
         prefs = app._load_prefs()
@@ -2431,14 +2494,17 @@ class ConfigScreen(Screen):
         app.subtitle = _tr(APP_TAGLINE)
         # Rebuild all screens so translated strings take effect
         sm = app.root.ids.sm
-        current = sm.current
+        old_transition = sm.transition
+        sm.transition = NoTransition()
         screens_info = [(s.name, type(s)) for s in list(sm.screens)]
         sm.clear_widgets()
         for name, cls in screens_info:
             sm.add_widget(cls(name=name))
-        sm.current = current
+        sm.current = 'config'
         # Re-link config_screen reference
         app.config_screen = sm.get_screen('config')
+        # Restore normal transition after rebuild
+        Clock.schedule_once(lambda dt: setattr(sm, 'transition', old_transition), 0.1)
 
     def build_lang_toggles(self):
         app = App.get_running_app()
@@ -2870,20 +2936,23 @@ class ConfigScreen(Screen):
 
     def apply_and_go(self):
         app = App.get_running_app()
-        cawl_in = self.ids.get('cawl_input')
-        if cawl_in:
-            app.recorder.cawl_filter = cawl_in.text.strip()
-        gs = self.ids.get('gloss_search_input')
-        if gs:
-            app.recorder.gloss_search = gs.text.strip()
-        ir = self.ids.get('image_repo_input')
-        if ir:
-            prefs = app._load_prefs()
-            prefs['image_repo'] = ir.text.strip()
-            app._save_prefs_dict(prefs)
-        app.recorder.only_unrecorded = self.only_unrecorded
-        app.recorder.rebuild_queue()
-        app.go_recorder()
+        if app.recorder:
+            cawl_in = self.ids.get('cawl_input')
+            if cawl_in:
+                app.recorder.cawl_filter = cawl_in.text.strip()
+            gs = self.ids.get('gloss_search_input')
+            if gs:
+                app.recorder.gloss_search = gs.text.strip()
+            ir = self.ids.get('image_repo_input')
+            if ir:
+                prefs = app._load_prefs()
+                prefs['image_repo'] = ir.text.strip()
+                app._save_prefs_dict(prefs)
+            app.recorder.only_unrecorded = self.only_unrecorded
+            app.recorder.rebuild_queue()
+            app.go_recorder()
+        else:
+            app.go_welcome()
 
 
 class CollabScreen(Screen):
@@ -2891,25 +2960,24 @@ class CollabScreen(Screen):
     def on_enter(self):
         app = App.get_running_app()
         prefs = app._load_prefs()
+        has_db = app.recorder is not None
         w = self.ids.get('name_input')
         if w and not w.text:
             w.text = prefs.get('collab_name', '')
         # Derive langcode from current project's git remote, fall back to pref
-        langcode = self._langcode_from_project(app) or prefs.get('collab_langcode', '')
-        has_remote = bool(self._langcode_from_project(app))
+        langcode = ''
+        has_remote = False
+        if has_db:
+            langcode = self._langcode_from_project(app) or prefs.get('collab_langcode', '')
+            has_remote = bool(self._langcode_from_project(app))
         w = self.ids.get('langcode_input')
         if w:
             w.text = langcode
-        # Hide publish section when a git remote already exists
+        # Hide publish section when no database or git remote already exists
         pub = self.ids.get('publish_section')
         if pub:
-            if has_remote:
-                pub.height = 0
-                pub.opacity = 0
-                lang_inp = self.ids.get('langcode_input')
-                if lang_inp:
-                    lang_inp.disabled = True
-                    lang_inp.height = 0
+            if has_remote or not has_db:
+                ConfigScreen._hide_box_tree(pub)
             else:
                 pub.height = pub.minimum_height
                 pub.opacity = 1
@@ -2931,6 +2999,13 @@ class CollabScreen(Screen):
         name_w = self.ids.get('name_input')
         if name_w and not name_w.text.strip():
             self._show_name_overlay()
+
+    def close_collab(self):
+        """X button: go back to config (if project loaded) or welcome."""
+        app = App.get_running_app()
+        sm = app.root.ids.sm
+        sm.transition = SlideTransition(direction='right')
+        sm.current = 'config' if app.recorder else 'welcome'
 
     def _update_connect_enabled(self):
         """Grey out connect/reconnect button when name is blank."""
@@ -3760,7 +3835,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.20.1'
+__version__ = '1.21.0'
 
 
 class LIFTRecorderApp(App):
@@ -3862,6 +3937,8 @@ class LIFTRecorderApp(App):
                 except Exception as ex:
                     print(f'[app] failed to bind activity result: {ex}')
                     traceback.print_exc()
+            # Handle Android back button / ESC key
+            Window.bind(on_keyboard=self._on_back_button)
             # Auto-load last used LIFT file if it still exists
             prefs = self._load_prefs()
             last = prefs.get('last_lift', '')
@@ -3870,6 +3947,28 @@ class LIFTRecorderApp(App):
         except Exception:
             traceback.print_exc()
             raise
+
+    def _on_back_button(self, window, key, *args):
+        """Handle Android back button (keycode 27) to navigate back."""
+        if key != 27:
+            return False
+        sm = self.root.ids.sm
+        if sm.current == 'welcome':
+            return False  # let the system close the app
+        if sm.current == 'recorder':
+            return False  # let the system close the app
+        elif sm.current in ('config', 'collab'):
+            sm.transition = SlideTransition(direction='right')
+            sm.current = 'recorder' if self.recorder else 'welcome'
+        elif sm.current == 'langpicker':
+            sm.transition = SlideTransition(direction='right')
+            sm.current = 'welcome'
+        elif sm.current == 'imagepicker':
+            sm.transition = SlideTransition(direction='right')
+            sm.current = 'recorder'
+        else:
+            return False
+        return True
 
     def open_file(self):
         if platform == 'android':
@@ -4125,6 +4224,97 @@ class LIFTRecorderApp(App):
             content=Label(text=msg, font_size=sp(14)),
             size_hint=(0.8, None), height=dp(180),
         )
+        popup.open()
+
+    def _project_has_remote(self):
+        """Check if the current project's git repo has a configured remote."""
+        if not self.recorder:
+            return False
+        try:
+            from dulwich.repo import Repo
+            repo = Repo(self.recorder.db.dir)
+            url = repo.get_config().get(
+                (b'remote', b'origin'), b'url')
+            return bool(url)
+        except Exception:
+            return False
+
+    def _show_backup_warning(self):
+        """Show overlay warning that data isn't being backed up."""
+        from kivy.uix.popup import Popup
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.label import Label
+        from kivy.uix.button import Button
+        content = BoxLayout(orientation='vertical', spacing=dp(12), padding=dp(12))
+        content.add_widget(Label(
+            text=_tr("Your data isn't being backed up! Please set up "
+                     "collaboration, so your data can be backed up "
+                     "automatically while you work."),
+            font_size=sp(14), font_name=_FONT_NAME, color=theme.TEXT,
+            size_hint_y=None, height=dp(100),
+            halign='center', valign='middle',
+            text_size=(dp(260), None),
+        ))
+        btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
+        later_btn = Button(
+            text=_tr('Later'),
+            font_size=sp(14), font_name=_FONT_NAME,
+            size_hint_x=0.4,
+            background_color=theme.BTN_INACTIVE,
+        )
+        collab_btn = Button(
+            text=_tr('Setup Collaboration'),
+            font_size=sp(14), font_name=_FONT_NAME,
+            size_hint_x=0.6,
+            background_color=theme.ACCENT,
+        )
+        btn_row.add_widget(later_btn)
+        btn_row.add_widget(collab_btn)
+        content.add_widget(btn_row)
+        popup = Popup(
+            title='', separator_height=0,
+            content=content,
+            size_hint=(0.9, None), height=dp(240),
+            auto_dismiss=True,
+        )
+        later_btn.bind(on_release=popup.dismiss)
+        def _go(*a):
+            popup.dismiss()
+            self.go_collab()
+        collab_btn.bind(on_release=_go)
+        popup.open()
+
+    def _show_collab_prompt(self):
+        """Show overlay prompting user to set up collaboration for credentials."""
+        from kivy.uix.popup import Popup
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.label import Label
+        from kivy.uix.button import Button
+        content = BoxLayout(orientation='vertical', spacing=dp(12), padding=dp(12))
+        content.add_widget(Label(
+            text=_tr('You need to set up collaboration to do this.'),
+            font_size=sp(15), font_name=_FONT_NAME, color=theme.TEXT,
+            size_hint_y=None, height=dp(60),
+            halign='center', valign='middle',
+            text_size=(dp(260), None),
+        ))
+        btn = Button(
+            text=_tr('Setup Collaboration'),
+            font_size=sp(15), font_name=_FONT_NAME,
+            size_hint_y=None, height=dp(48),
+            background_color=theme.ACCENT,
+        )
+        content.add_widget(btn)
+        popup = Popup(
+            title='', separator_height=0,
+            content=content,
+            size_hint=(0.85, None), height=dp(200),
+            auto_dismiss=True,
+        )
+        def _go(*a):
+            popup.dismiss()
+            self.go_collab()
+        btn.bind(on_release=_go)
         popup.open()
 
     def _open_file_android(self):
@@ -4426,6 +4616,9 @@ class LIFTRecorderApp(App):
         # Auto-publish new project if credentials are already configured
         if pending:
             self._try_auto_publish()
+        # Warn if data isn't being backed up (no git remote)
+        elif not self._project_has_remote():
+            Clock.schedule_once(lambda dt: self._show_backup_warning(), 0.5)
 
     def _reload_and_restore(self, guid):
         """Reload the LIFT file and restore position to the entry with *guid*."""
@@ -5054,21 +5247,38 @@ class LIFTRecorderApp(App):
 
             def _worker():
                 try:
+                    # Try with credentials first
                     lift_path, log = clone_repo(
                         clone_url, dest, git_user, token,
                         on_progress=_on_progress)
+                    # If credential error, retry without credentials (public repo)
+                    if not lift_path and 'credential' in log.lower():
+                        print('[clone] retrying without credentials...')
+                        lift_path, log = clone_repo(
+                            clone_url, dest, '', '',
+                            on_progress=_on_progress)
                     print(f'[clone] result: {log}')
                     if lift_path:
                         Clock.schedule_once(lambda dt: self.load_lift(lift_path), 0)
+                    elif 'credential' in log.lower() or 'auth' in log.lower():
+                        Clock.schedule_once(
+                            lambda dt: (self._dismiss_loading_overlay(),
+                                        self._show_collab_prompt()), 0)
                     else:
                         Clock.schedule_once(
                             lambda dt: (self._dismiss_loading_overlay(),
                                         self._show_error(log)), 0)
                 except Exception as ex:
                     print(f'[clone] error: {ex}')
-                    Clock.schedule_once(
-                        lambda dt: (self._dismiss_loading_overlay(),
-                                    self._show_error(str(ex))), 0)
+                    err = str(ex).lower()
+                    if 'credential' in err or 'auth' in err:
+                        Clock.schedule_once(
+                            lambda dt: (self._dismiss_loading_overlay(),
+                                        self._show_collab_prompt()), 0)
+                    else:
+                        Clock.schedule_once(
+                            lambda dt: (self._dismiss_loading_overlay(),
+                                        self._show_error(str(ex))), 0)
 
             threading.Thread(target=_worker, daemon=True).start()
 

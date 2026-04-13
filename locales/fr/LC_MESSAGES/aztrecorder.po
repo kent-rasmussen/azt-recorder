@@ -176,6 +176,9 @@ msgstr "Plusieurs / toutes les régions"
 
 # ── Recorder status ──────────────────────────────────────────────────────────
 
+msgid "Settings"
+msgstr "Paramètres"
+
 msgid "Recording..."
 msgstr "Enregistrement en cours…"
 
@@ -454,3 +457,14 @@ msgstr "Validé localement, synchronisation échouée : {error}"
 
 msgid "Committed locally, push failed: {error}"
 msgstr "Validé localement, envoi échoué : {error}"
+
+# ── v1.21.0 additions ──────────────────────────────────────────────────────
+
+msgid "You need to set up collaboration to do this."
+msgstr "Vous devez configurer la collaboration pour faire cela."
+
+msgid "Your data isn't being backed up! Please set up collaboration, so your data can be backed up automatically while you work."
+msgstr "Vos données ne sont pas sauvegardées ! Veuillez configurer la collaboration pour que vos données soient sauvegardées automatiquement pendant que vous travaillez."
+
+msgid "Later"
+msgstr "Plus tard"
