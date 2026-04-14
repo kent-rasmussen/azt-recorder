@@ -3000,6 +3000,10 @@ class CollabScreen(Screen):
         if name_w and not name_w.text.strip():
             self._show_name_overlay()
 
+    def on_leave(self):
+        """Save name whenever we leave this screen."""
+        self._save_settings()
+
     def close_collab(self):
         """X button: go back to config (if project loaded) or welcome."""
         app = App.get_running_app()
@@ -3075,43 +3079,39 @@ class CollabScreen(Screen):
         active_color = theme.GREEN
         inactive_color = theme.BTN_INACTIVE
 
-        gl_token = self.ids.get('gl_token_input')
-        gl_user = self.ids.get('gl_username_input')
+        # Store parent + index for re-insertion
+        if not hasattr(self, '_host_parent'):
+            if gh_sec and gh_sec.parent:
+                self._host_parent = gh_sec.parent
+                self._gh_index = list(self._host_parent.children).index(gh_sec)
+                self._gl_index = list(self._host_parent.children).index(gl_sec)
+
+        parent = getattr(self, '_host_parent', None)
+
         if host == 'gitlab':
             if gh_btn:
                 gh_btn.normal_color = inactive_color
             if gl_btn:
                 gl_btn.normal_color = active_color
-            if gh_sec:
-                gh_sec.height = 0
-                gh_sec.opacity = 0
+            if gh_sec and gh_sec.parent:
+                gh_sec.parent.remove_widget(gh_sec)
+            if gl_sec and not gl_sec.parent and parent:
+                parent.add_widget(gl_sec, index=self._gl_index)
             if gl_sec:
                 gl_sec.height = gl_sec.minimum_height
                 gl_sec.opacity = 1
-            for inp in (gl_token, gl_user):
-                if inp:
-                    inp.disabled = False
-                    inp.size_hint_y = None
-                    inp.height = dp(48)
         else:
             if gh_btn:
                 gh_btn.normal_color = active_color
             if gl_btn:
                 gl_btn.normal_color = inactive_color
+            if gl_sec and gl_sec.parent:
+                gl_sec.parent.remove_widget(gl_sec)
+            if gh_sec and not gh_sec.parent and parent:
+                parent.add_widget(gh_sec, index=self._gh_index)
             if gh_sec:
                 gh_sec.height = gh_sec.minimum_height
                 gh_sec.opacity = 1
-            if gl_sec:
-                gl_sec.height = 0
-                gl_sec.opacity = 0
-            # Collapse and disable GitLab TextInputs so they can't
-            # intercept touches while the section is hidden
-            for inp in (gl_token, gl_user):
-                if inp:
-                    inp.disabled = True
-                    inp.focus = False
-                    inp.size_hint_y = None
-                    inp.height = 0
 
         if save:
             app = App.get_running_app()
@@ -3308,8 +3308,8 @@ class CollabScreen(Screen):
                 else:
                     if inst:
                         inst.text = (
-                            'Now install the app to grant repository access.\n'
-                            'Select "All repositories".'
+                            _tr('Now install the app to grant repository access.') + '\n'
+                            + _tr('Select "All repositories".')
                         )
                         inst.height = dp(40)
                     if install_btn:
@@ -3835,7 +3835,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.21.0'
+__version__ = '1.21.1'
 
 
 class LIFTRecorderApp(App):
@@ -5144,15 +5144,13 @@ class LIFTRecorderApp(App):
         popup.open()
 
     def clone_dialog(self):
-        """Popup with host/owner/repo component inputs for cloning."""
+        """Popup with a single URL field for cloning a repository."""
         from kivy.uix.popup import Popup
         from kivy.uix.boxlayout import BoxLayout
         from kivy.uix.textinput import TextInput
         from kivy.uix.button import Button
         from kivy.uix.label import Label
-        from kivy.uix.spinner import Spinner
 
-        prefs = self._load_prefs()
         content = BoxLayout(orientation='vertical', spacing=dp(10), padding=dp(12))
         content.add_widget(Label(
             text=_tr('Clone a git repository containing a LIFT file:'),
@@ -5160,52 +5158,13 @@ class LIFTRecorderApp(App):
             font_size=sp(13), color=theme.TEXT,
         ))
 
-        # Host + owner row
-        host_row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
-        host_spinner = Spinner(
-            text=prefs.get('clone_host', 'GitHub'),
-            values=['GitHub', 'GitLab'],
-            size_hint_x=0.35, font_size=sp(14),
+        url_input = TextInput(
+            text='',
+            hint_text=_tr('Paste the repository URL here'),
+            multiline=False, size_hint_y=None, height=dp(48),
+            font_size=sp(14),
         )
-        owner_input = TextInput(
-            text=prefs.get('clone_owner', ''),
-            hint_text=_tr('Owner (username)'),
-            multiline=False, size_hint_x=0.65, font_size=sp(14),
-        )
-        host_row.add_widget(host_spinner)
-        host_row.add_widget(owner_input)
-        content.add_widget(host_row)
-
-        # Repo name
-        repo_input = TextInput(
-            text='', hint_text=_tr('Repository name'),
-            multiline=False, size_hint_y=None, height=dp(44), font_size=sp(14),
-        )
-        content.add_widget(repo_input)
-
-        # Live URL preview
-        url_label = Label(
-            text='', font_size=sp(12),
-            color=theme.TEXT_DIM,
-            size_hint_y=None, height=dp(24),
-            halign='left',
-        )
-        url_label.bind(size=lambda w, s: setattr(w, 'text_size', s))
-        content.add_widget(url_label)
-
-        def _update_url(*args):
-            host = host_spinner.text
-            owner = owner_input.text.strip()
-            repo = repo_input.text.strip()
-            if not owner or not repo:
-                url_label.text = ''
-                return
-            domain = 'gitlab.com' if host == 'GitLab' else 'github.com'
-            url_label.text = f'https://{domain}/{owner}/{repo}.git'
-
-        host_spinner.bind(text=_update_url)
-        owner_input.bind(text=_update_url)
-        repo_input.bind(text=_update_url)
+        content.add_widget(url_input)
 
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
         cancel_btn = Button(text=_tr('Cancel'), font_size=sp(14))
@@ -5218,21 +5177,19 @@ class LIFTRecorderApp(App):
         popup = Popup(
             title=_tr('Clone Repository'),
             content=content,
-            size_hint=(0.9, None), height=dp(340),
+            size_hint=(0.9, None), height=dp(240),
             auto_dismiss=True,
         )
 
         def _do_clone(*args):
-            clone_url = url_label.text.strip()
+            clone_url = url_input.text.strip()
             popup.dismiss()
             if not clone_url:
                 return
+            # Ensure URL ends with .git for dulwich
+            if not clone_url.endswith('.git'):
+                clone_url += '.git'
             git_user, token = self._get_sync_credentials()
-            # Save clone prefs for future use
-            prefs = self._load_prefs()
-            prefs['clone_host'] = host_spinner.text
-            prefs['clone_owner'] = owner_input.text.strip()
-            self._save_prefs_dict(prefs)
 
             repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')
             dest = os.path.join(self.user_data_dir, 'projects', repo_name)

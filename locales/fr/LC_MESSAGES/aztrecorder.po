@@ -468,3 +468,12 @@ msgstr "Vos données ne sont pas sauvegardées ! Veuillez configurer la collabor
 
 msgid "Later"
 msgstr "Plus tard"
+
+msgid "Now install the app to grant repository access."
+msgstr "Installez maintenant l'application pour accorder l'accès aux dépôts."
+
+msgid "Select \"All repositories\"."
+msgstr "Sélectionnez « Tous les dépôts »."
+
+msgid "Paste the repository URL here"
+msgstr "Collez l'adresse du dépôt ici"
