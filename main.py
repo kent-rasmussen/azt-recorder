@@ -3034,7 +3034,7 @@ class CollabScreen(Screen):
                      size=lambda w, s: setattr(bg_rect, 'size', s))
         overlay.add_widget(Widget(size_hint_y=1))
         msg = Label(
-            text=_tr("Type your name as you want it to\nappear online, then click 'Connect'"),
+            text=_tr("Type your name as you want it to appear online, then click 'Connect'"),
             font_size=sp(16), font_name=_FONT_NAME, color=theme.TEXT,
             halign='center', valign='middle',
             size_hint_y=None, height=dp(80))
@@ -3524,7 +3524,8 @@ class RecorderController:
         cawl = self.current.get('cawl', '')
         cawl_num = cawl.lstrip('0') or '0' if cawl else ''
         total = len(self.queue)
-        parts = [self.list_name]
+        lang = self.db.vernlang or self.list_name
+        parts = [lang]
         if cawl_num:
             parts.append(cawl_num)
         parts.append(f'/ {total}')
@@ -3835,7 +3836,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.21.1'
+__version__ = '1.21.3'
 
 
 class LIFTRecorderApp(App):

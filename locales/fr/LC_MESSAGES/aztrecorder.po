@@ -243,8 +243,8 @@ msgstr "Sélectionner une image"
 msgid "Open LIFT file"
 msgstr "Ouvrir un fichier LIFT"
 
-msgid "Type your name as you want it to\nappear online, then click 'Connect'"
-msgstr "Tapez votre nom tel que vous voulez\nqu’il apparaisse en ligne, puis cliquez sur « Se connecter »"
+msgid "Type your name as you want it to appear online, then click 'Connect'"
+msgstr "Tapez votre nom tel que vous voulez qu’il apparaisse en ligne, puis cliquez sur « Se connecter »"
 
 # ── Loading / status messages ────────────────────────────────────────────────
 
