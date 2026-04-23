@@ -3206,10 +3206,11 @@ class CollabScreen(Screen):
     def _run(self, busy_msg, func, *args):
         """Show busy_msg, run func(*args) in a thread, show result."""
         self._set_log(busy_msg)
-        from collab import run_async
-        run_async(func, *args, on_done=lambda result: (
-            self._set_log(result or ''),
-        ))
+        import threading
+        def _worker():
+            result = func(*args)
+            Clock.schedule_once(lambda dt: self._set_log(result or ''), 0)
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ── Device flow ────────────────────────────────────────────────────────
 
@@ -3836,7 +3837,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.21.3'
+__version__ = '1.22.2'
 
 
 class LIFTRecorderApp(App):
@@ -4760,7 +4761,7 @@ class LIFTRecorderApp(App):
         import threading
         def _worker():
             try:
-                from collab import sync_repo
+                from azt_collab_client import sync_repo
                 result = sync_repo(project_dir, git_user, token, name)
                 print(f'[auto-sync] {result}')
                 if 'pushed' in result.lower() or 'pulled' in result.lower():
@@ -4897,14 +4898,11 @@ class LIFTRecorderApp(App):
         prefs = self._load_prefs()
         name = prefs.get('collab_name', '') or 'Recorder'
         git_user, token = self._get_sync_credentials()
-        from collab import sync_repo, run_async
+        from azt_collab_client import sync_repo
+        import threading
 
         saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''
-        def _sync_and_reload(project_dir, username, pw, contributor):
-            result = sync_repo(project_dir, username, pw, contributor)
-            Clock.schedule_once(
-                lambda dt: self._reload_and_restore(saved_guid), 0)
-            return result
+        project_dir = self.recorder.db.dir
 
         def _on_sync_done(result):
             print(f'Sync: {result}')
@@ -4914,9 +4912,13 @@ class LIFTRecorderApp(App):
             if 'Pushed' in (result or ''):
                 self._record_sync_time()
                 self._mark_gh_app_installed()
-        run_async(_sync_and_reload,
-                  self.recorder.db.dir, git_user, token, name,
-                  on_done=_on_sync_done)
+
+        def _worker():
+            result = sync_repo(project_dir, git_user, token, name)
+            Clock.schedule_once(
+                lambda dt: self._reload_and_restore(saved_guid), 0)
+            Clock.schedule_once(lambda dt: _on_sync_done(result), 0)
+        threading.Thread(target=_worker, daemon=True).start()
 
     def show_image_picker(self):
         if not self.recorder or not self.recorder.current:
