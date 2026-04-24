@@ -11,13 +11,11 @@ import io
 import json
 import os
 
+from . import config as _config
 from . import status as S
 from .status import Result, Status
 from .net import _ensure_ssl, _has_internet
-from .auth import (
-    GITHUB_APP_NAME, GITHUB_COLLABORATOR,
-    add_collaborator, diagnose_403,
-)
+from .auth import add_collaborator, diagnose_403
 
 
 # ---------------------------------------------------------------------------
@@ -84,8 +82,9 @@ def _default_author(contributor_name):
 
 
 def _app_committer():
-    """Return committer identity for the A-Z+T Recorder app."""
-    return _enc(f'{GITHUB_APP_NAME}[bot] <{GITHUB_APP_NAME}[bot]@users.noreply.github.com>')
+    """Return committer identity for the host app (bot identity)."""
+    slug = _config.get()['app_slug']
+    return _enc(f'{slug}[bot] <{slug}[bot]@users.noreply.github.com>')
 
 
 def _ensure_remote_repo(remote_url, username, token):
@@ -150,9 +149,10 @@ def _ensure_remote_repo(remote_url, username, token):
         return False, Status(S.REMOTE_CREATE_FAILED, {'error': str(e)})
 
     # Add collaborator on GitHub repos
-    if 'github.com' in host and GITHUB_COLLABORATOR:
+    collaborator = _config.get()['collaborator']
+    if 'github.com' in host and collaborator:
         try:
-            add_collaborator(owner, repo_name, GITHUB_COLLABORATOR, token)
+            add_collaborator(owner, repo_name, collaborator, token)
         except Exception as ex:
             print(f'[collab] add collaborator warning: {ex}')
 

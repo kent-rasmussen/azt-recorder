@@ -14,9 +14,15 @@ import sys
 import traceback
 import warnings
 
-from appinfo import APP_NAME, APP_TAGLINE, APP_USER_AGENT, APP_ICON
+from appinfo import APP_NAME, APP_TAGLINE, APP_USER_AGENT, APP_ICON, APP_SLUG
 import theme
 from i18n import _ as _tr, set_language, current_language, available_languages
+
+# Tell the collab backend who we are. Defaults match the recorder, but
+# calling configure() documents the contract and lets other suite apps
+# override identity values via the same hook.
+import azt_collabd
+azt_collabd.configure(app_slug=APP_SLUG)
 
 os.environ.setdefault('KIVY_NO_ENV_CONFIG', '1')
 warnings.filterwarnings('ignore', message='.*olefile.*')
@@ -2985,14 +2991,16 @@ class CollabScreen(Screen):
                 if lang_inp:
                     lang_inp.disabled = False
                     lang_inp.height = dp(48)
-        # Restore host selection
-        host = prefs.get('collab_host', 'github')
+        # Restore host selection + creds state from the server-owned store
+        from azt_collab_client import get_credentials_status
+        cred_status = get_credentials_status()
+        host = cred_status.get('host', 'github')
         self.set_host(host, save=False)
         self._update_gh_status()
         # Restore GitLab fields
         gl_user = self.ids.get('gl_username_input')
         if gl_user and not gl_user.text:
-            gl_user.text = prefs.get('gl_username', '')
+            gl_user.text = cred_status.get('gitlab', {}).get('username', '')
         self.update_publish_url()
         self._update_connect_enabled()
         # Show name overlay on first visit (blank name)
@@ -3114,16 +3122,12 @@ class CollabScreen(Screen):
                 gh_sec.opacity = 1
 
         if save:
-            app = App.get_running_app()
-            prefs = app._load_prefs()
-            prefs['collab_host'] = host
-            app._save_prefs_dict(prefs)
+            from azt_collab_client import set_collab_host
+            set_collab_host(host)
         self.update_publish_url()
 
     def save_gitlab_credentials(self):
-        """Save GitLab PAT and username to prefs."""
-        app = App.get_running_app()
-        prefs = app._load_prefs()
+        """Save GitLab PAT and username to the server-owned credentials store."""
         token_w = self.ids.get('gl_token_input')
         user_w = self.ids.get('gl_username_input')
         token = token_w.text.strip() if token_w else ''
@@ -3131,31 +3135,31 @@ class CollabScreen(Screen):
         if not token or not username:
             self._set_log(_tr('Enter both GitLab username and token.'))
             return
-        prefs['gl_token'] = token
-        prefs['gl_username'] = username
-        app._save_prefs_dict(prefs)
+        from azt_collab_client import save_gitlab_credentials
+        save_gitlab_credentials(username, token)
         self._set_log(_tr('GitLab credentials saved for {username}').format(username=username))
         self.update_publish_url()
 
     def _update_gh_status(self):
         """Update the GitHub connection status label and install button."""
-        app = App.get_running_app()
-        prefs = app._load_prefs()
-        username = prefs.get('gh_username', '')
-        token = prefs.get('gh_access_token', '')
+        from azt_collab_client import get_credentials_status
+        status = get_credentials_status()
+        gh = status.get('github', {})
+        username = gh.get('username', '')
+        connected = gh.get('connected', False)
         lbl = self.ids.get('gh_status_label')
         btn = self.ids.get('gh_connect_btn')
         if lbl:
-            if username and token:
+            if connected and username:
                 lbl.text = _tr('Connected as {username}').format(username=username)
                 lbl.color = theme.GREEN
             else:
                 lbl.text = _tr('Not connected')
                 lbl.color = theme.TEXT_DIM
         if btn:
-            btn.text = _tr('Reconnect') if (username and token) else _tr('Connect to GitHub')
+            btn.text = _tr('Reconnect') if connected else _tr('Connect to GitHub')
         # Hide install button + instructions if app is already installed
-        installed = prefs.get('gh_app_installed', False)
+        installed = gh.get('app_installed', False)
         install_btn = self.ids.get('install_app_btn')
         inst = self.ids.get('device_instructions_label')
         if installed:
@@ -3231,18 +3235,18 @@ class CollabScreen(Screen):
             self._set_log(_tr('GitHub App client_id not configured.'))
             return
         # Reset install status on reconnect
-        app = App.get_running_app()
-        prefs = app._load_prefs()
-        prefs['gh_app_installed'] = False
-        app._save_prefs_dict(prefs)
+        from azt_collab_client import mark_github_app_installed
+        mark_github_app_installed(False)
         self._set_log(_tr('Starting GitHub authorization...'))
         import threading
         threading.Thread(target=self._device_flow_worker, daemon=True).start()
 
     def _device_flow_worker(self):
         from collab import device_flow_start, device_flow_poll, \
-            get_github_username, save_tokens, check_app_installed, \
+            get_github_username, check_app_installed, \
             app_install_url, GITHUB_APP_INSTALL_URL
+        from azt_collab_client import save_github_tokens, \
+            get_credentials_status
         app = App.get_running_app()
         try:
             resp = device_flow_start()
@@ -3284,15 +3288,12 @@ class CollabScreen(Screen):
 
             # Save tokens immediately so connection persists even if
             # later network calls (app install check) fail
-            save_tokens(app._prefs_path, token_data, username)
-            prefs = app._load_prefs()
-            prefs['collab_username'] = username
-            prefs['collab_token'] = access_token
-            app._save_prefs_dict(prefs)
+            save_github_tokens(token_data, username)
 
             _url = GITHUB_APP_INSTALL_URL
             _username = username
-            _app_installed = app._load_prefs().get('gh_app_installed', False)
+            _app_installed = get_credentials_status().get(
+                'github', {}).get('app_installed', False)
             def _done(dt):
                 lbl = self.ids.get('device_code_label')
                 if lbl:
@@ -3360,16 +3361,16 @@ class CollabScreen(Screen):
         lbl = self.ids.get('publish_url_label')
         if not lbl:
             return
-        app = App.get_running_app()
-        prefs = app._load_prefs()
-        host = getattr(self, '_host', prefs.get('collab_host', 'github'))
+        from azt_collab_client import get_credentials_status
+        status = get_credentials_status()
+        host = getattr(self, '_host', status.get('host', 'github'))
         lang_w = self.ids.get('langcode_input')
         lang = lang_w.text.strip() if lang_w else ''
         if host == 'gitlab':
-            user = prefs.get('gl_username', '')
+            user = status.get('gitlab', {}).get('username', '')
             domain = 'gitlab.com'
         else:
-            user = prefs.get('gh_username', '')
+            user = status.get('github', {}).get('username', '')
             domain = 'github.com'
         if not user or not lang:
             lbl.text = ''
@@ -3378,12 +3379,11 @@ class CollabScreen(Screen):
 
     def _get_credentials_for_host(self):
         """Return (username, token) for the currently selected host."""
-        app = App.get_running_app()
-        prefs = app._load_prefs()
-        host = getattr(self, '_host', prefs.get('collab_host', 'github'))
+        from azt_collabd import store as _store
+        host = getattr(self, '_host', _store.get_collab_host())
         if host == 'gitlab':
-            return prefs.get('gl_username', ''), prefs.get('gl_token', '')
-        return app._get_gh_credentials()
+            return _store.get_gitlab()
+        return _store.get_valid_github_token()
 
     def do_publish(self):
         app = App.get_running_app()
@@ -3848,7 +3848,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.22.3'
+__version__ = '1.22.5'
 
 
 class LIFTRecorderApp(App):
@@ -3932,6 +3932,15 @@ class LIFTRecorderApp(App):
             self.subtitle = _tr(APP_TAGLINE)
             Builder.load_string(KV)
             self.root = RootScreen()
+            # Move any legacy credential keys out of prefs.json into
+            # $AZT_HOME/credentials.json. Idempotent.
+            try:
+                from azt_collabd import store as _store
+                summary = _store.migrate_from_prefs(self._prefs_path)
+                if summary.get('migrated'):
+                    print(f'[migrate] credentials: {summary}')
+            except Exception as ex:
+                print(f'[migrate] error: {ex}')
             return self.root
         except Exception:
             traceback.print_exc()
@@ -4111,7 +4120,7 @@ class LIFTRecorderApp(App):
                 # Clone the whole repo
                 repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')
                 dest = os.path.join(self.user_data_dir, 'projects', repo_name)
-                git_user, token = self._get_sync_credentials()
+                git_user, token = self._clone_credentials()
                 from collab import clone_repo
                 from azt_collab_client import translate_result
                 lift_path, result = clone_repo(clone_url, dest, git_user, token)
@@ -4669,10 +4678,17 @@ class LIFTRecorderApp(App):
                     break
         self.refresh_recorder_ui()
 
-    def _get_gh_credentials(self):
-        """Return (username, access_token) with auto-refresh. Uses device flow tokens."""
-        from collab import get_valid_token
-        return get_valid_token(self._prefs_path)
+    def _clone_credentials(self):
+        """Return (git_user, token) for clone/publish flows that still run
+        in-process (init_repo, clone_repo). Reads from the server-owned
+        credentials store, respecting the current host toggle."""
+        from azt_collabd import store as _store
+        host = _store.get_collab_host()
+        if host == 'gitlab':
+            user, token = _store.get_gitlab()
+            return user, token
+        _, token = _store.get_valid_github_token()
+        return 'x-access-token', token
 
     def _try_auto_publish(self):
         """If git credentials and langcode are configured, publish automatically."""
@@ -4680,17 +4696,31 @@ class LIFTRecorderApp(App):
         langcode = prefs.get('collab_langcode', '')
         if not (langcode and self.recorder):
             return
-        host = prefs.get('collab_host', 'github')
-        git_user, token = self._get_sync_credentials()
-        if not token:
-            return
+        from azt_collab_client import get_credentials_status
+        status = get_credentials_status()
+        host = status.get('host', 'github')
         if host == 'gitlab':
-            user = prefs.get('gl_username', '')
+            gl = status.get('gitlab', {})
+            user = gl.get('username', '')
+            token_ok = gl.get('connected', False)
+            git_user = user
             domain = 'gitlab.com'
         else:
-            user = prefs.get('gh_username', '')
+            gh = status.get('github', {})
+            user = gh.get('username', '')
+            token_ok = gh.get('connected', False)
+            git_user = 'x-access-token'
             domain = 'github.com'
-        if not user:
+        if not (user and token_ok):
+            return
+        # Fetch the raw token for publish (init_repo still runs via
+        # collab-backed call; step 7 will route publish through the server).
+        from azt_collabd import store as _store
+        if host == 'gitlab':
+            _, token = _store.get_gitlab()
+        else:
+            _, token = _store.get_valid_github_token()
+        if not token:
             return
         remote_url = f'https://{domain}/{user}/{langcode}.git'
         name = prefs.get('collab_name', '') or 'Recorder'
@@ -4743,23 +4773,9 @@ class LIFTRecorderApp(App):
             lbl.text = self._sync_status_text()
 
     def _mark_gh_app_installed(self):
-        """Mark GitHub App as installed after a successful push."""
-        prefs = self._load_prefs()
-        if not prefs.get('gh_app_installed'):
-            prefs['gh_app_installed'] = True
-            self._save_prefs_dict(prefs)
-
-    def _get_sync_credentials(self):
-        """Return (git_username, token) for sync, respecting host toggle."""
-        prefs = self._load_prefs()
-        host = prefs.get('collab_host', 'github')
-        if host == 'gitlab':
-            user = prefs.get('gl_username', '')
-            token = prefs.get('gl_token', '')
-            return user, token
-        from collab import get_valid_token
-        _, token = get_valid_token(self._prefs_path)
-        return 'x-access-token', token
+        """Record that the GitHub App has been installed after a successful push."""
+        from azt_collab_client import mark_github_app_installed
+        mark_github_app_installed(True)
 
     def _auto_commit_sync(self):
         """Background: pull + commit new audio/.lift changes + push."""
@@ -4768,15 +4784,14 @@ class LIFTRecorderApp(App):
         prefs = self._load_prefs()
         name = prefs.get('collab_name', '') or 'Recorder'
         project_dir = self.recorder.db.dir
-        git_user, token = self._get_sync_credentials()
-        if not token:
-            return
         saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''
         import threading
         def _worker():
             try:
                 from azt_collab_client import sync_repo, translate_result, S
-                result = sync_repo(project_dir, git_user, token, name)
+                result = sync_repo(project_dir, name)
+                if result.has(S.AUTH_REQUIRED):
+                    return  # not configured yet — silent no-op
                 print(f'[auto-sync] {translate_result(result)}')
                 pushed = result.has(S.PUSHED) or result.has(S.COMMITTED_AND_PUSHED)
                 pulled = result.has(S.PULLED)
@@ -4913,7 +4928,6 @@ class LIFTRecorderApp(App):
             return
         prefs = self._load_prefs()
         name = prefs.get('collab_name', '') or 'Recorder'
-        git_user, token = self._get_sync_credentials()
         from azt_collab_client import sync_repo, translate_result, S
         import threading
 
@@ -4930,7 +4944,7 @@ class LIFTRecorderApp(App):
                 self._mark_gh_app_installed()
 
         def _worker():
-            result = sync_repo(project_dir, git_user, token, name)
+            result = sync_repo(project_dir, name)
             Clock.schedule_once(
                 lambda dt: self._reload_and_restore(saved_guid), 0)
             Clock.schedule_once(lambda dt: _on_sync_done(result), 0)
@@ -5208,7 +5222,7 @@ class LIFTRecorderApp(App):
             # Ensure URL ends with .git for dulwich
             if not clone_url.endswith('.git'):
                 clone_url += '.git'
-            git_user, token = self._get_sync_credentials()
+            git_user, token = self._clone_credentials()
 
             repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')
             dest = os.path.join(self.user_data_dir, 'projects', repo_name)

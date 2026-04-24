@@ -7,22 +7,33 @@ public client_id is embedded in the app.
 import json
 import time
 
-from appinfo import APP_SLUG
-
+from . import config as _config
 from . import status as S
 from .status import Status, AuthError
 from .net import _ensure_ssl
 
 # ── GitHub App configuration ─────────────────────────────────────────────────
-# Register your GitHub App at https://github.com/settings/apps
-# Enable "Device Flow" in the app settings.
-# Required permissions: Repository → Administration: Write, Contents: Write
-# Set these after creating the app:
-GITHUB_APP_CLIENT_ID = 'Iv23li66Fo9MBReatv6i'  # set after registering the GitHub App
-GITHUB_APP_NAME = APP_SLUG
-GITHUB_COLLABORATOR = 'kent-rasmussen'  # auto-added to new repos
+# Values live in azt_collabd.config. Host apps call
+# ``azt_collabd.configure(app_slug=..., client_id=..., collaborator=...)``
+# once at startup; defaults match the recorder.
+#
+# For backwards compatibility with legacy attribute access
+# (``from collab import GITHUB_APP_CLIENT_ID`` etc.), this module
+# exposes module-level ``__getattr__`` below so the four historical
+# constants always reflect the current config.
 
-GITHUB_APP_INSTALL_URL = f'https://github.com/apps/{GITHUB_APP_NAME}/installations/new'
+
+def __getattr__(name):
+    if name == 'GITHUB_APP_CLIENT_ID':
+        return _config.get()['client_id']
+    if name == 'GITHUB_APP_NAME':
+        return _config.get()['app_slug']
+    if name == 'GITHUB_COLLABORATOR':
+        return _config.get()['collaborator']
+    if name == 'GITHUB_APP_INSTALL_URL':
+        return _config.install_url()
+    raise AttributeError(
+        f'module {__name__!r} has no attribute {name!r}')
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +47,7 @@ def device_flow_start():
     from urllib.request import Request, urlopen
     req = Request(
         'https://github.com/login/device/code',
-        data=f'client_id={GITHUB_APP_CLIENT_ID}&scope=repo'.encode(),
+        data=f'client_id={_config.get()["client_id"]}&scope=repo'.encode(),
         headers={'Accept': 'application/json'},
         method='POST',
     )
@@ -57,7 +68,7 @@ def device_flow_poll(device_code, interval=5, expires_in=900):
     while time.time() < deadline:
         time.sleep(interval)
         data = (
-            f'client_id={GITHUB_APP_CLIENT_ID}'
+            f'client_id={_config.get()["client_id"]}'
             f'&device_code={device_code}'
             f'&grant_type=urn:ietf:params:oauth:grant-type:device_code'
         ).encode()
@@ -97,7 +108,7 @@ def refresh_access_token(refresh_token):
     _ensure_ssl()
     from urllib.request import Request, urlopen
     data = (
-        f'client_id={GITHUB_APP_CLIENT_ID}'
+        f'client_id={_config.get()["client_id"]}'
         f'&grant_type=refresh_token'
         f'&refresh_token={refresh_token}'
     ).encode()
@@ -154,8 +165,9 @@ def check_app_installed(token):
     try:
         with urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
+        app_slug = _config.get()['app_slug']
         for inst in data.get('installations', []):
-            if inst.get('app_slug') == GITHUB_APP_NAME:
+            if inst.get('app_slug') == app_slug:
                 result['installed'] = True
                 result['installation_id'] = inst.get('id')
                 # 'all' means all repos, 'selected' means specific repos
@@ -197,7 +209,7 @@ def app_install_url(installation_id=None):
     """Return the URL to install or configure the GitHub App."""
     if installation_id:
         return f'https://github.com/settings/installations/{installation_id}'
-    return f'https://github.com/apps/{GITHUB_APP_NAME}/installations/new'
+    return _config.install_url()
 
 
 def diagnose_403(token, remote_url):
@@ -209,7 +221,7 @@ def diagnose_403(token, remote_url):
     info = check_app_installed(token)
     if not info['installed']:
         return Status(S.APP_NOT_INSTALLED,
-                      {'url': GITHUB_APP_INSTALL_URL})
+                      {'url': _config.install_url()})
     install_id = info['installation_id']
     if not info['all_repos']:
         import re

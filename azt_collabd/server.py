@@ -1,20 +1,23 @@
 """
-Loopback HTTP/JSON server — step 2 scaffolding.
+Loopback HTTP/JSON server.
 
 Binds 127.0.0.1 on an OS-assigned port and writes
 ``$AZT_HOME/server.json`` with ``{port, token, pid, version}`` so clients
 can discover the endpoint. Every request (except ``GET /v1/health``)
 requires ``Authorization: Bearer <token>``.
 
-Endpoints so far:
-    GET  /v1/health            → unauthenticated liveness probe
-    GET  /v1/online            → wraps net._has_internet
-    POST /v1/sync              → wraps repo.sync_repo
-                                 body: {project_dir, username, token, contributor}
-
-Further endpoints arrive with later migration steps. The server holds no
-state beyond Handler._token; every call passes the full parameters today.
-Project registry / credentials move server-side in steps 6–7.
+Endpoints:
+    GET  /v1/health                           unauthenticated liveness probe
+    GET  /v1/online                           wraps net._has_internet
+    GET  /v1/credentials/status               describes what's configured
+    POST /v1/credentials/host                 {host}
+    POST /v1/credentials/github/tokens        {access_token, refresh_token,
+                                               username, token_time?}
+    POST /v1/credentials/github/app_installed {installed}
+    POST /v1/credentials/gitlab               {username, token}
+    POST /v1/credentials/migrate_from_prefs   {prefs_path}
+    POST /v1/sync                             {project_dir, contributor}
+                                              — creds come from the store
 """
 
 import http.server
@@ -26,11 +29,14 @@ import socketserver
 import sys
 import threading
 
+from . import store
 from .net import _has_internet
 from .paths import azt_home, server_info_path
 from .repo import sync_repo as _sync_repo
+from .status import Result, Status
+from . import status as S
 
-_VERSION = "0.1.0"
+_VERSION = "0.2.0"
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -38,7 +44,6 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     _token: str = ""   # populated by run()
 
     def log_message(self, fmt, *args):
-        # Silence default stderr access log; still emit via print for errors
         pass
 
     # ── helpers ─────────────────────────────────────────────────────────
@@ -81,6 +86,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._send_json(401, {"ok": False, "error": "unauthorized"})
         if self.path == '/v1/online':
             return self._send_json(200, {"ok": True, "online": _has_internet()})
+        if self.path == '/v1/credentials/status':
+            return self._send_json(200, {"ok": True, **store.get_status()})
         return self._send_json(404, {"ok": False, "error": "not_found"})
 
     def do_POST(self):
@@ -89,8 +96,19 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         body = self._read_json()
         if body is None:
             return self._send_json(400, {"ok": False, "error": "bad_json"})
-        if self.path == '/v1/sync':
+        path = self.path
+        if path == '/v1/sync':
             return self._do_sync(body)
+        if path == '/v1/credentials/host':
+            return self._set_host(body)
+        if path == '/v1/credentials/github/tokens':
+            return self._set_github_tokens(body)
+        if path == '/v1/credentials/github/app_installed':
+            return self._set_github_app_installed(body)
+        if path == '/v1/credentials/gitlab':
+            return self._set_gitlab(body)
+        if path == '/v1/credentials/migrate_from_prefs':
+            return self._migrate_from_prefs(body)
         return self._send_json(404, {"ok": False, "error": "not_found"})
 
     # ── handlers ────────────────────────────────────────────────────────
@@ -100,14 +118,60 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if not project_dir:
             return self._send_json(400, {"ok": False,
                                          "error": "missing_project_dir"})
-        username = body.get('username', '')
-        token = body.get('token', '')
         contributor = body.get('contributor', 'Recorder')
+        git_user, token = store.get_sync_credentials()
+        if not token:
+            # Emit a Result so the client can translate uniformly
+            res = Result().add(S.AUTH_REQUIRED)
+            return self._send_json(200, {"ok": True,
+                                         "result": res.to_dict()})
         try:
-            res = _sync_repo(project_dir, username, token, contributor)
+            res = _sync_repo(project_dir, git_user, token, contributor)
         except Exception as ex:
             return self._send_json(500, {"ok": False, "error": str(ex)})
         return self._send_json(200, {"ok": True, "result": res.to_dict()})
+
+    def _set_host(self, body):
+        host = body.get('host', '')
+        if host not in ('github', 'gitlab'):
+            return self._send_json(400, {"ok": False,
+                                         "error": "invalid_host"})
+        store.set_collab_host(host)
+        return self._send_json(200, {"ok": True})
+
+    def _set_github_tokens(self, body):
+        access_token = body.get('access_token', '')
+        if not access_token:
+            return self._send_json(400, {"ok": False,
+                                         "error": "missing_access_token"})
+        store.set_github_tokens(
+            access_token=access_token,
+            refresh_token=body.get('refresh_token', ''),
+            username=body.get('username', ''),
+            token_time=body.get('token_time'),
+        )
+        return self._send_json(200, {"ok": True})
+
+    def _set_github_app_installed(self, body):
+        store.set_github_app_installed(bool(body.get('installed', False)))
+        return self._send_json(200, {"ok": True})
+
+    def _set_gitlab(self, body):
+        username = body.get('username', '')
+        token = body.get('token', '')
+        if not username or not token:
+            return self._send_json(400, {"ok": False,
+                                         "error": "missing_username_or_token"})
+        store.set_gitlab(username, token)
+        return self._send_json(200, {"ok": True})
+
+    def _migrate_from_prefs(self, body):
+        prefs_path = body.get('prefs_path', '')
+        if not prefs_path:
+            return self._send_json(400, {"ok": False,
+                                         "error": "missing_prefs_path"})
+        summary = store.migrate_from_prefs(prefs_path)
+        return self._send_json(200, {"ok": True, **summary})
 
 
 class _ThreadingHTTPServer(socketserver.ThreadingMixIn,
@@ -139,9 +203,6 @@ def run(host='127.0.0.1', port=0):
           f'(home={home})', flush=True)
 
     def _graceful(signum, frame):
-        # shutdown() blocks until serve_forever exits, so it must run on a
-        # different thread than the signal handler (which is the main
-        # thread — same as serve_forever).
         print(f'[azt_collabd] signal {signum}, shutting down', flush=True)
         threading.Thread(target=httpd.shutdown, daemon=True).start()
 
@@ -149,7 +210,6 @@ def run(host='127.0.0.1', port=0):
         try:
             signal.signal(sig, _graceful)
         except (ValueError, OSError):
-            # Not on main thread, or platform doesn't support it
             pass
 
     try:

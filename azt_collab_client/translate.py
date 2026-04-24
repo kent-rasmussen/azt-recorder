@@ -79,6 +79,10 @@ _HANDLERS = {
     S.AUTH_EXPIRED:           lambda p: _tr('Authorization expired. Please try again.'),
     S.AUTH_DENIED:            lambda p: _tr('Authorization denied by user.'),
     S.AUTH_TIMEOUT:           lambda p: _tr('Authorization timed out.'),
+
+    # Transport-layer synthetics from the client (not emitted by the backend)
+    'SERVER_UNAVAILABLE':     lambda p: _fmt(_tr('Sync service unavailable: {error}'), p),
+    'SERVER_ERROR':           lambda p: _fmt(_tr('Sync service error: {error}'), p),
 }
 
 

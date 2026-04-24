@@ -14,8 +14,8 @@ from .rpc import call, health, ServerUnavailable
 
 
 def configure(app_id: str):
-    """Reserved for step 5: store app identity for logging / provider
-    routing. Currently a no-op."""
+    """Reserved for later migration steps (app identity for logging /
+    provider routing). Currently a no-op."""
     return None
 
 
@@ -28,18 +28,79 @@ def is_online():
     return bool(resp.get('online'))
 
 
-def sync_repo(project_dir, username, token, contributor):
+# ── Credentials API (server-owned credentials.json) ────────────────────────
+
+def get_credentials_status():
+    """Return a dict describing what's configured:
+        {host, github: {connected, username, app_installed},
+         gitlab: {connected, username}}
+    Never contains raw tokens. On transport failure returns an empty
+    status so the UI degrades gracefully."""
+    try:
+        resp = call('GET', '/v1/credentials/status')
+    except ServerUnavailable:
+        return {'host': 'github',
+                'github': {'connected': False, 'username': '',
+                           'app_installed': False},
+                'gitlab': {'connected': False, 'username': ''}}
+    if resp.get('ok'):
+        return {k: v for k, v in resp.items() if k != 'ok'}
+    return {}
+
+
+def set_collab_host(host):
+    """Persist the user's host selection (github|gitlab)."""
+    try:
+        call('POST', '/v1/credentials/host', {'host': host})
+    except ServerUnavailable:
+        pass
+
+
+def save_github_tokens(token_data, username=''):
+    """Persist a device-flow token response + (optional) username."""
+    call('POST', '/v1/credentials/github/tokens', {
+        'access_token': token_data.get('access_token', ''),
+        'refresh_token': token_data.get('refresh_token', ''),
+        'username': username,
+    })
+
+
+def mark_github_app_installed(installed=True):
+    try:
+        call('POST', '/v1/credentials/github/app_installed',
+             {'installed': bool(installed)})
+    except ServerUnavailable:
+        pass
+
+
+def save_gitlab_credentials(username, token):
+    call('POST', '/v1/credentials/gitlab',
+         {'username': username, 'token': token})
+
+
+def migrate_from_prefs(prefs_path):
+    """One-shot (idempotent) migration from a legacy prefs.json. The
+    server moves gh_*/gl_*/collab_host keys into credentials.json and
+    strips them from prefs.json."""
+    try:
+        resp = call('POST', '/v1/credentials/migrate_from_prefs',
+                    {'prefs_path': prefs_path})
+    except ServerUnavailable:
+        return {'migrated': False, 'reason': 'server_unavailable'}
+    return {k: v for k, v in resp.items() if k != 'ok'}
+
+
+# ── Sync ────────────────────────────────────────────────────────────────────
+
+def sync_repo(project_dir, contributor):
     """Route a sync job to azt_collabd. Returns a ``Result``.
 
-    On transport failure, returns a Result containing a single synthetic
-    Status — callers can still call ``translate_result`` to get a human
-    message, or check for ``'SERVER_UNAVAILABLE'`` via ``result.has``.
-    """
+    Server reads the sync credentials from its own store — callers no
+    longer pass username/token. If the user hasn't connected to a host,
+    the Result contains an AUTH_REQUIRED status."""
     try:
         resp = call('POST', '/v1/sync', {
             'project_dir': project_dir,
-            'username': username,
-            'token': token,
             'contributor': contributor,
         })
     except ServerUnavailable as ex:
@@ -52,7 +113,11 @@ def sync_repo(project_dir, username, token, contributor):
 
 
 __all__ = [
-    'configure', 'is_online', 'sync_repo',
+    'configure', 'is_online',
+    'get_credentials_status', 'set_collab_host',
+    'save_github_tokens', 'mark_github_app_installed',
+    'save_gitlab_credentials', 'migrate_from_prefs',
+    'sync_repo',
     'Status', 'Result', 'S',
     'translate_status', 'translate_result', 'set_translator',
     'ServerUnavailable',
