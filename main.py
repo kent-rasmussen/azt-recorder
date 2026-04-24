@@ -3848,7 +3848,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.22.7'
+__version__ = '1.22.8'
 
 
 class LIFTRecorderApp(App):

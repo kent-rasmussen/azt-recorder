@@ -37,7 +37,34 @@ from .repo import sync_repo as _sync_repo, repo_status_summary as _repo_status
 from .status import Result, Status
 from . import status as S
 
-_VERSION = "0.3.0"
+_VERSION = "0.4.0"
+
+# Kept alive for the server's lifetime so the flock on server.lock stays held.
+_server_lock_fd = None
+
+
+def _acquire_server_lock(lock_path):
+    """Take an exclusive flock on *lock_path* so only one azt_collabd per
+    AZT_HOME runs at a time. Returns the file descriptor on success, or
+    None if another instance holds the lock. On platforms without fcntl
+    (Windows), returns the fd without real locking (first-come wins by
+    server.json existence instead)."""
+    fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        import fcntl as _fcntl
+    except ImportError:
+        return fd
+    try:
+        _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    try:
+        os.truncate(fd, 0)
+        os.write(fd, f'{os.getpid()}\n'.encode())
+    except OSError:
+        pass
+    return fd
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -281,9 +308,20 @@ class _ThreadingHTTPServer(socketserver.ThreadingMixIn,
 
 def run(host='127.0.0.1', port=0):
     """Start the server. Blocks until interrupted. Writes server.json on
-    bind and removes it on shutdown."""
+    bind and removes it on shutdown. Exits non-zero if another
+    azt_collabd is already running against the same $AZT_HOME."""
+    global _server_lock_fd
     home = azt_home()
     os.makedirs(home, exist_ok=True)
+
+    # Single-instance guard — flock on $AZT_HOME/server.lock
+    lock_path = os.path.join(home, 'server.lock')
+    _server_lock_fd = _acquire_server_lock(lock_path)
+    if _server_lock_fd is None:
+        print(f'[azt_collabd] another instance already holds '
+              f'{lock_path}', flush=True)
+        sys.exit(1)
+
     token = secrets.token_urlsafe(32)
     _Handler._token = token
     httpd = _ThreadingHTTPServer((host, port), _Handler)
