@@ -15,7 +15,10 @@ from azt_collabd.auth import (  # noqa: F401
     GITHUB_APP_INSTALL_URL,
     device_flow_start, device_flow_poll, refresh_access_token,
     get_github_username, check_app_installed, check_repo_in_installation,
-    app_install_url, add_collaborator, _diagnose_403,
+    app_install_url, add_collaborator, diagnose_403, _diagnose_403,
+)
+from azt_collabd.status import (  # noqa: F401
+    Status, Result, AuthError,
 )
 from azt_collabd.store import (  # noqa: F401
     save_tokens, get_valid_token,

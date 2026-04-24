@@ -1,18 +1,22 @@
 """
 Dulwich operations: init, clone, pull, push, commit, sync, and auto-commit
 of audio + LIFT changes. All network ops call net._ensure_ssl() first.
+
+Every public op returns a ``Result`` (status codes + params) — no i18n
+inside the backend. Exception paths emit failure codes inside the Result
+rather than raising; that matches the existing log-append style.
 """
 
 import io
 import json
 import os
 
-from i18n import _ as _tr
-
+from . import status as S
+from .status import Result, Status
 from .net import _ensure_ssl, _has_internet
 from .auth import (
     GITHUB_APP_NAME, GITHUB_COLLABORATOR,
-    add_collaborator, _diagnose_403,
+    add_collaborator, diagnose_403,
 )
 
 
@@ -88,18 +92,19 @@ def _ensure_remote_repo(remote_url, username, token):
     """Create the remote repo on GitHub/GitLab if it doesn't exist yet.
     On GitHub, also adds GITHUB_COLLABORATOR to the repo.
 
-    Returns (ok, message).
+    Returns (ok, Status|None). The Status describes creation/failure if
+    it applies; when the repo already existed no Status is returned.
     """
     from urllib.request import Request, urlopen
     from urllib.error import HTTPError, URLError
 
-    # Parse owner/repo from URL like https://github.com/owner/repo.git
     from urllib.parse import urlparse
     parsed = urlparse(remote_url)
     host = parsed.hostname or ''
     parts = parsed.path.strip('/').removesuffix('.git').split('/')
     if len(parts) < 2:
-        return False, f'Cannot parse owner/repo from {remote_url}'
+        return False, Status(S.REMOTE_CREATE_FAILED,
+                             {'error': f'cannot parse owner/repo from {remote_url}'})
     owner, repo_name = parts[0], parts[1]
 
     if 'github.com' in host:
@@ -126,7 +131,7 @@ def _ensure_remote_repo(remote_url, username, token):
             'Content-Type': 'application/json',
         }
     else:
-        return True, ''   # Unknown host — assume repo exists, let push fail
+        return True, None   # Unknown host — assume repo exists, let push fail
 
     created = False
     try:
@@ -139,9 +144,10 @@ def _ensure_remote_repo(remote_url, username, token):
         if e.code in (422, 400) and 'already' in body.lower():
             pass   # Already exists — fine
         else:
-            return False, f'Create repo failed ({e.code}): {body[:200]}'
+            return False, Status(S.REMOTE_CREATE_FAILED,
+                                 {'error': f'{e.code}: {body[:200]}'})
     except (URLError, OSError) as e:
-        return False, f'Create repo failed: {e}'
+        return False, Status(S.REMOTE_CREATE_FAILED, {'error': str(e)})
 
     # Add collaborator on GitHub repos
     if 'github.com' in host and GITHUB_COLLABORATOR:
@@ -150,18 +156,21 @@ def _ensure_remote_repo(remote_url, username, token):
         except Exception as ex:
             print(f'[collab] add collaborator warning: {ex}')
 
-    msg = f'Created remote repository {owner}/{repo_name}.' if created else ''
-    return True, msg
+    if created:
+        return True, Status(S.REMOTE_REPO_CREATED,
+                            {'owner_repo': f'{owner}/{repo_name}'})
+    return True, None
 
 
 # ---------------------------------------------------------------------------
-# Public API (called from CollabScreen — may run in a worker thread)
+# Public API
 # ---------------------------------------------------------------------------
 
 def repo_status_summary(project_dir):
     """
     Return (branch, remote_url, n_changes) describing the project directory,
-    or None if it is not a git repository.
+    or None if it is not a git repository. (Not a Result — this is a raw
+    accessor for UI status indicators.)
     """
     try:
         from dulwich import porcelain
@@ -169,7 +178,6 @@ def repo_status_summary(project_dir):
         if repo is None:
             return None
 
-        # Branch
         try:
             branch = porcelain.active_branch(repo).decode('utf-8', errors='replace')
         except Exception:
@@ -177,7 +185,6 @@ def repo_status_summary(project_dir):
             head_ref = refs.get(b'HEAD', b'')
             branch = head_ref.decode('utf-8').replace('refs/heads/', '') or '(detached)'
 
-        # Remote
         try:
             remote_url = repo.get_config().get(
                 (b'remote', b'origin'), b'url'
@@ -185,7 +192,6 @@ def repo_status_summary(project_dir):
         except KeyError:
             remote_url = ''
 
-        # Pending changes
         try:
             st = porcelain.status(repo)
             n = (len(st.staged.get('add', [])) +
@@ -203,30 +209,25 @@ def repo_status_summary(project_dir):
 
 def init_repo(project_dir, remote_url, username, token,
               branch='main', contributor_name='Recorder'):
-    """
-    Initialize a git repo in project_dir, commit everything, set remote, push.
-    Returns a human-readable log string.
-    """
+    """Initialize a git repo, commit everything, set remote, push.
+    Returns a Result."""
     _ensure_ssl()
     from dulwich import porcelain
-    log = []
+    result = Result()
 
-    # Init (idempotent)
     repo = _get_repo(project_dir)
     if repo is None:
         repo = porcelain.init(project_dir)
-        log.append(_tr('Initialized git repository.'))
+        result.add(S.INITIALIZED)
     else:
-        log.append(_tr('Repository already initialized.'))
+        result.add(S.ALREADY_INITIALIZED)
 
-    # .gitignore
     gitignore = os.path.join(project_dir, '.gitignore')
     if not os.path.exists(gitignore):
         with open(gitignore, 'w') as fh:
             fh.write('__pycache__/\n*.pyc\n.buildozer/\nenv/\n.DS_Store\nimage_cache/\n')
-        log.append(_tr('Created .gitignore.'))
+        result.add(S.GITIGNORE_CREATED)
 
-    # Stage + commit
     _stage_all(repo, project_dir)
     author = _default_author(contributor_name)
     committer = _app_committer()
@@ -237,63 +238,58 @@ def init_repo(project_dir, remote_url, username, token,
             author=author, committer=committer,
         )
         sha_str = sha[:8].decode() if isinstance(sha, bytes) else str(sha)[:8]
-        log.append(_tr('Committed ({sha}).').format(sha=sha_str))
+        result.add(S.COMMITTED, sha=sha_str)
     except Exception as exc:
-        log.append(_tr('Commit: {error}').format(error=exc))
+        result.add(S.COMMIT_FAILED, error=str(exc))
 
-    # Set or update remote origin
     try:
         existing = repo.get_config().get((b'remote', b'origin'), b'url').decode()
         if existing != remote_url:
             config = repo.get_config()
             config.set((b'remote', b'origin'), b'url', _enc(remote_url))
             config.write_to_path()
-            log.append(_tr('Remote updated to {url}').format(url=remote_url))
+            result.add(S.REMOTE_UPDATED, url=remote_url)
         else:
-            log.append(_tr('Remote: {url}').format(url=existing))
+            result.add(S.REMOTE_UNCHANGED, url=existing)
     except KeyError:
         porcelain.remote_add(repo, 'origin', remote_url)
-        log.append(_tr('Remote set to {url}').format(url=remote_url))
+        result.add(S.REMOTE_SET, url=remote_url)
 
-    # Ensure HEAD points to the desired branch
     desired_ref = _enc(f'refs/heads/{branch}')
     try:
         head_ref = repo.refs.get_symrefs().get(b'HEAD', b'')
         if head_ref != desired_ref:
-            # Rename the current branch to the desired name
             head_sha = repo.head()
             repo.refs[desired_ref] = head_sha
             repo.refs.set_symbolic_ref(b'HEAD', desired_ref)
     except Exception:
         pass
 
-    # Ensure remote repo exists (create on GitHub/GitLab if needed)
-    ok, msg = _ensure_remote_repo(remote_url, username, token)
-    if msg:
-        log.append(msg)
+    ok, create_status = _ensure_remote_repo(remote_url, username, token)
+    if create_status is not None:
+        result.statuses.append(create_status)
     if not ok:
-        return '\n'.join(log)
+        return result
 
-    # Push — let dulwich resolve the active branch rather than a manual refspec
     try:
         porcelain.push(
             repo, remote_url,
             username=username, password=token,
             errstream=io.BytesIO(),
         )
-        log.append(_tr('Pushed to {url} (branch: {branch}).').format(url=remote_url, branch=branch))
+        result.add(S.PUSHED, url=remote_url, branch=branch)
     except Exception as exc:
-        log.append(_tr('Push failed: {error}').format(error=exc))
+        result.add(S.PUSH_FAILED, error=str(exc))
 
-    return '\n'.join(log)
+    return result
 
 
 class _ProgressStream(io.RawIOBase):
     """Captures git protocol progress lines and forwards to a callback.
 
     Dulwich writes progress messages like ``Receiving objects:  75% (30/40)\\r``
-    to *errstream*.  This stream buffers them and calls *on_progress(line)* on
-    each complete line (delimited by ``\\r`` or ``\\n``).
+    to *errstream*. This stream buffers them and calls *on_progress(line)*
+    on each complete line (delimited by ``\\r`` or ``\\n``).
     """
 
     def __init__(self, on_progress=None):
@@ -305,7 +301,6 @@ class _ProgressStream(io.RawIOBase):
             return 0
         self._buf += data
         while b'\r' in self._buf or b'\n' in self._buf:
-            # Split on whichever delimiter comes first
             ri = self._buf.find(b'\r')
             ni = self._buf.find(b'\n')
             if ri == -1:
@@ -317,7 +312,6 @@ class _ProgressStream(io.RawIOBase):
             line = self._buf[:idx].decode('utf-8', errors='replace').strip()
             self._buf = self._buf[idx + 1:]
             if line and self._callback:
-                # Split "Phase: detail" onto two lines for narrow displays
                 if ':' in line:
                     phase, _, detail = line.partition(':')
                     line = f'{phase}:\n{detail.strip()}'
@@ -331,16 +325,15 @@ class _ProgressStream(io.RawIOBase):
 def clone_repo(remote_url, dest_dir, username, token, on_progress=None):
     """
     Clone remote_url into dest_dir.
-    Returns (lift_path_or_None, log_string).
-    *on_progress* is called with status strings from the git protocol.
+    Returns (lift_path_or_None, Result).
+    *on_progress* is called with raw status strings from the git protocol.
     """
     _ensure_ssl()
     from dulwich import porcelain
-    log = []
+    result = Result()
 
     errstream = _ProgressStream(on_progress) if on_progress else io.BytesIO()
 
-    # Remove any previous dest so clone starts fresh
     if os.path.exists(dest_dir):
         import shutil
         shutil.rmtree(dest_dir)
@@ -351,85 +344,80 @@ def clone_repo(remote_url, dest_dir, username, token, on_progress=None):
             username=username, password=token,
             errstream=errstream,
         )
-        log.append(_tr('Cloned to {dir}').format(dir=dest_dir))
+        result.add(S.CLONED, dir=dest_dir)
     except Exception as exc:
-        log.append(_tr('Clone failed: {error}').format(error=exc))
-        return None, '\n'.join(log)
+        result.add(S.CLONE_FAILED, error=str(exc))
+        return None, result
 
     lift_path = _find_lift(dest_dir)
     if lift_path:
-        log.append(_tr('Found: {file}').format(file=os.path.basename(lift_path)))
+        result.add(S.LIFT_FOUND, file=os.path.basename(lift_path))
     else:
-        log.append(_tr('No .lift file found in cloned repository.'))
-    return lift_path, '\n'.join(log)
+        result.add(S.LIFT_NOT_FOUND)
+    return lift_path, result
 
 
 def pull_repo(project_dir, username, token):
-    """
-    Pull (fetch + fast-forward) from origin. Returns log string.
-    """
+    """Pull (fetch + fast-forward) from origin. Returns Result."""
     _ensure_ssl()
     from dulwich import porcelain
-    log = []
+    result = Result()
     repo = _get_repo(project_dir)
     if repo is None:
-        return _tr('Not a git repository.')
+        result.add(S.NOT_A_REPO)
+        return result
     try:
         remote_url = repo.get_config().get(
             (b'remote', b'origin'), b'url'
         ).decode('utf-8')
     except KeyError:
-        return _tr('No remote configured. Publish the project first.')
+        result.add(S.NO_REMOTE)
+        return result
     try:
         porcelain.pull(
             repo, remote_url,
             username=username, password=token,
             errstream=io.BytesIO(),
         )
-        log.append(_tr('Pulled latest changes from origin.'))
+        result.add(S.PULLED)
     except Exception as exc:
-        log.append(_tr('Pull failed: {error}').format(error=exc))
-    return '\n'.join(log)
+        result.add(S.PULL_FAILED, error=str(exc))
+    return result
 
 
 def commit_and_push_branch(project_dir, username, token, contributor_name):
-    """
-    Stage all changes, commit, and push to contrib/<contributor_name>.
-    The reviewer merges via a pull request on the hosting service.
-    Returns log string.
-    """
+    """Stage, commit, and push to contrib/<contributor_name>. Returns Result."""
     _ensure_ssl()
     from dulwich import porcelain
-    log = []
+    result = Result()
     repo = _get_repo(project_dir)
     if repo is None:
-        return _tr('Not a git repository. Publish the project first.')
+        result.add(S.NOT_A_REPO)
+        return result
     try:
         remote_url = repo.get_config().get(
             (b'remote', b'origin'), b'url'
         ).decode('utf-8')
     except KeyError:
-        return _tr('No remote configured. Publish the project first.')
+        result.add(S.NO_REMOTE)
+        return result
 
     safe = (contributor_name.lower()
             .replace(' ', '_').replace('/', '_') or 'contributor')
     branch_name = f'contrib/{safe}'
     branch_ref = _enc(f'refs/heads/{branch_name}')
 
-    # Create / switch to contrib branch
     try:
         if branch_ref not in repo.refs:
             repo.refs[branch_ref] = repo.head()
         repo.refs.set_symbolic_ref(b'HEAD', branch_ref)
-        log.append(_tr('On branch {branch}.').format(branch=branch_name))
+        result.add(S.ON_BRANCH, branch=branch_name)
     except Exception as exc:
-        log.append(_tr('Branch error: {error}').format(error=exc))
+        result.add(S.BRANCH_ERROR, error=str(exc))
 
-    # Stage all
     _stage_all(repo, project_dir)
-    log.append(_tr('Staged all changes.'))
+    result.add(S.STAGED_ALL)
 
-    # Commit
     author = _default_author(contributor_name)
     committer = _app_committer()
     try:
@@ -438,15 +426,14 @@ def commit_and_push_branch(project_dir, username, token, contributor_name):
             message=_enc(f'Audio recordings by {contributor_name}'),
             author=author, committer=committer,
         )
-        log.append(_tr('Committed.'))
+        result.add(S.COMMITTED)
     except Exception as exc:
         msg = str(exc).lower()
         if 'nothing' in msg or 'empty' in msg or 'no changes' in msg:
-            log.append(_tr('Nothing new to commit.'))
+            result.add(S.NOTHING_TO_COMMIT)
         else:
-            log.append(_tr('Commit: {error}').format(error=exc))
+            result.add(S.COMMIT_FAILED, error=str(exc))
 
-    # Push
     refspec = _enc(f'refs/heads/{branch_name}:refs/heads/{branch_name}')
     try:
         porcelain.push(
@@ -454,32 +441,30 @@ def commit_and_push_branch(project_dir, username, token, contributor_name):
             username=username, password=token,
             errstream=io.BytesIO(),
         )
-        log.append(_tr('Pushed {branch}.').format(branch=branch_name))
-        log.append(_tr('Open your git host to create a pull request.'))
+        result.add(S.PUSHED, branch=branch_name)
+        result.add(S.OPEN_PR)
     except Exception as exc:
-        log.append(_tr('Push failed: {error}').format(error=exc))
+        result.add(S.PUSH_FAILED, error=str(exc))
 
-    return '\n'.join(log)
+    return result
 
 
 def sync_repo(project_dir, username, token, contributor_name):
-    """
-    Pull from origin, then stage+commit+push local changes.
-    Combines pull and push into a single operation for the Sync button.
-    Returns log string.
-    """
+    """Pull + commit + push. Returns Result."""
     _ensure_ssl()
     from dulwich import porcelain
-    log = []
+    result = Result()
     repo = _get_repo(project_dir)
     if repo is None:
-        return _tr('Not a git repository. Publish the project first.')
+        result.add(S.NOT_A_REPO)
+        return result
     try:
         remote_url = repo.get_config().get(
             (b'remote', b'origin'), b'url'
         ).decode('utf-8')
     except KeyError:
-        return _tr('No remote configured. Publish the project first.')
+        result.add(S.NO_REMOTE)
+        return result
 
     # Pull
     try:
@@ -488,17 +473,15 @@ def sync_repo(project_dir, username, token, contributor_name):
             username=username, password=token,
             errstream=io.BytesIO(),
         )
-        log.append(_tr('Pulled latest changes.'))
+        result.add(S.PULLED)
     except Exception as exc:
         if '403' in str(exc):
-            log.append(_tr('Pull failed: {error}').format(error=_diagnose_403(token, remote_url)))
-            return '\n'.join(log)  # no point continuing
-        log.append(_tr('Pull failed: {error}').format(error=exc))
+            result.statuses.append(diagnose_403(token, remote_url))
+            return result  # no point continuing on auth failure
+        result.add(S.PULL_FAILED, error=str(exc))
 
-    # Stage all
     _stage_all(repo, project_dir)
 
-    # Commit only if there are staged changes
     st = porcelain.status(repo)
     has_staged = any(st.staged.get(k) for k in ('add', 'modify', 'delete'))
     if has_staged:
@@ -510,13 +493,12 @@ def sync_repo(project_dir, username, token, contributor_name):
                 message=_enc(f'Audio recordings by {contributor_name}'),
                 author=author, committer=committer,
             )
-            log.append(_tr('Committed local changes.'))
+            result.add(S.COMMITTED_LOCAL)
         except Exception as exc:
-            log.append(_tr('Commit: {error}').format(error=exc))
+            result.add(S.COMMIT_FAILED, error=str(exc))
     else:
-        log.append(_tr('No local changes to commit.'))
+        result.add(S.NOTHING_TO_COMMIT)
 
-    # Push
     try:
         branch = porcelain.active_branch(repo).decode('utf-8', errors='replace')
     except Exception:
@@ -528,18 +510,18 @@ def sync_repo(project_dir, username, token, contributor_name):
             username=username, password=token,
             errstream=io.BytesIO(),
         )
-        log.append(_tr('Pushed to {branch}.').format(branch=branch))
+        result.add(S.PUSHED, branch=branch)
     except Exception as exc:
         if '403' in str(exc):
-            log.append(_tr('Push failed: {error}').format(error=_diagnose_403(token, remote_url)))
+            result.statuses.append(diagnose_403(token, remote_url))
         else:
-            log.append(_tr('Push failed: {error}').format(error=exc))
+            result.add(S.PUSH_FAILED, error=str(exc))
 
-    return '\n'.join(log)
+    return result
 
 
 def _stage_audio(repo, project_dir):
-    """Stage only new/modified audio files (audio/ dir and .lift file changes)."""
+    """Stage only new/modified audio files (audio/ + images/ + .lift)."""
     from dulwich import porcelain
     status = porcelain.status(repo)
     paths = []
@@ -575,29 +557,28 @@ def _stage_audio(repo, project_dir):
 
 def commit_audio_and_sync(project_dir, contributor_name, username, token):
     """Stage + commit audio files, then sync if internet is available.
-
-    Designed to be called in a background thread on page transitions.
-    Returns log string (for debugging; not shown to user).
-    """
+    Returns Result."""
     from dulwich import porcelain
+    result = Result()
     repo = _get_repo(project_dir)
     if repo is None:
-        return _tr('No repo')
+        result.add(S.NO_REPO)
+        return result
 
-    # Stage audio and .lift changes only
     n = _stage_audio(repo, project_dir)
     if n == 0:
         # Nothing new to commit; still try to sync if online
         if _has_internet():
             try:
                 _ensure_ssl()
-                remote_url = repo.get_config().get(
+                repo.get_config().get(
                     (b'remote', b'origin'), b'url'
                 ).decode('utf-8')
                 return sync_repo(project_dir, username, token, contributor_name)
             except Exception:
                 pass
-        return _tr('No new audio')
+        result.add(S.NO_AUDIO)
+        return result
 
     # Commit
     author = _default_author(contributor_name)
@@ -609,11 +590,12 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
             author=author, committer=committer,
         )
     except Exception as exc:
-        return _tr('Commit failed: {error}').format(error=exc)
+        result.add(S.COMMIT_FAILED, error=str(exc))
+        return result
 
-    # Sync if there's internet
     if not _has_internet():
-        return _tr('Committed locally (offline)')
+        result.add(S.COMMITTED_OFFLINE)
+        return result
 
     try:
         _ensure_ssl()
@@ -621,7 +603,8 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
             (b'remote', b'origin'), b'url'
         ).decode('utf-8')
     except KeyError:
-        return _tr('Committed (no remote configured)')
+        result.add(S.COMMITTED_NO_REMOTE)
+        return result
 
     try:
         branch = porcelain.active_branch(repo).decode('utf-8', errors='replace')
@@ -637,7 +620,9 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
         )
     except Exception as exc:
         if '403' in str(exc):
-            return _tr('Committed locally, sync failed: {error}').format(error=_diagnose_403(token, remote_url))
+            # Local commit is safe; surface the access issue
+            result.statuses.append(diagnose_403(token, remote_url))
+            return result
         # Non-fatal — local commit is safe, push may still work
         print(f'[auto-sync] pull warning: {exc}')
 
@@ -649,8 +634,11 @@ def commit_audio_and_sync(project_dir, contributor_name, username, token):
             username=username, password=token,
             errstream=io.BytesIO(),
         )
-        return _tr('Committed and pushed {n} file(s)').format(n=n)
+        result.add(S.COMMITTED_AND_PUSHED, n=n)
     except Exception as exc:
         if '403' in str(exc):
-            return _tr('Committed locally, push failed: {error}').format(error=_diagnose_403(token, remote_url))
-        return _tr('Committed locally, push failed: {error}').format(error=exc)
+            result.statuses.append(diagnose_403(token, remote_url))
+        else:
+            result.add(S.PUSH_FAILED, error=str(exc))
+
+    return result

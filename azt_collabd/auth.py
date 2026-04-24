@@ -8,8 +8,9 @@ import json
 import time
 
 from appinfo import APP_SLUG
-from i18n import _ as _tr
 
+from . import status as S
+from .status import Status, AuthError
 from .net import _ensure_ssl
 
 # ── GitHub App configuration ─────────────────────────────────────────────────
@@ -83,12 +84,12 @@ def device_flow_poll(device_code, interval=5, expires_in=900):
             interval = result.get('interval', interval + 5)
             continue
         elif error == 'expired_token':
-            raise RuntimeError(_tr('Authorization expired. Please try again.'))
+            raise AuthError(Status(S.AUTH_EXPIRED))
         elif error == 'access_denied':
-            raise RuntimeError(_tr('Authorization denied by user.'))
+            raise AuthError(Status(S.AUTH_DENIED))
         else:
             raise RuntimeError(f'Device flow error: {error}')
-    raise RuntimeError(_tr('Authorization timed out.'))
+    raise AuthError(Status(S.AUTH_TIMEOUT))
 
 
 def refresh_access_token(refresh_token):
@@ -199,27 +200,34 @@ def app_install_url(installation_id=None):
     return f'https://github.com/apps/{GITHUB_APP_NAME}/installations/new'
 
 
-def _diagnose_403(token, remote_url):
-    """Diagnose a 403 push/pull failure. Returns a human-readable message."""
+def diagnose_403(token, remote_url):
+    """Diagnose a 403 push/pull failure. Returns a Status carrying the
+    code (AUTH_REQUIRED / APP_NOT_INSTALLED / REPO_NOT_AUTHORIZED /
+    ACCESS_DENIED) and any params the UI needs to show a link."""
     if not token:
-        return _tr('Not connected to GitHub. Go to Setup > Connect to GitHub.')
+        return Status(S.AUTH_REQUIRED)
     info = check_app_installed(token)
     if not info['installed']:
-        return (f'App not installed. Visit {GITHUB_APP_INSTALL_URL} '
-                f'and select "All repositories".')
-    # App is installed — check if this repo is accessible
+        return Status(S.APP_NOT_INSTALLED,
+                      {'url': GITHUB_APP_INSTALL_URL})
     install_id = info['installation_id']
     if not info['all_repos']:
-        # Extract owner/repo from remote URL
         import re
         m = re.search(r'github\.com[/:]([^/]+)/([^/.]+)', remote_url)
         if m:
             owner, repo_name = m.group(1), m.group(2)
             if not check_repo_in_installation(token, install_id, owner, repo_name):
                 settings_url = app_install_url(install_id)
-                return (f'App not authorized for {owner}/{repo_name}. '
-                        f'Add it at {settings_url}')
-    return f'Access denied (403). Check app permissions at {app_install_url(install_id)}'
+                return Status(S.REPO_NOT_AUTHORIZED,
+                              {'owner_repo': f'{owner}/{repo_name}',
+                               'url': settings_url})
+    return Status(S.ACCESS_DENIED,
+                  {'url': app_install_url(install_id)})
+
+
+# Backward-compatible name for any remaining internal callers (deleted
+# later in this migration).
+_diagnose_403 = diagnose_403
 
 
 def add_collaborator(owner, repo_name, collaborator, token):

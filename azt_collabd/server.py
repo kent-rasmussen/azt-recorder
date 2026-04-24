@@ -104,10 +104,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         token = body.get('token', '')
         contributor = body.get('contributor', 'Recorder')
         try:
-            log = _sync_repo(project_dir, username, token, contributor)
+            res = _sync_repo(project_dir, username, token, contributor)
         except Exception as ex:
             return self._send_json(500, {"ok": False, "error": str(ex)})
-        return self._send_json(200, {"ok": True, "log": log})
+        return self._send_json(200, {"ok": True, "result": res.to_dict()})
 
 
 class _ThreadingHTTPServer(socketserver.ThreadingMixIn,

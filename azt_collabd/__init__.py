@@ -21,6 +21,8 @@ from . import net
 from . import auth
 from . import store
 from . import repo
+from . import status
+from .status import Status, Result, AuthError
 
 # Convenience re-exports (match the surface of the old collab.py module)
 from .net import _find_ca_bundle, _patch_dulwich_ssl, _ensure_gitconfig, \
@@ -30,7 +32,7 @@ from .auth import (
     GITHUB_APP_INSTALL_URL,
     device_flow_start, device_flow_poll, refresh_access_token,
     get_github_username, check_app_installed, check_repo_in_installation,
-    app_install_url, add_collaborator, _diagnose_403,
+    app_install_url, add_collaborator, diagnose_403, _diagnose_403,
 )
 from .store import save_tokens, get_valid_token
 from .repo import (

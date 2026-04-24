@@ -3204,12 +3204,18 @@ class CollabScreen(Screen):
             lbl.text = text
 
     def _run(self, busy_msg, func, *args):
-        """Show busy_msg, run func(*args) in a thread, show result."""
+        """Show busy_msg, run func(*args) in a thread, show result.
+        Accepts a str or a Result — Results are translated for display."""
         self._set_log(busy_msg)
         import threading
+        from azt_collab_client import translate_result, Result as _Result
         def _worker():
             result = func(*args)
-            Clock.schedule_once(lambda dt: self._set_log(result or ''), 0)
+            if isinstance(result, _Result):
+                text = translate_result(result)
+            else:
+                text = result or ''
+            Clock.schedule_once(lambda dt: self._set_log(text), 0)
         threading.Thread(target=_worker, daemon=True).start()
 
     # ── Device flow ────────────────────────────────────────────────────────
@@ -3322,7 +3328,12 @@ class CollabScreen(Screen):
             Clock.schedule_once(_done, 0)
 
         except Exception as ex:
-            err_msg = str(ex)
+            from azt_collabd.status import AuthError
+            from azt_collab_client import translate_status
+            if isinstance(ex, AuthError):
+                err_msg = translate_status(ex.status)
+            else:
+                err_msg = str(ex)
             def _err(dt):
                 lbl = self.ids.get('device_code_label')
                 if lbl:
@@ -3837,7 +3848,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.22.2'
+__version__ = '1.22.3'
 
 
 class LIFTRecorderApp(App):
@@ -4102,10 +4113,12 @@ class LIFTRecorderApp(App):
                 dest = os.path.join(self.user_data_dir, 'projects', repo_name)
                 git_user, token = self._get_sync_credentials()
                 from collab import clone_repo
-                lift_path, log = clone_repo(clone_url, dest, git_user, token)
+                from azt_collab_client import translate_result
+                lift_path, result = clone_repo(clone_url, dest, git_user, token)
                 if lift_path:
                     Clock.schedule_once(lambda dt: self.load_lift(lift_path), 0)
                 else:
+                    log = translate_result(result)
                     Clock.schedule_once(
                         lambda dt: self._show_error(log), 0)
                 return
@@ -4685,9 +4698,10 @@ class LIFTRecorderApp(App):
         def _worker():
             try:
                 from collab import init_repo
+                from azt_collab_client import translate_result
                 result = init_repo(self.recorder.db.dir, remote_url,
                                    git_user, token, 'main', name)
-                print(f'[auto-publish] {result}')
+                print(f'[auto-publish] {translate_result(result)}')
             except Exception as ex:
                 print(f'[auto-publish] error: {ex}')
         threading.Thread(target=_worker, daemon=True).start()
@@ -4761,14 +4775,16 @@ class LIFTRecorderApp(App):
         import threading
         def _worker():
             try:
-                from azt_collab_client import sync_repo
+                from azt_collab_client import sync_repo, translate_result, S
                 result = sync_repo(project_dir, git_user, token, name)
-                print(f'[auto-sync] {result}')
-                if 'pushed' in result.lower() or 'pulled' in result.lower():
+                print(f'[auto-sync] {translate_result(result)}')
+                pushed = result.has(S.PUSHED) or result.has(S.COMMITTED_AND_PUSHED)
+                pulled = result.has(S.PULLED)
+                if pushed or pulled:
                     Clock.schedule_once(lambda dt: self._record_sync_time(), 0)
-                    if 'pushed' in result.lower():
+                    if pushed:
                         self._mark_gh_app_installed()
-                if 'pulled' in result.lower():
+                if pulled:
                     Clock.schedule_once(
                         lambda dt: self._reload_and_restore(saved_guid), 0)
             except Exception as ex:
@@ -4898,18 +4914,18 @@ class LIFTRecorderApp(App):
         prefs = self._load_prefs()
         name = prefs.get('collab_name', '') or 'Recorder'
         git_user, token = self._get_sync_credentials()
-        from azt_collab_client import sync_repo
+        from azt_collab_client import sync_repo, translate_result, S
         import threading
 
         saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''
         project_dir = self.recorder.db.dir
 
         def _on_sync_done(result):
-            print(f'Sync: {result}')
-            if result and 'not a git repository' in result.lower():
+            print(f'Sync: {translate_result(result)}')
+            if result.has(S.NOT_A_REPO):
                 Clock.schedule_once(lambda dt: self.go_collab(), 0)
                 return
-            if 'Pushed' in (result or ''):
+            if result.has(S.PUSHED) or result.has(S.COMMITTED_AND_PUSHED):
                 self._record_sync_time()
                 self._mark_gh_app_installed()
 
@@ -5207,20 +5223,31 @@ class LIFTRecorderApp(App):
 
             def _worker():
                 try:
+                    from azt_collab_client import translate_result
                     # Try with credentials first
-                    lift_path, log = clone_repo(
+                    lift_path, result = clone_repo(
                         clone_url, dest, git_user, token,
                         on_progress=_on_progress)
-                    # If credential error, retry without credentials (public repo)
-                    if not lift_path and 'credential' in log.lower():
+                    # If the failure smells like auth, retry without creds
+                    # (public repo) before giving up
+                    def _looks_like_auth(r):
+                        for s in r.statuses:
+                            if s.code == 'CLONE_FAILED' and (
+                                'credential' in s.params.get('error', '').lower()
+                                or 'auth' in s.params.get('error', '').lower()
+                            ):
+                                return True
+                        return False
+                    if not lift_path and _looks_like_auth(result):
                         print('[clone] retrying without credentials...')
-                        lift_path, log = clone_repo(
+                        lift_path, result = clone_repo(
                             clone_url, dest, '', '',
                             on_progress=_on_progress)
+                    log = translate_result(result)
                     print(f'[clone] result: {log}')
                     if lift_path:
                         Clock.schedule_once(lambda dt: self.load_lift(lift_path), 0)
-                    elif 'credential' in log.lower() or 'auth' in log.lower():
+                    elif _looks_like_auth(result):
                         Clock.schedule_once(
                             lambda dt: (self._dismiss_loading_overlay(),
                                         self._show_collab_prompt()), 0)

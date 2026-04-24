@@ -1,14 +1,15 @@
 """
 azt_collab_client — thin client library for azt_collabd.
 
-Step 2 scope: exposes a single real call (`sync_repo`) that routes through
-the loopback HTTP transport. Signature matches the old
-``azt_collabd.repo.sync_repo`` so callers in main.py can swap the import
-without changing call sites. Broader API (open_project, request_sync,
-project_status, device-flow proxying, etc.) arrives in later migration
-steps.
+Ops that go through the server return a ``Result`` (structured status
+codes + params); the caller calls ``translate_result(result)`` for
+display. ``Result.has(S.PUSHED)`` etc. is the way to drive business
+logic — no more substring matching on log strings.
 """
 
+from . import status as S
+from .status import Status, Result
+from .translate import translate_status, translate_result, set_translator
 from .rpc import call, health, ServerUnavailable
 
 
@@ -28,12 +29,11 @@ def is_online():
 
 
 def sync_repo(project_dir, username, token, contributor):
-    """Route a sync job to azt_collabd. Returns a human-readable log
-    string (same contract as azt_collabd.repo.sync_repo).
+    """Route a sync job to azt_collabd. Returns a ``Result``.
 
-    On transport failure, returns an error message prefixed with
-    ``'Sync service unavailable:'`` — callers already display a log
-    label, so existing error-handling paths in main.py surface it.
+    On transport failure, returns a Result containing a single synthetic
+    Status — callers can still call ``translate_result`` to get a human
+    message, or check for ``'SERVER_UNAVAILABLE'`` via ``result.has``.
     """
     try:
         resp = call('POST', '/v1/sync', {
@@ -43,13 +43,17 @@ def sync_repo(project_dir, username, token, contributor):
             'contributor': contributor,
         })
     except ServerUnavailable as ex:
-        return f'Sync service unavailable: {ex}'
+        return Result(statuses=[Status(
+            'SERVER_UNAVAILABLE', {'error': str(ex)})])
     if resp.get('ok'):
-        return resp.get('log', '')
-    return f'Sync service error: {resp.get("error", "unknown")}'
+        return Result.from_dict(resp.get('result') or {})
+    return Result(statuses=[Status(
+        'SERVER_ERROR', {'error': resp.get('error', 'unknown')})])
 
 
 __all__ = [
     'configure', 'is_online', 'sync_repo',
+    'Status', 'Result', 'S',
+    'translate_status', 'translate_result', 'set_translator',
     'ServerUnavailable',
 ]
