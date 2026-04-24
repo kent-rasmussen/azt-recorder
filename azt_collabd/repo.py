@@ -14,8 +14,13 @@ import os
 from . import config as _config
 from . import status as S
 from .status import Result, Status
+from .locks import project_lock, LockTimeout
 from .net import _ensure_ssl, _has_internet
 from .auth import add_collaborator, diagnose_403
+
+
+def _busy_result(working_dir):
+    return Result().add(S.BUSY, working_dir=os.path.abspath(working_dir))
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +217,16 @@ def init_repo(project_dir, remote_url, username, token,
     """Initialize a git repo, commit everything, set remote, push.
     Returns a Result."""
     _ensure_ssl()
+    try:
+        with project_lock(project_dir):
+            return _init_repo_locked(project_dir, remote_url, username,
+                                     token, branch, contributor_name)
+    except LockTimeout:
+        return _busy_result(project_dir)
+
+
+def _init_repo_locked(project_dir, remote_url, username, token,
+                      branch, contributor_name):
     from dulwich import porcelain
     result = Result()
 
@@ -329,6 +344,15 @@ def clone_repo(remote_url, dest_dir, username, token, on_progress=None):
     *on_progress* is called with raw status strings from the git protocol.
     """
     _ensure_ssl()
+    try:
+        with project_lock(dest_dir):
+            return _clone_repo_locked(remote_url, dest_dir,
+                                      username, token, on_progress)
+    except LockTimeout:
+        return None, _busy_result(dest_dir)
+
+
+def _clone_repo_locked(remote_url, dest_dir, username, token, on_progress):
     from dulwich import porcelain
     result = Result()
 
@@ -360,6 +384,14 @@ def clone_repo(remote_url, dest_dir, username, token, on_progress=None):
 def pull_repo(project_dir, username, token):
     """Pull (fetch + fast-forward) from origin. Returns Result."""
     _ensure_ssl()
+    try:
+        with project_lock(project_dir):
+            return _pull_repo_locked(project_dir, username, token)
+    except LockTimeout:
+        return _busy_result(project_dir)
+
+
+def _pull_repo_locked(project_dir, username, token):
     from dulwich import porcelain
     result = Result()
     repo = _get_repo(project_dir)
@@ -388,6 +420,16 @@ def pull_repo(project_dir, username, token):
 def commit_and_push_branch(project_dir, username, token, contributor_name):
     """Stage, commit, and push to contrib/<contributor_name>. Returns Result."""
     _ensure_ssl()
+    try:
+        with project_lock(project_dir):
+            return _commit_and_push_branch_locked(
+                project_dir, username, token, contributor_name)
+    except LockTimeout:
+        return _busy_result(project_dir)
+
+
+def _commit_and_push_branch_locked(project_dir, username, token,
+                                    contributor_name):
     from dulwich import porcelain
     result = Result()
     repo = _get_repo(project_dir)
@@ -452,6 +494,15 @@ def commit_and_push_branch(project_dir, username, token, contributor_name):
 def sync_repo(project_dir, username, token, contributor_name):
     """Pull + commit + push. Returns Result."""
     _ensure_ssl()
+    try:
+        with project_lock(project_dir):
+            return _sync_repo_locked(project_dir, username, token,
+                                     contributor_name)
+    except LockTimeout:
+        return _busy_result(project_dir)
+
+
+def _sync_repo_locked(project_dir, username, token, contributor_name):
     from dulwich import porcelain
     result = Result()
     repo = _get_repo(project_dir)
@@ -558,6 +609,16 @@ def _stage_audio(repo, project_dir):
 def commit_audio_and_sync(project_dir, contributor_name, username, token):
     """Stage + commit audio files, then sync if internet is available.
     Returns Result."""
+    try:
+        with project_lock(project_dir):
+            return _commit_audio_and_sync_locked(
+                project_dir, contributor_name, username, token)
+    except LockTimeout:
+        return _busy_result(project_dir)
+
+
+def _commit_audio_and_sync_locked(project_dir, contributor_name,
+                                  username, token):
     from dulwich import porcelain
     result = Result()
     repo = _get_repo(project_dir)

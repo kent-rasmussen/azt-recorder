@@ -9,6 +9,7 @@ logic — no more substring matching on log strings.
 
 from . import status as S
 from .status import Status, Result
+from .projects import Project, ProjectStatus
 from .translate import translate_status, translate_result, set_translator
 from .rpc import call, health, ServerUnavailable
 
@@ -90,14 +91,83 @@ def migrate_from_prefs(prefs_path):
     return {k: v for k, v in resp.items() if k != 'ok'}
 
 
-# ── Sync ────────────────────────────────────────────────────────────────────
+# ── Projects API ────────────────────────────────────────────────────────────
+
+def list_projects():
+    """Return a list of registered Projects."""
+    try:
+        resp = call('GET', '/v1/projects')
+    except ServerUnavailable:
+        return []
+    if not resp.get('ok'):
+        return []
+    return [Project.from_dict(p) for p in resp.get('projects', [])]
+
+
+def open_project(langcode):
+    """Return the registered Project for *langcode*, or None."""
+    try:
+        resp = call('GET', f'/v1/projects/{langcode}')
+    except ServerUnavailable:
+        return None
+    if not resp.get('ok'):
+        return None
+    return Project.from_dict(resp.get('project', {}))
+
+
+def register_project(langcode, working_dir, lift_path='', remote_url=''):
+    """Tell the server about an existing project. Returns the Project."""
+    resp = call('POST', '/v1/projects/register', {
+        'langcode': langcode,
+        'working_dir': working_dir,
+        'lift_path': lift_path,
+        'remote_url': remote_url,
+    })
+    if not resp.get('ok'):
+        return None
+    return Project.from_dict(resp.get('project', {}))
+
+
+def project_status(langcode):
+    """Return a ProjectStatus for *langcode*, or None."""
+    try:
+        resp = call('GET', f'/v1/projects/{langcode}/status')
+    except ServerUnavailable:
+        return None
+    if not resp.get('ok'):
+        return None
+    return ProjectStatus.from_dict(resp)
+
+
+def sync_project(langcode, contributor):
+    """Sync the project identified by *langcode*. Returns Result."""
+    try:
+        resp = call('POST', f'/v1/projects/{langcode}/sync',
+                    {'contributor': contributor})
+    except ServerUnavailable as ex:
+        return Result(statuses=[Status(
+            'SERVER_UNAVAILABLE', {'error': str(ex)})])
+    if resp.get('ok'):
+        return Result.from_dict(resp.get('result') or {})
+    return Result(statuses=[Status(
+        'SERVER_ERROR', {'error': resp.get('error', 'unknown')})])
+
+
+def record_project_sync_time(langcode, timestamp=None):
+    body = {}
+    if timestamp is not None:
+        body['timestamp'] = float(timestamp)
+    try:
+        call('POST', f'/v1/projects/{langcode}/last_sync', body)
+    except ServerUnavailable:
+        pass
+
+
+# ── Sync (legacy, by project_dir) ───────────────────────────────────────────
 
 def sync_repo(project_dir, contributor):
-    """Route a sync job to azt_collabd. Returns a ``Result``.
-
-    Server reads the sync credentials from its own store — callers no
-    longer pass username/token. If the user hasn't connected to a host,
-    the Result contains an AUTH_REQUIRED status."""
+    """Legacy path: sync by project_dir. Prefer sync_project(langcode)
+    when the project is registered. Returns Result."""
     try:
         resp = call('POST', '/v1/sync', {
             'project_dir': project_dir,
@@ -117,8 +187,10 @@ __all__ = [
     'get_credentials_status', 'set_collab_host',
     'save_github_tokens', 'mark_github_app_installed',
     'save_gitlab_credentials', 'migrate_from_prefs',
+    'list_projects', 'open_project', 'register_project',
+    'project_status', 'sync_project', 'record_project_sync_time',
     'sync_repo',
-    'Status', 'Result', 'S',
+    'Status', 'Result', 'S', 'Project', 'ProjectStatus',
     'translate_status', 'translate_result', 'set_translator',
     'ServerUnavailable',
 ]

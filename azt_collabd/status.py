@@ -45,6 +45,7 @@ PULL_FAILED = 'PULL_FAILED'
 CLONE_FAILED = 'CLONE_FAILED'
 BRANCH_ERROR = 'BRANCH_ERROR'
 REMOTE_CREATE_FAILED = 'REMOTE_CREATE_FAILED'
+BUSY = 'BUSY'
 
 # ── 403 diagnosis ──────────────────────────────────────────────────────────
 AUTH_REQUIRED = 'AUTH_REQUIRED'

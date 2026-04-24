@@ -22,6 +22,7 @@ from . import net
 from . import auth
 from . import store
 from . import repo
+from . import projects
 from . import status
 from .config import configure
 from .status import Status, Result, AuthError

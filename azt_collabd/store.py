@@ -223,7 +223,8 @@ _LEGACY_GITLAB = {
 }
 _LEGACY_HOST = 'collab_host'
 # Obsolete / dead keys to also scrub from prefs.
-_LEGACY_DEAD = ('collab_username', 'collab_token')
+# last_sync moved to projects.json in step 7 (per-project).
+_LEGACY_DEAD = ('collab_username', 'collab_token', 'last_sync')
 
 
 def migrate_from_prefs(prefs_path):

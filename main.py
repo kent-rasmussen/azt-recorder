@@ -3848,7 +3848,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.22.5'
+__version__ = '1.22.7'
 
 
 class LIFTRecorderApp(App):
@@ -4631,6 +4631,9 @@ class LIFTRecorderApp(App):
         show_past = self._load_prefs().get('show_past_work', False)
         self.recorder.only_unrecorded = not show_past
         self.recorder.rebuild_queue()
+        # Register this project with the sync backend so future ops can
+        # be addressed by langcode.
+        self._register_current_project()
         sm = self.root.ids.sm
         sm.transition = SlideTransition(direction='left')
         sm.current = 'recorder'
@@ -4643,6 +4646,32 @@ class LIFTRecorderApp(App):
         # Warn if data isn't being backed up (no git remote)
         elif not self._project_has_remote():
             Clock.schedule_once(lambda dt: self._show_backup_warning(), 0.5)
+
+    def _register_current_project(self):
+        """Tell the backend about the project currently loaded. Returns the
+        langcode the backend is tracking it under (empty string on error)."""
+        if not self.recorder:
+            return ''
+        try:
+            from azt_collabd import projects as _projects
+            from azt_collab_client import register_project
+            working_dir = self.recorder.db.dir
+            lift_path = self.recorder.db.path
+            langcode = _projects.derive_langcode(working_dir, lift_path)
+            register_project(langcode, working_dir, lift_path)
+            self._current_langcode = langcode
+            return langcode
+        except Exception as ex:
+            print(f'[register_project] error: {ex}')
+            return ''
+
+    def _current_langcode_or_register(self):
+        """Return the cached langcode for the current project, registering
+        on demand if we haven't yet."""
+        code = getattr(self, '_current_langcode', '')
+        if code:
+            return code
+        return self._register_current_project()
 
     def _reload_and_restore(self, guid):
         """Reload the LIFT file and restore position to the entry with *guid*."""
@@ -4736,19 +4765,18 @@ class LIFTRecorderApp(App):
                 print(f'[auto-publish] error: {ex}')
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _record_sync_time(self):
-        """Save current time as last successful sync."""
-        import time
-        prefs = self._load_prefs()
-        prefs['last_sync'] = time.time()
-        self._save_prefs_dict(prefs)
-        Clock.schedule_once(lambda dt: self._update_sync_status(), 0)
-
     def _sync_status_text(self):
-        """Return human-readable sync age: '' if today, 'yesterday', '-N days'."""
-        import time, datetime
-        prefs = self._load_prefs()
-        ts = prefs.get('last_sync', 0)
+        """Return human-readable sync age for the current project:
+        '' if never, 'HH:MM' today, 'yesterday HH:MM', else 'N days ago HH:MM'."""
+        import datetime
+        langcode = getattr(self, '_current_langcode', '')
+        if not langcode:
+            return ''
+        from azt_collab_client import project_status
+        status = project_status(langcode)
+        if status is None:
+            return ''
+        ts = status.last_sync
         if not ts:
             return ''
         dt_sync = datetime.datetime.fromtimestamp(ts)
@@ -4783,20 +4811,22 @@ class LIFTRecorderApp(App):
             return
         prefs = self._load_prefs()
         name = prefs.get('collab_name', '') or 'Recorder'
-        project_dir = self.recorder.db.dir
+        langcode = self._current_langcode_or_register()
+        if not langcode:
+            return
         saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''
         import threading
         def _worker():
             try:
-                from azt_collab_client import sync_repo, translate_result, S
-                result = sync_repo(project_dir, name)
+                from azt_collab_client import sync_project, translate_result, S
+                result = sync_project(langcode, name)
                 if result.has(S.AUTH_REQUIRED):
                     return  # not configured yet — silent no-op
                 print(f'[auto-sync] {translate_result(result)}')
                 pushed = result.has(S.PUSHED) or result.has(S.COMMITTED_AND_PUSHED)
                 pulled = result.has(S.PULLED)
                 if pushed or pulled:
-                    Clock.schedule_once(lambda dt: self._record_sync_time(), 0)
+                    Clock.schedule_once(lambda dt: self._update_sync_status(), 0)
                     if pushed:
                         self._mark_gh_app_installed()
                 if pulled:
@@ -4928,11 +4958,13 @@ class LIFTRecorderApp(App):
             return
         prefs = self._load_prefs()
         name = prefs.get('collab_name', '') or 'Recorder'
-        from azt_collab_client import sync_repo, translate_result, S
+        langcode = self._current_langcode_or_register()
+        if not langcode:
+            return
+        from azt_collab_client import sync_project, translate_result, S
         import threading
 
         saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''
-        project_dir = self.recorder.db.dir
 
         def _on_sync_done(result):
             print(f'Sync: {translate_result(result)}')
@@ -4940,11 +4972,11 @@ class LIFTRecorderApp(App):
                 Clock.schedule_once(lambda dt: self.go_collab(), 0)
                 return
             if result.has(S.PUSHED) or result.has(S.COMMITTED_AND_PUSHED):
-                self._record_sync_time()
+                self._update_sync_status()
                 self._mark_gh_app_installed()
 
         def _worker():
-            result = sync_repo(project_dir, name)
+            result = sync_project(langcode, name)
             Clock.schedule_once(
                 lambda dt: self._reload_and_restore(saved_guid), 0)
             Clock.schedule_once(lambda dt: _on_sync_done(result), 0)
