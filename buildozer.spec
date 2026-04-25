@@ -16,10 +16,23 @@ requirements = python3,kivy==2.3.1,pillow,sounddevice,soundfile,numpy,dulwich,ce
 orientation = portrait
 fullscreen = 0
 
-android.permissions = INTERNET,RECORD_AUDIO,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE,CAMERA
+android.permissions = INTERNET,RECORD_AUDIO,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE,CAMERA,org.atoznback.AZT_COLLAB_ACCESS
+
+# AZT collab ContentProvider — exported behind a signature-level
+# permission so only suite-signed APKs can reach it.
+android.add_src = android/src/main/java
+# Custom permission declaration + provider element. The
+# manifest_extra_xml block is appended inside <manifest> by p4a's
+# template; manifest_application_extra_xml goes inside <application>.
+android.manifest_extra_xml = <permission android:name="org.atoznback.AZT_COLLAB_ACCESS" android:protectionLevel="signature" />
+android.manifest_application_extra_xml = <provider android:name="org.atoznback.aztcollab.AZTCollabProvider" android:authorities="org.atoznback.azt_recorder.aztcollab" android:exported="true" android:permission="org.atoznback.AZT_COLLAB_ACCESS" android:grantUriPermissions="true" />
 #android.api = 33
 android.minapi = 26
 android.archs = arm64-v8a, armeabi-v7a
+android.release_artifact = apk                                                                                                         
+android.signing.keystore = /path/to/azt-suite.keystore                                                                                 
+android.signing.key_alias = azt                                                                                                        
+
 p4a.branch = master
 p4a.hook = %(source.dir)s/../buildozer_tweaks/p4a_hook.py
 android.api = 36

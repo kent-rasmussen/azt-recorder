@@ -890,6 +890,13 @@ KV_TEMPLATE = '''
                         text: _('Publish')
                         normal_color: T.ACCENT
                         on_release: root.do_publish()
+                # ── Advanced ──────────────────────────────────────────────
+                SectionLabel:
+                    text: _('Advanced')
+                RecBtn:
+                    text: _('Open Sync Settings')
+                    normal_color: T.BTN_INACTIVE
+                    on_release: root.open_server_ui()
                 # ── Log ───────────────────────────────────────────────────
                 SectionLabel:
                     text: _('Last operation')
@@ -2077,7 +2084,7 @@ class ImagePickerScreen(Screen):
     def _auto_web_images(self, cell_h):
         """Background auto-fetch from web sources if internet available."""
         try:
-            from collab import _has_internet
+            from azt_collabd.net import _has_internet
             if not _has_internet():
                 return
         except Exception:
@@ -3181,6 +3188,13 @@ class CollabScreen(Screen):
         """Launch the standalone azt_collabd settings UI as a detached
         subprocess. Use this for advanced credential / project mgmt
         that lives in the server UI instead of the recorder."""
+        if platform == 'android':
+            # subprocess + bundled p4a interpreter is unreliable;
+            # the right path here is to deeplink into the installed
+            # AZT settings provider once the Android ContentProvider
+            # transport (azt_collabd_cleanup_drafts.xml) is wired up.
+            self._set_log(_tr('Sync settings UI is desktop-only for now.'))
+            return
         import subprocess
         import sys
         try:
@@ -3201,7 +3215,7 @@ class CollabScreen(Screen):
 
     def open_install_page(self):
         """Open the GitHub App installation page."""
-        from collab import GITHUB_APP_INSTALL_URL
+        from azt_collabd.auth import GITHUB_APP_INSTALL_URL
         import webbrowser
         webbrowser.open(GITHUB_APP_INSTALL_URL)
 
@@ -3252,7 +3266,7 @@ class CollabScreen(Screen):
         name_input = self.ids.get('name_input')
         if name_input:
             name_input.focus = False
-        from collab import GITHUB_APP_CLIENT_ID
+        from azt_collabd.auth import GITHUB_APP_CLIENT_ID
         if not GITHUB_APP_CLIENT_ID:
             self._set_log(_tr('GitHub App client_id not configured.'))
             return
@@ -3264,9 +3278,11 @@ class CollabScreen(Screen):
         threading.Thread(target=self._device_flow_worker, daemon=True).start()
 
     def _device_flow_worker(self):
-        from collab import device_flow_start, device_flow_poll, \
-            get_github_username, check_app_installed, \
-            app_install_url, GITHUB_APP_INSTALL_URL
+        from azt_collabd.auth import (
+            device_flow_start, device_flow_poll,
+            get_github_username, check_app_installed,
+            app_install_url, GITHUB_APP_INSTALL_URL,
+        )
         from azt_collab_client import save_github_tokens, \
             get_credentials_status
         app = App.get_running_app()
@@ -3428,7 +3444,7 @@ class CollabScreen(Screen):
             return
         # GitLab uses username + PAT directly; GitHub uses x-access-token
         git_user = user if host == 'gitlab' else 'x-access-token'
-        from collab import init_repo
+        from azt_collabd.repo import init_repo
         self._run(_tr('Publishing...'), init_repo,
                   app.recorder.db.dir, remote_url,
                   git_user, token,
@@ -3870,7 +3886,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.22.11'
+__version__ = '1.22.19'
 
 
 class LIFTRecorderApp(App):
@@ -3980,6 +3996,15 @@ class LIFTRecorderApp(App):
                     print('[app] activity result listener bound')
                 except Exception as ex:
                     print(f'[app] failed to bind activity result: {ex}')
+                    traceback.print_exc()
+                # Wire the AZTCollabProvider Java class to the daemon's
+                # dispatch table. No-op on platforms without pyjnius.
+                try:
+                    from azt_collabd.android_cp import service as _cp
+                    _cp.install_callbacks()
+                    print('[app] aztcollab provider callbacks installed')
+                except Exception as ex:
+                    print(f'[app] aztcollab provider install failed: {ex}')
                     traceback.print_exc()
             # Handle Android back button / ESC key
             Window.bind(on_keyboard=self._on_back_button)
@@ -4143,7 +4168,7 @@ class LIFTRecorderApp(App):
                 repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')
                 dest = os.path.join(self.user_data_dir, 'projects', repo_name)
                 git_user, token = self._clone_credentials()
-                from collab import clone_repo
+                from azt_collabd.repo import clone_repo
                 from azt_collab_client import translate_result
                 lift_path, result = clone_repo(clone_url, dest, git_user, token)
                 if lift_path:
@@ -4778,7 +4803,7 @@ class LIFTRecorderApp(App):
         import threading
         def _worker():
             try:
-                from collab import init_repo
+                from azt_collabd.repo import init_repo
                 from azt_collab_client import translate_result
                 result = init_repo(self.recorder.db.dir, remote_url,
                                    git_user, token, 'main', name)
@@ -4840,8 +4865,15 @@ class LIFTRecorderApp(App):
         if not langcode:
             return
         try:
-            from azt_collab_client import request_sync
+            from azt_collab_client import request_sync, ServerUnavailable
             request_sync(langcode, name)
+        except ServerUnavailable as ex:
+            print(f'[auto-sync] sync service unavailable: {ex}')
+            Clock.schedule_once(
+                lambda dt: self._show_error(
+                    _tr('Sync service unavailable: {error}')
+                    .format(error=ex)), 0)
+            return
         except Exception as ex:
             print(f'[auto-sync] error: {ex}')
             return
@@ -5275,7 +5307,7 @@ class LIFTRecorderApp(App):
 
             self._show_loading_overlay(_tr('Cloning repository...'))
             import threading
-            from collab import clone_repo
+            from azt_collabd.repo import clone_repo
 
             def _on_progress(line):
                 Clock.schedule_once(

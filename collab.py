@@ -1,43 +1,31 @@
 """
-Compatibility shim.
+Tombstone — the legacy ``collab`` shim has been retired.
 
-All collaboration logic has moved to the ``azt_collabd`` package. This
-module stays as a re-export so existing callers in main.py keep working
-unchanged. New code should import from ``azt_collabd`` directly.
+Importers should use the canonical paths:
 
-The four ``GITHUB_APP_*`` legacy constants resolve dynamically via
-``__getattr__`` so they pick up any ``azt_collabd.configure()`` call that
-happens after this module is imported.
+    from azt_collabd.net    import _has_internet
+    from azt_collabd.auth   import (
+        device_flow_start, device_flow_poll, get_github_username,
+        check_app_installed, app_install_url,
+        GITHUB_APP_CLIENT_ID, GITHUB_APP_NAME,
+        GITHUB_COLLABORATOR, GITHUB_APP_INSTALL_URL,
+    )
+    from azt_collabd.repo   import (
+        init_repo, clone_repo, pull_repo, sync_repo,
+        commit_and_push_branch, commit_audio_and_sync,
+        repo_status_summary,
+    )
+    from azt_collabd.status import Status, Result, AuthError
+    from azt_collabd.store  import (
+        save_tokens, get_valid_token, get_sync_credentials,
+        get_credentials_status,
+    )
+
+This file can be deleted once you've grepped to confirm nothing in
+your tree still imports from it.
 """
 
-from azt_collabd import auth as _auth  # noqa: F401
-from azt_collabd.net import (  # noqa: F401
-    _find_ca_bundle, _patch_dulwich_ssl, _ensure_gitconfig, _ensure_ssl,
-    _has_internet,
-)
-from azt_collabd.auth import (  # noqa: F401
-    device_flow_start, device_flow_poll, refresh_access_token,
-    get_github_username, check_app_installed, check_repo_in_installation,
-    app_install_url, add_collaborator, diagnose_403, _diagnose_403,
-)
-from azt_collabd.status import (  # noqa: F401
-    Status, Result, AuthError,
-)
-from azt_collabd.store import (  # noqa: F401
-    save_tokens, get_valid_token,
-)
-from azt_collabd.repo import (  # noqa: F401
-    _enc, _bytes_path, _find_lift, _get_repo, _stage_all,
-    _default_author, _app_committer, _ensure_remote_repo,
-    _ProgressStream, _stage_audio,
-    repo_status_summary, init_repo, clone_repo, pull_repo,
-    commit_and_push_branch, sync_repo, commit_audio_and_sync,
-)
-
-
-def __getattr__(name):
-    if name in ('GITHUB_APP_CLIENT_ID', 'GITHUB_APP_NAME',
-                'GITHUB_COLLABORATOR', 'GITHUB_APP_INSTALL_URL'):
-        return getattr(_auth, name)
-    raise AttributeError(
-        f'module {__name__!r} has no attribute {name!r}')
+raise ImportError(
+    "the legacy 'collab' module has been retired; "
+    "import from azt_collabd.* instead "
+    "(see collab.py docstring for the mapping)")
