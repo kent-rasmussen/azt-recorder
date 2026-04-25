@@ -30,6 +30,7 @@ import sys
 import threading
 
 from . import projects
+from . import scheduler
 from . import store
 from .net import _has_internet
 from .paths import azt_home, server_info_path
@@ -37,7 +38,7 @@ from .repo import sync_repo as _sync_repo, repo_status_summary as _repo_status
 from .status import Result, Status
 from . import status as S
 
-_VERSION = "0.4.0"
+_VERSION = "0.5.0"
 
 # Kept alive for the server's lifetime so the flock on server.lock stays held.
 _server_lock_fd = None
@@ -126,6 +127,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 return self._get_project(parts[3])
             if len(parts) == 5 and parts[4] == 'status':
                 return self._project_status(parts[3])
+        if self.path.startswith('/v1/jobs/'):
+            parts = self.path.split('/')
+            if len(parts) == 4 and parts[3]:
+                return self._get_job(parts[3])
         return self._send_json(404, {"ok": False, "error": "not_found"})
 
     def do_POST(self):
@@ -151,10 +156,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._register_project(body)
         if path.startswith('/v1/projects/'):
             parts = path.split('/')
-            # /v1/projects/<langcode>/sync       → POST sync
-            # /v1/projects/<langcode>/last_sync  → POST mark sync time
+            # /v1/projects/<langcode>/sync         → POST sync (sync, blocking)
+            # /v1/projects/<langcode>/sync_async   → POST request_sync (debounced)
+            # /v1/projects/<langcode>/last_sync    → POST mark sync time
             if len(parts) == 5 and parts[4] == 'sync':
                 return self._project_sync(parts[3], body)
+            if len(parts) == 5 and parts[4] == 'sync_async':
+                return self._project_sync_async(parts[3], body)
             if len(parts) == 5 and parts[4] == 'last_sync':
                 return self._set_project_last_sync(parts[3], body)
         return self._send_json(404, {"ok": False, "error": "not_found"})
@@ -299,6 +307,21 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         projects.set_last_sync(langcode, ts)
         return self._send_json(200, {"ok": True})
 
+    def _project_sync_async(self, langcode, body):
+        p = projects.get(langcode)
+        if p is None:
+            return self._send_json(404, {"ok": False,
+                                         "error": "project_not_found"})
+        contributor = body.get('contributor', 'Recorder')
+        job_id = scheduler.request_sync(langcode, contributor)
+        return self._send_json(200, {"ok": True, "job_id": job_id})
+
+    def _get_job(self, job_id):
+        job = scheduler.get_job(job_id)
+        if job is None:
+            return self._send_json(404, {"ok": False, "error": "job_not_found"})
+        return self._send_json(200, {"ok": True, **job.to_dict()})
+
 
 class _ThreadingHTTPServer(socketserver.ThreadingMixIn,
                            http.server.HTTPServer):
@@ -339,6 +362,10 @@ def run(host='127.0.0.1', port=0):
     print(f'[azt_collabd] listening on {host}:{bound_port} '
           f'(home={home})', flush=True)
 
+    # Start the connectivity watcher so projects with pending_push get
+    # drained on offline→online transitions.
+    scheduler.start_watcher()
+
     def _graceful(signum, frame):
         print(f'[azt_collabd] signal {signum}, shutting down', flush=True)
         threading.Thread(target=httpd.shutdown, daemon=True).start()
@@ -354,6 +381,7 @@ def run(host='127.0.0.1', port=0):
     except KeyboardInterrupt:
         print('[azt_collabd] interrupted', flush=True)
     finally:
+        scheduler.stop_watcher()
         try:
             os.remove(info_path)
         except OSError:

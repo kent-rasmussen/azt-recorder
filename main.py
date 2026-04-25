@@ -3177,6 +3177,28 @@ class CollabScreen(Screen):
         import webbrowser
         webbrowser.open(str(url))
 
+    def open_server_ui(self):
+        """Launch the standalone azt_collabd settings UI as a detached
+        subprocess. Use this for advanced credential / project mgmt
+        that lives in the server UI instead of the recorder."""
+        import subprocess
+        import sys
+        try:
+            kwargs = {
+                'stdout': subprocess.DEVNULL,
+                'stderr': subprocess.DEVNULL,
+                'stdin': subprocess.DEVNULL,
+                'close_fds': True,
+            }
+            if hasattr(os, 'setsid'):
+                kwargs['start_new_session'] = True
+            subprocess.Popen(
+                [sys.executable, '-m', 'azt_collabd', 'ui'], **kwargs)
+            self._set_log(_tr('Opened sync settings.'))
+        except Exception as ex:
+            self._set_log(_tr('Could not open sync settings: {error}')
+                          .format(error=ex))
+
     def open_install_page(self):
         """Open the GitHub App installation page."""
         from collab import GITHUB_APP_INSTALL_URL
@@ -3848,7 +3870,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.22.8'
+__version__ = '1.22.11'
 
 
 class LIFTRecorderApp(App):
@@ -4806,7 +4828,10 @@ class LIFTRecorderApp(App):
         mark_github_app_installed(True)
 
     def _auto_commit_sync(self):
-        """Background: pull + commit new audio/.lift changes + push."""
+        """Fire-and-forget: ask the server to schedule a debounced sync.
+        Bursts of edits within sync.debounce_ms collapse into one
+        commit/push. The server stamps last_sync on success; the UI
+        refreshes its sync indicator after a short delay."""
         if not self.recorder:
             return
         prefs = self._load_prefs()
@@ -4814,27 +4839,16 @@ class LIFTRecorderApp(App):
         langcode = self._current_langcode_or_register()
         if not langcode:
             return
-        saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''
-        import threading
-        def _worker():
-            try:
-                from azt_collab_client import sync_project, translate_result, S
-                result = sync_project(langcode, name)
-                if result.has(S.AUTH_REQUIRED):
-                    return  # not configured yet — silent no-op
-                print(f'[auto-sync] {translate_result(result)}')
-                pushed = result.has(S.PUSHED) or result.has(S.COMMITTED_AND_PUSHED)
-                pulled = result.has(S.PULLED)
-                if pushed or pulled:
-                    Clock.schedule_once(lambda dt: self._update_sync_status(), 0)
-                    if pushed:
-                        self._mark_gh_app_installed()
-                if pulled:
-                    Clock.schedule_once(
-                        lambda dt: self._reload_and_restore(saved_guid), 0)
-            except Exception as ex:
-                print(f'[auto-sync] error: {ex}')
-        threading.Thread(target=_worker, daemon=True).start()
+        try:
+            from azt_collab_client import request_sync
+            request_sync(langcode, name)
+        except Exception as ex:
+            print(f'[auto-sync] error: {ex}')
+            return
+        # Refresh the recorder's sync status indicator slightly after
+        # the debounce window so a successful job's last_sync is in
+        # place.
+        Clock.schedule_once(lambda dt: self._update_sync_status(), 1.5)
 
     def show_start_over(self):
         """Show template/image repo info, then navigate to welcome screen."""

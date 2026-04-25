@@ -140,7 +140,9 @@ def project_status(langcode):
 
 
 def sync_project(langcode, contributor):
-    """Sync the project identified by *langcode*. Returns Result."""
+    """Synchronous sync. Returns Result. Blocks until the server's sync
+    pass returns. Use ``request_sync`` for fire-and-forget edits where
+    the UI doesn't wait."""
     try:
         resp = call('POST', f'/v1/projects/{langcode}/sync',
                     {'contributor': contributor})
@@ -151,6 +153,45 @@ def sync_project(langcode, contributor):
         return Result.from_dict(resp.get('result') or {})
     return Result(statuses=[Status(
         'SERVER_ERROR', {'error': resp.get('error', 'unknown')})])
+
+
+def request_sync(langcode, contributor):
+    """Schedule a debounced sync server-side. Returns a job_id (str) or
+    None on transport failure. Multiple calls within the debounce
+    window collapse into one run; the server commits and pushes once."""
+    try:
+        resp = call('POST', f'/v1/projects/{langcode}/sync_async',
+                    {'contributor': contributor})
+    except ServerUnavailable:
+        return None
+    if not resp.get('ok'):
+        return None
+    return resp.get('job_id')
+
+
+def poll_job(job_id):
+    """Return the current state of a job: dict with keys ``state``
+    ('PENDING' | 'RUNNING' | 'DONE'), ``langcode``, ``result`` (Result
+    or None), ``created_at``, ``started_at``, ``finished_at``. Returns
+    None if the job is unknown or unreachable."""
+    try:
+        resp = call('GET', f'/v1/jobs/{job_id}')
+    except ServerUnavailable:
+        return None
+    if not resp.get('ok'):
+        return None
+    raw_result = resp.get('result')
+    decoded_result = (Result.from_dict(raw_result)
+                      if raw_result is not None else None)
+    return {
+        'job_id': resp.get('job_id'),
+        'langcode': resp.get('langcode'),
+        'state': resp.get('state'),
+        'result': decoded_result,
+        'created_at': resp.get('created_at', 0.0),
+        'started_at': resp.get('started_at', 0.0),
+        'finished_at': resp.get('finished_at', 0.0),
+    }
 
 
 def record_project_sync_time(langcode, timestamp=None):
@@ -188,7 +229,8 @@ __all__ = [
     'save_github_tokens', 'mark_github_app_installed',
     'save_gitlab_credentials', 'migrate_from_prefs',
     'list_projects', 'open_project', 'register_project',
-    'project_status', 'sync_project', 'record_project_sync_time',
+    'project_status', 'sync_project', 'request_sync', 'poll_job',
+    'record_project_sync_time',
     'sync_repo',
     'Status', 'Result', 'S', 'Project', 'ProjectStatus',
     'translate_status', 'translate_result', 'set_translator',
