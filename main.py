@@ -21,8 +21,21 @@ from i18n import _ as _tr, set_language, current_language, available_languages
 # Tell the collab backend who we are. Defaults match the recorder, but
 # calling configure() documents the contract and lets other suite apps
 # override identity values via the same hook.
-import azt_collabd
-azt_collabd.configure(app_slug=APP_SLUG)
+import azt_collab_client
+from azt_collab_client.ui import (
+    LangPickerScreen, register_langpicker_kv, clone_url_popup)
+azt_collab_client.configure(app_id='azt-recorder')
+
+
+class _DeviceFlowFailure(Exception):
+    """Internal sentinel: GitHub device flow returned a structured Status
+    code from the server (e.g. AUTH_DENIED). Carries the code + params
+    so the UI can translate via azt_collab_client.translate_status."""
+    def __init__(self, code, params=None):
+        super().__init__(code)
+        self.code = code
+        self.params = params or {}
+
 
 os.environ.setdefault('KIVY_NO_ENV_CONFIG', '1')
 warnings.filterwarnings('ignore', message='.*olefile.*')
@@ -1046,56 +1059,6 @@ KV_TEMPLATE = '''
         color: T.ACCENT
         center: root.center
 
-<LangPickerScreen>:
-    canvas.before:
-        Color:
-            rgba: T.BG
-        Rectangle:
-            pos: self.pos
-            size: self.size
-    BoxLayout:
-        orientation: 'vertical'
-        padding: dp(16)
-        spacing: dp(10)
-        # ── Title ─────────────────────────────────────────────────────────
-        Label:
-            text: _('Choose your language')
-            font_size: sp(22)
-            font_name: FONT
-            bold: True
-            color: T.ACCENT
-            size_hint_y: None
-            height: dp(44)
-        # ── Search ────────────────────────────────────────────────────────
-        TextInput:
-            id: lang_search
-            hint_text: _('Type a language name...')
-            font_size: sp(16)
-            font_name: FONT
-            multiline: False
-            size_hint_y: None
-            height: dp(44)
-            background_color: T.SURFACE
-            foreground_color: T.TEXT
-            hint_text_color: T.HINT
-            cursor_color: T.ACCENT
-            padding: [dp(10), dp(10)]
-            on_text: root._on_search_text(self.text)
-        # ── Selection details (hidden until a language is picked) ─────────
-        Widget:
-            id: selection_placeholder
-            size_hint_y: None
-            height: 0
-        # ── Results ───────────────────────────────────────────────────────
-        ScrollView:
-            id: results_scroll
-            BoxLayout:
-                id: results_box
-                orientation: 'vertical'
-                size_hint_y: None
-                height: self.minimum_height
-                spacing: dp(4)
-
 <GlossRow>:
     size_hint_y: None
     height: dp(70)
@@ -1417,402 +1380,6 @@ class WelcomeScreen(Screen):
             box.add_widget(btn)
 
 
-class LangPickerScreen(Screen):
-    """Language code picker shown when creating a new project."""
-    _langtags = None        # class-level cache: list of dicts
-    _search_index = None    # parallel list of lowered searchable strings
-    _region_names = None    # region code -> name mapping
-
-    _selected = None        # chosen langtag entry dict
-    _selected_region = ''   # chosen region code (or '')
-    _dialect_code = ''      # user-entered variant
-    _selection_box = None   # built on first use, added/removed from tree
-
-    def on_enter(self):
-        self._selected = None
-        self._selected_region = ''
-        self._dialect_code = ''
-        si = self.ids.get('lang_search')
-        if si:
-            si.text = ''
-        self._hide_selection()
-        if LangPickerScreen._langtags is None:
-            self._load_langtags()
-
-    @classmethod
-    def _load_langtags(cls):
-        import gzip, json
-        gz_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               'langtags_mini.json.gz')
-        with open(gz_path, 'rb') as f:
-            blob = json.loads(gzip.decompress(f.read()))
-        cls._langtags = blob['langs']
-        cls._region_names = blob.get('region_names', {})
-        # Build search index once
-        idx = []
-        for entry in cls._langtags:
-            parts = [entry.get('n', '').lower()]
-            if 'ln' in entry:
-                parts.append(entry['ln'].lower())
-            if 'ns' in entry:
-                parts.extend(n.lower() for n in entry['ns'])
-            if 'lns' in entry:
-                parts.extend(n.lower() for n in entry['lns'])
-            if 't' in entry:
-                parts.append(entry['t'].lower())
-            if 'i' in entry:
-                parts.append(entry['i'].lower())
-            idx.append(' '.join(parts))
-        cls._search_index = idx
-
-    def _on_search_text(self, text):
-        # Debounce: cancel previous, schedule new
-        from kivy.clock import Clock
-        if hasattr(self, '_search_ev') and self._search_ev:
-            self._search_ev.cancel()
-        self._search_ev = Clock.schedule_once(
-            lambda dt: self._do_search(text), 0.25)
-
-    def _do_search(self, text):
-        box = self.ids.get('results_box')
-        if not box:
-            return
-        box.clear_widgets()
-        if not text or len(text) < 2 or self._langtags is None:
-            return
-        q = text.lower()
-        matches = []
-        for i, searchable in enumerate(self._search_index):
-            if q in searchable:
-                matches.append(self._langtags[i])
-                if len(matches) >= 50:
-                    break
-        for entry in matches:
-            self._add_result_row(box, entry)
-
-    def _add_result_row(self, box, entry):
-        from kivy.metrics import dp, sp
-        from kivy.uix.button import Button
-        btn = Button(
-            text=self._format_entry(entry),
-            font_size=sp(13),
-            font_name='Roboto',
-            size_hint_y=None,
-            height=dp(48),
-            halign='left',
-            valign='middle',
-            background_color=theme.SURFACE,
-            background_normal='',
-            color=theme.TEXT,
-            padding=(dp(10), dp(4)),
-        )
-        btn.text_size = (None, None)
-        btn.bind(size=lambda w, s: setattr(w, 'text_size', s))
-        btn.bind(on_release=lambda w: self._select_language(entry))
-        box.add_widget(btn)
-
-    @staticmethod
-    def _format_entry(entry):
-        name = entry.get('n', '')
-        local = entry.get('ln', '')
-        tag = entry.get('t', '')
-        region = entry.get('rn', '')
-        parts = [name]
-        if local and local != name:
-            parts[0] += f'  ({local})'
-        parts.append(f'[{tag}]')
-        if region:
-            parts.append(f'- {region}')
-        return '  '.join(parts)
-
-    _SELECTION_KV = '''
-BoxLayout:
-    orientation: 'vertical'
-    size_hint_y: None
-    height: self.minimum_height
-    spacing: dp(6)
-    Label:
-        id: selected_label
-        text: ''
-        font_size: sp(15)
-        font_name: FONT
-        color: T.TEXT
-        size_hint_y: None
-        height: dp(32)
-        halign: 'left'
-        text_size: self.width, None
-    Label:
-        id: region_title
-        text: _('Select region:')
-        font_size: sp(14)
-        font_name: FONT
-        color: T.TEXT_DIM
-        size_hint_y: None
-        height: 0
-        opacity: 0
-        halign: 'left'
-        text_size: self.width, None
-    BoxLayout:
-        id: region_box
-        orientation: 'vertical'
-        size_hint_y: None
-        height: self.minimum_height
-        spacing: dp(4)
-    BoxLayout:
-        size_hint_y: None
-        height: dp(40)
-        spacing: dp(8)
-        CheckBox:
-            id: dialect_check
-            size_hint_x: None
-            width: dp(40)
-            active: False
-        Label:
-            text: _("I'm working on a dialect")
-            font_size: sp(14)
-            font_name: FONT
-            color: T.TEXT
-            halign: 'left'
-            valign: 'middle'
-            text_size: self.size
-    TextInput:
-        id: dialect_input
-        hint_text: _('Variant code (2-8 chars)')
-        font_size: sp(14)
-        font_name: FONT
-        multiline: False
-        size_hint_y: None
-        height: 0
-        opacity: 0
-        background_color: T.SURFACE
-        foreground_color: T.TEXT
-        hint_text_color: T.HINT
-        cursor_color: T.ACCENT
-        padding: [dp(10), dp(10)]
-    Label:
-        id: code_label
-        text: ''
-        font_size: sp(16)
-        font_name: FONT
-        bold: True
-        color: T.GREEN
-        size_hint_y: None
-        height: dp(28)
-        halign: 'left'
-        text_size: self.width, None
-    RecBtn:
-        id: continue_btn
-        text: _('Continue')
-        normal_color: T.GREEN
-        size_hint_y: None
-        height: dp(52)
-'''
-
-    def _get_selection_box(self):
-        """Build (once) and return the selection box widget."""
-        if self._selection_box is None:
-            self._selection_box = Builder.load_string(self._SELECTION_KV)
-            # Wire up events
-            dc = self._selection_box.ids.get('dialect_check')
-            if dc:
-                dc.bind(active=lambda w, v: self._toggle_dialect(v))
-            di = self._selection_box.ids.get('dialect_input')
-            if di:
-                di.bind(text=lambda w, t: self._update_code())
-            cb = self._selection_box.ids.get('continue_btn')
-            if cb:
-                cb.bind(on_release=lambda w: self._on_continue())
-        return self._selection_box
-
-    def _show_selection(self):
-        """Insert selection box into the layout above results."""
-        box = self._get_selection_box()
-        parent = self.ids.get('selection_placeholder').parent
-        if box.parent is None:
-            placeholder = self.ids.get('selection_placeholder')
-            idx = list(parent.children).index(placeholder)
-            parent.add_widget(box, index=idx)
-
-    def _remove_selection(self):
-        """Remove selection box from the layout."""
-        if self._selection_box and self._selection_box.parent:
-            self._selection_box.parent.remove_widget(self._selection_box)
-
-    @property
-    def _sel_ids(self):
-        """Access ids on the selection box (mirrors self.ids for selection widgets)."""
-        if self._selection_box:
-            return self._selection_box.ids
-        return {}
-
-    def _select_language(self, entry):
-        from kivy.metrics import dp, sp
-        from kivy.uix.button import Button
-        self._selected = entry
-        self._selected_region = ''
-        self._show_selection()
-        ids = self._sel_ids
-        lbl = ids.get('selected_label')
-        if lbl:
-            lbl.text = self._format_entry(entry)
-        # Clear results and search
-        box = self.ids.get('results_box')
-        if box:
-            box.clear_widgets()
-        si = self.ids.get('lang_search')
-        if si:
-            si.text = ''
-
-        # Region picker
-        regions = entry.get('rs', [])
-        primary = entry.get('r', '')
-        all_regions = []
-        if primary:
-            all_regions.append(primary)
-        for r in regions:
-            if r not in all_regions:
-                all_regions.append(r)
-
-        region_box = ids.get('region_box')
-        region_title = ids.get('region_title')
-        if region_box:
-            region_box.clear_widgets()
-        if len(all_regions) > 1:
-            if region_title:
-                region_title.height = dp(20)
-                region_title.opacity = 1
-            rnames = self._region_names or {}
-            # "All/multiple" option
-            btn = Button(
-                text=_tr('Multiple / all regions'),
-                font_size=sp(13),
-                font_name=_FONT_NAME,
-                size_hint_y=None,
-                height=dp(38),
-                background_color=theme.SURFACE_ALT,
-                background_normal='',
-                color=theme.TEXT,
-            )
-            btn.bind(on_release=lambda w: self._select_region(''))
-            region_box.add_widget(btn)
-            for rc in all_regions:
-                rn = rnames.get(rc, rc)
-                btn = Button(
-                    text=f'{rn} ({rc})',
-                    font_size=sp(13),
-                    font_name=_FONT_NAME,
-                    size_hint_y=None,
-                    height=dp(38),
-                    background_color=theme.SURFACE_ALT,
-                    background_normal='',
-                    color=theme.TEXT,
-                )
-                btn.bind(on_release=lambda w, c=rc: self._select_region(c))
-                region_box.add_widget(btn)
-        else:
-            if region_title:
-                region_title.height = 0
-                region_title.opacity = 0
-
-        self._update_code()
-        cb = ids.get('continue_btn')
-        if cb:
-            cb.disabled = False
-
-    def _select_region(self, region_code):
-        from kivy.metrics import dp
-        self._selected_region = region_code
-        # Highlight selected region in the region box
-        region_box = self._sel_ids.get('region_box')
-        if region_box:
-            for child in region_box.children:
-                if region_code and region_code in child.text:
-                    child.background_color = theme.ACCENT
-                elif not region_code and 'Multiple' in child.text:
-                    child.background_color = theme.ACCENT
-                else:
-                    child.background_color = theme.SURFACE_ALT
-        self._update_code()
-
-    def _toggle_dialect(self, active):
-        from kivy.metrics import dp
-        di = self._sel_ids.get('dialect_input')
-        if di:
-            di.height = dp(44) if active else 0
-            di.opacity = 1 if active else 0
-            if not active:
-                di.text = ''
-                self._dialect_code = ''
-        self._update_code()
-
-    def _hide_selection(self):
-        from kivy.metrics import dp
-        self._remove_selection()
-        ids = self._sel_ids
-        if not ids:
-            return
-        region_title = ids.get('region_title')
-        if region_title:
-            region_title.height = 0
-            region_title.opacity = 0
-        region_box = ids.get('region_box')
-        if region_box:
-            region_box.clear_widgets()
-        di = ids.get('dialect_input')
-        if di:
-            di.height = 0
-            di.opacity = 0
-            di.text = ''
-        dc = ids.get('dialect_check')
-        if dc:
-            dc.active = False
-        cl = ids.get('code_label')
-        if cl:
-            cl.text = ''
-        cb = ids.get('continue_btn')
-        if cb:
-            cb.disabled = True
-
-    def _update_code(self):
-        if not self._selected:
-            return
-        ids = self._sel_ids
-        code = self._selected.get('t', '')
-        if self._selected_region:
-            code += '-' + self._selected_region
-        di = ids.get('dialect_input')
-        if di and di.text.strip():
-            variant = di.text.strip().lower()
-            # Clamp to 2-8 alphanumeric chars
-            variant = ''.join(c for c in variant if c.isalnum())[:8]
-            self._dialect_code = variant
-            if len(variant) >= 2:
-                code += '-x-' + variant
-        else:
-            self._dialect_code = ''
-        cl = ids.get('code_label')
-        if cl:
-            cl.text = _tr('Language code: {code}').format(code=code)
-
-    def _assembled_code(self):
-        if not self._selected:
-            return ''
-        code = self._selected.get('t', '')
-        if self._selected_region:
-            code += '-' + self._selected_region
-        if self._dialect_code and len(self._dialect_code) >= 2:
-            code += '-x-' + self._dialect_code
-        return code
-
-    def _on_continue(self):
-        app = App.get_running_app()
-        code = self._assembled_code()
-        app._pending_vernlang = code
-        # Show overlay immediately so user knows the button worked
-        app._show_loading_overlay(_tr('Setting up wordlist for {code}...').format(code=code))
-        app.new_from_template()
-
-
 class ImagePickerScreen(Screen):
     """Image selection screen — shows all available images for the current entry."""
     _entry = None
@@ -2084,8 +1651,8 @@ class ImagePickerScreen(Screen):
     def _auto_web_images(self, cell_h):
         """Background auto-fetch from web sources if internet available."""
         try:
-            from azt_collabd.net import _has_internet
-            if not _has_internet():
+            from azt_collab_client import is_online
+            if not is_online():
                 return
         except Exception:
             return
@@ -3185,39 +2752,50 @@ class CollabScreen(Screen):
         webbrowser.open(str(url))
 
     def open_server_ui(self):
-        """Launch the standalone azt_collabd settings UI as a detached
-        subprocess. Use this for advanced credential / project mgmt
-        that lives in the server UI instead of the recorder."""
-        if platform == 'android':
-            # subprocess + bundled p4a interpreter is unreliable;
-            # the right path here is to deeplink into the installed
-            # AZT settings provider once the Android ContentProvider
-            # transport (azt_collabd_cleanup_drafts.xml) is wired up.
-            self._set_log(_tr('Sync settings UI is desktop-only for now.'))
-            return
-        import subprocess
-        import sys
-        try:
-            kwargs = {
-                'stdout': subprocess.DEVNULL,
-                'stderr': subprocess.DEVNULL,
-                'stdin': subprocess.DEVNULL,
-                'close_fds': True,
-            }
-            if hasattr(os, 'setsid'):
-                kwargs['start_new_session'] = True
-            subprocess.Popen(
-                [sys.executable, '-m', 'azt_collabd', 'ui'], **kwargs)
+        """Open the standalone AZT collab settings UI.
+
+        Delegates to ``azt_collab_client.open_server_ui()``; the client
+        owns the platform branching (desktop spawn / Android intent /
+        desktop-only fallback) so peer apps stay thin."""
+        from azt_collab_client import open_server_ui as _open_server_ui
+        result = _open_server_ui()
+        if result.get('ok'):
             self._set_log(_tr('Opened sync settings.'))
-        except Exception as ex:
+            return
+        err = result.get('error', 'unknown')
+        if err == 'desktop_only':
+            self._set_log(_tr('Sync settings UI is desktop-only for now.'))
+        elif err == 'server_apk_not_installed':
+            self._prompt_install_server_apk()
+        elif err == 'spawn_exited':
+            detail = (result.get('detail')
+                      or f"rc={result.get('returncode', '?')}")
+            self._set_log(_tr(
+                'Sync settings UI failed to start: {detail}')
+                          .format(detail=detail))
+        else:
             self._set_log(_tr('Could not open sync settings: {error}')
-                          .format(error=ex))
+                          .format(error=err))
+
+    def _prompt_install_server_apk(self):
+        """The AZT collab server APK isn't installed. Tell the user and
+        open the install URL in a browser."""
+        from azt_collab_client import SERVER_APK_INSTALL_URL
+        self._set_log(_tr(
+            'AZT collab service not installed. '
+            'Opening install page...'))
+        import webbrowser
+        webbrowser.open(SERVER_APK_INSTALL_URL)
 
     def open_install_page(self):
         """Open the GitHub App installation page."""
-        from azt_collabd.auth import GITHUB_APP_INSTALL_URL
+        from azt_collab_client import github_app_install_url
+        url = github_app_install_url()
+        if not url:
+            self._set_log(_tr('GitHub App install URL not available.'))
+            return
         import webbrowser
-        webbrowser.open(GITHUB_APP_INSTALL_URL)
+        webbrowser.open(url)
 
     def copy_code(self):
         """Copy the device code to clipboard."""
@@ -3261,38 +2839,36 @@ class CollabScreen(Screen):
     # ── Device flow ────────────────────────────────────────────────────────
 
     def start_device_flow(self):
-        """Begin GitHub device flow authentication."""
+        """Begin GitHub device flow authentication via the server."""
         # Defocus any TextInput so keyboard doesn't pop up
         name_input = self.ids.get('name_input')
         if name_input:
             name_input.focus = False
-        from azt_collabd.auth import GITHUB_APP_CLIENT_ID
-        if not GITHUB_APP_CLIENT_ID:
+        from azt_collab_client import (
+            github_app_client_id, mark_github_app_installed)
+        if not github_app_client_id():
             self._set_log(_tr('GitHub App client_id not configured.'))
             return
         # Reset install status on reconnect
-        from azt_collab_client import mark_github_app_installed
         mark_github_app_installed(False)
         self._set_log(_tr('Starting GitHub authorization...'))
         import threading
         threading.Thread(target=self._device_flow_worker, daemon=True).start()
 
     def _device_flow_worker(self):
-        from azt_collabd.auth import (
-            device_flow_start, device_flow_poll,
-            get_github_username, check_app_installed,
-            app_install_url, GITHUB_APP_INSTALL_URL,
-        )
-        from azt_collab_client import save_github_tokens, \
-            get_credentials_status
-        app = App.get_running_app()
+        from azt_collab_client import (
+            github_device_flow_start, github_device_flow_status,
+            github_app_install_url, translate_status, Status as _Status)
         try:
-            resp = device_flow_start()
+            resp = github_device_flow_start()
+            if not resp.get('ok'):
+                raise RuntimeError(resp.get('error', 'unknown'))
+            job_id = resp['job_id']
             user_code = resp['user_code']
-            device_code = resp['device_code']
-            verification_uri = resp.get('verification_uri', 'https://github.com/login/device')
-            interval = resp.get('interval', 5)
-            expires_in = resp.get('expires_in', 900)
+            verification_uri = resp.get(
+                'verification_uri', 'https://github.com/login/device')
+            interval = max(1, int(resp.get('interval', 5)))
+            expires_in = int(resp.get('expires_in', 900))
 
             def _show_code(dt):
                 inst = self.ids.get('device_instructions_label')
@@ -3317,21 +2893,30 @@ class CollabScreen(Screen):
                 webbrowser.open(verification_uri)
             Clock.schedule_once(_open_browser, 3)
 
-            # Poll until authorized
-            token_data = device_flow_poll(device_code, interval, expires_in)
-            access_token = token_data['access_token']
+            # Poll the server until DONE / FAILED. The server is the
+            # one talking to GitHub — peers only check the job status,
+            # so tokens never cross the client/server boundary.
+            import time
+            deadline = time.time() + expires_in + 30
+            status_resp = {}
+            while time.time() < deadline:
+                time.sleep(interval)
+                status_resp = github_device_flow_status(job_id)
+                if not status_resp.get('ok'):
+                    raise RuntimeError(
+                        status_resp.get('error', 'server_unavailable'))
+                if status_resp.get('state') in ('DONE', 'FAILED'):
+                    break
+            if status_resp.get('state') != 'DONE':
+                if status_resp.get('state') == 'FAILED':
+                    raise _DeviceFlowFailure(
+                        status_resp.get('error', 'AUTH_FAILED'),
+                        status_resp.get('error_params') or {})
+                raise RuntimeError('device_flow_timeout')
 
-            # Get the GitHub username (best-effort)
-            username = get_github_username(access_token) or 'unknown'
-
-            # Save tokens immediately so connection persists even if
-            # later network calls (app install check) fail
-            save_github_tokens(token_data, username)
-
-            _url = GITHUB_APP_INSTALL_URL
-            _username = username
-            _app_installed = get_credentials_status().get(
-                'github', {}).get('app_installed', False)
+            _username = status_resp.get('username', '') or 'unknown'
+            _app_installed = bool(status_resp.get('app_installed', False))
+            _url = github_app_install_url()
             def _done(dt):
                 lbl = self.ids.get('device_code_label')
                 if lbl:
@@ -3362,15 +2947,14 @@ class CollabScreen(Screen):
                         install_btn.height = dp(48)
                         install_btn.opacity = 1
                     self._set_log(_tr('Connected as {username} \u2014 install app for repo access').format(username=_username))
-                    import webbrowser
-                    webbrowser.open(_url)
+                    if _url:
+                        import webbrowser
+                        webbrowser.open(_url)
             Clock.schedule_once(_done, 0)
 
         except Exception as ex:
-            from azt_collabd.status import AuthError
-            from azt_collab_client import translate_status
-            if isinstance(ex, AuthError):
-                err_msg = translate_status(ex.status)
+            if isinstance(ex, _DeviceFlowFailure):
+                err_msg = translate_status(_Status(ex.code, ex.params))
             else:
                 err_msg = str(ex)
             def _err(dt):
@@ -3415,13 +2999,15 @@ class CollabScreen(Screen):
             return
         lbl.text = f'https://{domain}/{user}/{lang}.git'
 
-    def _get_credentials_for_host(self):
-        """Return (username, token) for the currently selected host."""
-        from azt_collabd import store as _store
-        host = getattr(self, '_host', _store.get_collab_host())
+    def _credentials_configured_for_host(self):
+        """Return True if the currently selected host has usable
+        credentials (the server holds the actual token)."""
+        from azt_collab_client import get_credentials_status
+        status = get_credentials_status()
+        host = getattr(self, '_host', status.get('host', 'github'))
         if host == 'gitlab':
-            return _store.get_gitlab()
-        return _store.get_valid_github_token()
+            return bool(status.get('gitlab', {}).get('connected', False))
+        return bool(status.get('github', {}).get('connected', False))
 
     def do_publish(self):
         app = App.get_running_app()
@@ -3429,9 +3015,8 @@ class CollabScreen(Screen):
             self._set_log(_tr('No project loaded.'))
             return
         self._save_settings()
-        user, token = self._get_credentials_for_host()
         host = getattr(self, '_host', 'github')
-        if not token:
+        if not self._credentials_configured_for_host():
             host_name = 'GitLab' if host == 'gitlab' else 'GitHub'
             self._set_log(_tr('Connect to {host} first.').format(host=host_name))
             return
@@ -3442,13 +3027,9 @@ class CollabScreen(Screen):
         if not remote_url:
             self._set_log(_tr('Enter a language code first.'))
             return
-        # GitLab uses username + PAT directly; GitHub uses x-access-token
-        git_user = user if host == 'gitlab' else 'x-access-token'
-        from azt_collabd.repo import init_repo
-        self._run(_tr('Publishing...'), init_repo,
-                  app.recorder.db.dir, remote_url,
-                  git_user, token,
-                  'main', name)
+        from azt_collab_client import init_project
+        self._run(_tr('Publishing...'), init_project,
+                  app.recorder.db.dir, remote_url, 'main', name)
 
 
 
@@ -3886,7 +3467,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.22.19'
+__version__ = '1.26.0'
 
 
 class LIFTRecorderApp(App):
@@ -3969,12 +3550,17 @@ class LIFTRecorderApp(App):
             set_language(prefs.get('ui_language', 'en'))
             self.subtitle = _tr(APP_TAGLINE)
             Builder.load_string(KV)
+            register_langpicker_kv(
+                font_name=_FONT_NAME,
+                langtags_path=os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    'langtags_mini.json.gz'))
             self.root = RootScreen()
             # Move any legacy credential keys out of prefs.json into
             # $AZT_HOME/credentials.json. Idempotent.
             try:
-                from azt_collabd import store as _store
-                summary = _store.migrate_from_prefs(self._prefs_path)
+                from azt_collab_client import migrate_from_prefs
+                summary = migrate_from_prefs(self._prefs_path)
                 if summary.get('migrated'):
                     print(f'[migrate] credentials: {summary}')
             except Exception as ex:
@@ -3997,15 +3583,10 @@ class LIFTRecorderApp(App):
                 except Exception as ex:
                     print(f'[app] failed to bind activity result: {ex}')
                     traceback.print_exc()
-                # Wire the AZTCollabProvider Java class to the daemon's
-                # dispatch table. No-op on platforms without pyjnius.
-                try:
-                    from azt_collabd.android_cp import service as _cp
-                    _cp.install_callbacks()
-                    print('[app] aztcollab provider callbacks installed')
-                except Exception as ex:
-                    print(f'[app] aztcollab provider install failed: {ex}')
-                    traceback.print_exc()
+            # The AZTCollabProvider lives in the standalone server APK
+            # (org.atoznback.aztcollab). Peers do NOT install provider
+            # callbacks here — they reach the provider through the
+            # azt_collab_client transport instead.
             # Handle Android back button / ESC key
             Window.bind(on_keyboard=self._on_back_button)
             # Auto-load last used LIFT file if it still exists
@@ -4013,9 +3594,53 @@ class LIFTRecorderApp(App):
             last = prefs.get('last_lift', '')
             if last and os.path.isfile(last) and os.path.getsize(last) > 50:
                 Clock.schedule_once(lambda dt: self.load_lift(last), 0.3)
+            # One-shot server compatibility / install probe. Defer one
+            # frame so the UI is up before any toast.
+            Clock.schedule_once(lambda dt: self._check_server_compat(), 0.5)
         except Exception:
             traceback.print_exc()
             raise
+
+    def _check_server_compat(self):
+        """Probe the AZT collab server's version. If it's missing or too
+        old, surface a warning to the user; otherwise stay silent."""
+        try:
+            from azt_collab_client import (
+                check_server_compat, SERVER_APK_INSTALL_URL)
+        except Exception:
+            return
+        result = check_server_compat()
+        if result.get('ok'):
+            return
+        err = result.get('error', '')
+        if err == 'server_too_old':
+            msg = _tr(
+                'Please update the AZT collaboration service '
+                '(installed: {have}, required: {need}).').format(
+                    have=result.get('server_version', '?'),
+                    need=result.get('min_required', '?'))
+            self._show_collab_warning(msg, SERVER_APK_INSTALL_URL)
+        elif err == 'server_unreachable':
+            # Don't nag on every launch — only mention if the user has
+            # already configured collab (i.e. has a langcode set).
+            prefs = self._load_prefs()
+            if prefs.get('collab_langcode'):
+                msg = _tr(
+                    'AZT collaboration service is not running '
+                    'or not installed.')
+                self._show_collab_warning(msg, SERVER_APK_INSTALL_URL)
+
+    def _show_collab_warning(self, message, install_url=''):
+        """Surface a non-blocking warning about the AZT collab service.
+        Logs to the collab screen's status bar if it's available, and
+        prints to stderr so desktop devs see it too."""
+        print(f'[collab-warning] {message}', file=sys.stderr)
+        try:
+            sm = self.root.ids.sm
+            collab = sm.get_screen('collab')
+            collab._set_log(message)
+        except Exception:
+            pass
 
     def _on_back_button(self, window, key, *args):
         """Handle Android back button (keycode 27) to navigate back."""
@@ -4164,19 +3789,10 @@ class LIFTRecorderApp(App):
             # Check if URL is from a git repo — clone instead of downloading
             clone_url, _ = self._parse_git_url(url)
             if clone_url and not vernlang:
-                # Clone the whole repo
+                # Clone the whole repo (server-driven; no progress UI here)
                 repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')
                 dest = os.path.join(self.user_data_dir, 'projects', repo_name)
-                git_user, token = self._clone_credentials()
-                from azt_collabd.repo import clone_repo
-                from azt_collab_client import translate_result
-                lift_path, result = clone_repo(clone_url, dest, git_user, token)
-                if lift_path:
-                    Clock.schedule_once(lambda dt: self.load_lift(lift_path), 0)
-                else:
-                    log = translate_result(result)
-                    Clock.schedule_once(
-                        lambda dt: self._show_error(log), 0)
+                self._clone_via_server(clone_url, dest, on_progress=None)
                 return
 
             if vernlang:
@@ -4211,22 +3827,51 @@ class LIFTRecorderApp(App):
 
     # ── New from SILCAWL template ──────────────────────────────────────────────
 
-    _SILCAWL_URL = ('https://raw.githubusercontent.com/'
-                    'kent-rasmussen/lift_templates/main/SILCAWL.lift')
-
     def new_from_template(self):
-        """Show language picker first, then download the SILCAWL template."""
+        """Show language picker first, then ask the daemon to download
+        the SILCAWL (default) template. The daemon owns the URL, the
+        download, and project registration; the recorder just opens the
+        resulting LIFT path."""
         if not getattr(self, '_pending_vernlang', ''):
-            # First call: navigate to language picker
             sm = self.root.ids.sm
             sm.transition = SlideTransition(direction='left')
             sm.current = 'langpicker'
             return
-        # Called from LangPickerScreen._on_continue with code set
+        vernlang = self._pending_vernlang
+        dest_dir = os.path.join(
+            self.user_data_dir, 'projects', vernlang)
+        prefs = self._load_prefs()
+        prefs['collab_langcode'] = vernlang
+        self._save_prefs_dict(prefs)
+
+        def _worker():
+            from azt_collab_client import create_project_from_template
+            err = ''
+            project = None
+            try:
+                ret = create_project_from_template(
+                    vernlang=vernlang, dest_dir=dest_dir)
+            except Exception as ex:
+                err = f'exception: {ex}'
+            else:
+                if isinstance(ret, tuple):
+                    project, err = ret
+                else:
+                    project = ret
+            if project and project.lift_path:
+                Clock.schedule_once(
+                    lambda dt: self.load_lift(project.lift_path), 0)
+                return
+            print(f'[new_from_template] failed: {err}', file=sys.stderr)
+            msg = _tr('Could not download template:\n{detail}').format(
+                detail=err or 'unknown')
+            Clock.schedule_once(
+                lambda dt: self._dismiss_loading_overlay(), 0)
+            Clock.schedule_once(
+                lambda dt: self._show_error(msg), 0)
+
         import threading
-        threading.Thread(
-            target=self._download_and_open,
-            args=(self._SILCAWL_URL,), daemon=True).start()
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _show_loading_overlay(self, msg):
         """Show a modal overlay that stays until dismissed."""
@@ -4700,11 +4345,13 @@ class LIFTRecorderApp(App):
         if not self.recorder:
             return ''
         try:
-            from azt_collabd import projects as _projects
-            from azt_collab_client import register_project
+            from azt_collab_client import (
+                derive_langcode, register_project)
             working_dir = self.recorder.db.dir
             lift_path = self.recorder.db.path
-            langcode = _projects.derive_langcode(working_dir, lift_path)
+            langcode = derive_langcode(working_dir, lift_path)
+            if not langcode:
+                return ''
             register_project(langcode, working_dir, lift_path)
             self._current_langcode = langcode
             return langcode
@@ -4754,59 +4401,132 @@ class LIFTRecorderApp(App):
                     break
         self.refresh_recorder_ui()
 
-    def _clone_credentials(self):
-        """Return (git_user, token) for clone/publish flows that still run
-        in-process (init_repo, clone_repo). Reads from the server-owned
-        credentials store, respecting the current host toggle."""
-        from azt_collabd import store as _store
-        host = _store.get_collab_host()
-        if host == 'gitlab':
-            user, token = _store.get_gitlab()
-            return user, token
-        _, token = _store.get_valid_github_token()
-        return 'x-access-token', token
+    def _clone_via_server(self, clone_url, dest_dir, on_progress=None):
+        """Drive a server-side clone job to completion. Schedules
+        ``self.load_lift(lift_path)`` on success and ``self._show_error``
+        on failure. ``on_progress(line)`` is called on the Kivy main
+        thread for each new progress line if provided. Always dismisses
+        any loading overlay before reporting."""
+        from azt_collab_client import (
+            clone_project_start, clone_project_status, translate_result)
+        import threading
+        import time
+
+        def _worker():
+            try:
+                kicked = clone_project_start(clone_url, dest_dir)
+                if not kicked.get('ok'):
+                    err = kicked.get('error', 'unknown')
+                    Clock.schedule_once(
+                        lambda dt: (self._dismiss_loading_overlay(),
+                                    self._show_error(err)), 0)
+                    return
+                job_id = kicked['job_id']
+                last_index = 0
+                while True:
+                    time.sleep(0.5)
+                    resp = clone_project_status(job_id, last_index)
+                    if not resp.get('ok'):
+                        err = resp.get('error', 'server_unavailable')
+                        Clock.schedule_once(
+                            lambda dt, e=err: (
+                                self._dismiss_loading_overlay(),
+                                self._show_error(e)), 0)
+                        return
+                    last_index = resp.get('next_index', last_index)
+                    if on_progress:
+                        for line in resp.get('progress', []):
+                            Clock.schedule_once(
+                                lambda dt, ln=line: on_progress(ln), 0)
+                    state = resp.get('state', 'CLONING')
+                    if state == 'DONE':
+                        lift_path = resp.get('lift_path', '')
+                        result = resp.get('result')
+                        log = (translate_result(result)
+                               if result is not None else '')
+                        if lift_path:
+                            Clock.schedule_once(
+                                lambda dt: self.load_lift(lift_path), 0)
+                        else:
+                            looks_auth = False
+                            try:
+                                for st in (result.statuses if result
+                                           else []):
+                                    msg = (st.params.get(
+                                        'error', '') or '').lower()
+                                    if st.code == 'CLONE_FAILED' and (
+                                            'credential' in msg
+                                            or 'auth' in msg):
+                                        looks_auth = True
+                                        break
+                            except Exception:
+                                pass
+                            if looks_auth:
+                                Clock.schedule_once(
+                                    lambda dt: (
+                                        self._dismiss_loading_overlay(),
+                                        self._show_collab_prompt()), 0)
+                            else:
+                                Clock.schedule_once(
+                                    lambda dt, e=log: (
+                                        self._dismiss_loading_overlay(),
+                                        self._show_error(e)), 0)
+                        return
+                    if state == 'FAILED':
+                        err = resp.get('error', 'clone_failed')
+                        Clock.schedule_once(
+                            lambda dt, e=err: (
+                                self._dismiss_loading_overlay(),
+                                self._show_error(e)), 0)
+                        return
+            except Exception as ex:
+                print(f'[clone] error: {ex}')
+                err = str(ex).lower()
+                if 'credential' in err or 'auth' in err:
+                    Clock.schedule_once(
+                        lambda dt: (self._dismiss_loading_overlay(),
+                                    self._show_collab_prompt()), 0)
+                else:
+                    Clock.schedule_once(
+                        lambda dt, e=str(ex): (
+                            self._dismiss_loading_overlay(),
+                            self._show_error(e)), 0)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _try_auto_publish(self):
-        """If git credentials and langcode are configured, publish automatically."""
+        """If git credentials and langcode are configured, publish
+        automatically. The server runs the publish using its own
+        credentials store; the peer just tells it the working dir +
+        remote URL."""
         prefs = self._load_prefs()
         langcode = prefs.get('collab_langcode', '')
         if not (langcode and self.recorder):
             return
-        from azt_collab_client import get_credentials_status
+        from azt_collab_client import (
+            get_credentials_status, init_project, translate_result)
         status = get_credentials_status()
         host = status.get('host', 'github')
         if host == 'gitlab':
             gl = status.get('gitlab', {})
             user = gl.get('username', '')
             token_ok = gl.get('connected', False)
-            git_user = user
             domain = 'gitlab.com'
         else:
             gh = status.get('github', {})
             user = gh.get('username', '')
             token_ok = gh.get('connected', False)
-            git_user = 'x-access-token'
             domain = 'github.com'
         if not (user and token_ok):
-            return
-        # Fetch the raw token for publish (init_repo still runs via
-        # collab-backed call; step 7 will route publish through the server).
-        from azt_collabd import store as _store
-        if host == 'gitlab':
-            _, token = _store.get_gitlab()
-        else:
-            _, token = _store.get_valid_github_token()
-        if not token:
             return
         remote_url = f'https://{domain}/{user}/{langcode}.git'
         name = prefs.get('collab_name', '') or 'Recorder'
         import threading
+
         def _worker():
             try:
-                from azt_collabd.repo import init_repo
-                from azt_collab_client import translate_result
-                result = init_repo(self.recorder.db.dir, remote_url,
-                                   git_user, token, 'main', name)
+                result = init_project(
+                    self.recorder.db.dir, remote_url, 'main', name)
                 print(f'[auto-publish] {translate_result(result)}')
             except Exception as ex:
                 print(f'[auto-publish] error: {ex}')
@@ -5255,115 +4975,18 @@ class LIFTRecorderApp(App):
         popup.open()
 
     def clone_dialog(self):
-        """Popup with a single URL field for cloning a repository."""
-        from kivy.uix.popup import Popup
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.textinput import TextInput
-        from kivy.uix.button import Button
-        from kivy.uix.label import Label
-
-        content = BoxLayout(orientation='vertical', spacing=dp(10), padding=dp(12))
-        content.add_widget(Label(
-            text=_tr('Clone a git repository containing a LIFT file:'),
-            size_hint_y=None, height=dp(30),
-            font_size=sp(13), color=theme.TEXT,
-        ))
-
-        url_input = TextInput(
-            text='',
-            hint_text=_tr('Paste the repository URL here'),
-            multiline=False, size_hint_y=None, height=dp(48),
-            font_size=sp(14),
-        )
-        content.add_widget(url_input)
-
-        btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
-        cancel_btn = Button(text=_tr('Cancel'), font_size=sp(14))
-        clone_btn = Button(text=_tr('Clone'), font_size=sp(14),
-                           background_color=theme.ACCENT)
-        btn_row.add_widget(cancel_btn)
-        btn_row.add_widget(clone_btn)
-        content.add_widget(btn_row)
-
-        popup = Popup(
-            title=_tr('Clone Repository'),
-            content=content,
-            size_hint=(0.9, None), height=dp(240),
-            auto_dismiss=True,
-        )
-
-        def _do_clone(*args):
-            clone_url = url_input.text.strip()
-            popup.dismiss()
-            if not clone_url:
-                return
-            # Ensure URL ends with .git for dulwich
-            if not clone_url.endswith('.git'):
-                clone_url += '.git'
-            git_user, token = self._clone_credentials()
-
-            repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')
-            dest = os.path.join(self.user_data_dir, 'projects', repo_name)
-
+        """Show the shared clone-URL popup; on submit drive a server-side
+        clone job and load the resulting LIFT."""
+        def _on_submit(clone_url):
+            repo_name = clone_url.rstrip('/').split('/')[-1].replace(
+                '.git', '')
+            dest = os.path.join(
+                self.user_data_dir, 'projects', repo_name)
             self._show_loading_overlay(_tr('Cloning repository...'))
-            import threading
-            from azt_collabd.repo import clone_repo
-
-            def _on_progress(line):
-                Clock.schedule_once(
-                    lambda dt, t=line: self._update_loading_detail(t), 0)
-
-            def _worker():
-                try:
-                    from azt_collab_client import translate_result
-                    # Try with credentials first
-                    lift_path, result = clone_repo(
-                        clone_url, dest, git_user, token,
-                        on_progress=_on_progress)
-                    # If the failure smells like auth, retry without creds
-                    # (public repo) before giving up
-                    def _looks_like_auth(r):
-                        for s in r.statuses:
-                            if s.code == 'CLONE_FAILED' and (
-                                'credential' in s.params.get('error', '').lower()
-                                or 'auth' in s.params.get('error', '').lower()
-                            ):
-                                return True
-                        return False
-                    if not lift_path and _looks_like_auth(result):
-                        print('[clone] retrying without credentials...')
-                        lift_path, result = clone_repo(
-                            clone_url, dest, '', '',
-                            on_progress=_on_progress)
-                    log = translate_result(result)
-                    print(f'[clone] result: {log}')
-                    if lift_path:
-                        Clock.schedule_once(lambda dt: self.load_lift(lift_path), 0)
-                    elif _looks_like_auth(result):
-                        Clock.schedule_once(
-                            lambda dt: (self._dismiss_loading_overlay(),
-                                        self._show_collab_prompt()), 0)
-                    else:
-                        Clock.schedule_once(
-                            lambda dt: (self._dismiss_loading_overlay(),
-                                        self._show_error(log)), 0)
-                except Exception as ex:
-                    print(f'[clone] error: {ex}')
-                    err = str(ex).lower()
-                    if 'credential' in err or 'auth' in err:
-                        Clock.schedule_once(
-                            lambda dt: (self._dismiss_loading_overlay(),
-                                        self._show_collab_prompt()), 0)
-                    else:
-                        Clock.schedule_once(
-                            lambda dt: (self._dismiss_loading_overlay(),
-                                        self._show_error(str(ex))), 0)
-
-            threading.Thread(target=_worker, daemon=True).start()
-
-        cancel_btn.bind(on_release=popup.dismiss)
-        clone_btn.bind(on_release=_do_clone)
-        popup.open()
+            self._clone_via_server(
+                clone_url, dest,
+                on_progress=lambda line: self._update_loading_detail(line))
+        clone_url_popup(_on_submit, font_name=_FONT_NAME)
 
     def refresh_recorder_ui(self):
         """Push current recorder state into the RecorderScreen widgets."""

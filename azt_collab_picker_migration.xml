@@ -1,0 +1,489 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<task>
+  <title>Migrate WelcomeScreen + LangPickerScreen + project-creation flows from azt_recorder into azt_collab_client / azt_collabd, and fix the silent failure of open_server_ui()</title>
+
+  <summary>
+    Two related changes:
+    (1) Fix bug: azt_collab_client.open_server_ui() reports ok=True even when
+        `python -m azt_collabd ui` exits immediately because azt_collabd isn't
+        on the spawned subprocess's sys.path. Same root cause affects the
+        loopback transport's daemon auto-spawn.
+    (2) Redesign: pull project-picking / project-creating UX out of the
+        recorder and into the shared collab layer so sister apps reuse it.
+        The recorder shrinks to "hand me a project path, I'll open it."
+
+    Do step 1 first; it's small and unblocks testing the rest. Steps 2-5 are
+    the redesign and should be planned before code lands.
+  </summary>
+
+  <progress as_of="2026-04-30">
+    <step1 status="DONE" verified="user_confirmed">
+      open_server_ui spawn fixed; new azt_collab_client/_spawn.py;
+      stderr captured; new 'spawn_exited' result; loopback _spawn_server
+      mirrors PYTHONPATH injection. Recorder 1.23.0 → 1.23.1; client
+      0.8.0 → 0.8.1.
+    </step1>
+    <step2 status="DONE" verified="user_confirmed">
+      LangPickerScreen + KV moved to azt_collab_client/ui/langpicker.py.
+      New register_langpicker_kv(font_name, langtags_path); new
+      translate.tr() wrapper for KV ``#:import``. Recorder 1.23.1 →
+      1.24.0; client 0.8.1 → 0.9.0.
+      <deferred>
+        Copy langtags_mini.json.gz from azt_recorder/ to
+        azt_collab_client/ui/assets/. Sandbox could not execute `cp`
+        on a binary file. Once moved, drop the explicit
+        ``langtags_path=`` kwarg in main.py:build().
+      </deferred>
+    </step2>
+    <step3 status="DONE" verified="user_confirmed_after_daemon_restart_and_dulwich_install">
+      Template download moved to daemon. New
+      azt_collabd.projects.create_from_template (urllib + size cap +
+      atomic os.replace + register), new POST /v1/projects/from_template,
+      new client create_project_from_template (returns Project on
+      success or (None, error_str) on failure — the tuple-fallback was
+      added after a regression where old daemons surfaced as "could not
+      download" with no reason). Default SILCAWL URL moved to
+      azt_collabd/config.py default_template_url() with
+      AZT_DEFAULT_TEMPLATE_URL env override. Recorder 1.24.0 → 1.25.0;
+      client 0.9.0 → 0.10.0; daemon 0.8.0 → 0.9.0; MIN_SERVER_VERSION
+      bumped (user later relaxed back to 0.8.0 for compat).
+      <followup>
+        setup_from_nuke.sh updated to install dulwich (auto-publish
+        regression: spawned daemon used recorder's venv but it didn't
+        have dulwich). Document in docs that dulwich is a daemon dep.
+      </followup>
+    </step3>
+    <step4 status="DONE_PENDING_VERIFY">
+      Clone-from-URL popup moved to azt_collab_client/ui/popups.py
+      (clone_url_popup); new sync clone_project() wrapper in client
+      __init__. Recorder clone_dialog reduced to 10-line wrapper that
+      forwards to existing _clone_via_server driver (kept because of
+      auth-retry branch). Recorder 1.25.0 → 1.26.0; client 0.10.0 →
+      0.11.0. Daemon unchanged.
+    </step4>
+    <step5 status="PENDING">ProjectPickerScreen replaces WelcomeScreen.</step5>
+    <step6 status="PENDING">Reuse picker in azt_collabd/ui/app.py.</step6>
+    <observations>
+      - Both copies of azt_collab_client/ (recorder copy and azt-collab
+        canonical) are linked at the filesystem level: edits to one
+        propagate to the other. Single edit covers both. The XML's
+        original "symlink" hint was correct; the cross-check verification
+        step is automatically satisfied.
+      - Verification commands cannot run from this sandbox (subprocess
+        is seccomp-blocked). Live verification has been done by the
+        user out-of-band after each step.
+      - Recorder ``_download_and_open`` left in place for now (it still
+        serves the arbitrary-URL clone-from-link flow that step 4
+        owns).
+      - clean_template stays in recorder's load_lift; moving it would
+        require duplicating lift.py into the daemon (out of scope).
+    </observations>
+  </progress>
+
+  <repo_layout>
+    The AZT suite lives under /home/kentr/bin/AZT/. Two sibling git repos:
+
+      /home/kentr/bin/AZT/azt_recorder/        — the recorder app (this repo)
+        main.py                                — single-file Kivy app + KV
+        azt_collab_client/                     — symlink to canonical client copy
+        collab.py                              — recorder's wrapper around
+                                                  azt_collab_client (logging,
+                                                  translations)
+
+      /home/kentr/bin/AZT/azt-collab/          — the shared backend repo
+        azt_collabd/                           — daemon (HTTP loopback +
+                                                  Android ContentProvider)
+          __main__.py                          — `python -m azt_collabd ui`
+          ui/app.py                            — standalone Kivy settings UI
+        azt_collab_client/                     — canonical client copy
+        examples/sister_app.py                 — runnable demo
+
+    Both use venv in /home/kentr/bin/AZT/env.
+    
+    On branch `collabd` of azt_recorder, the symlinks azt_collabd and
+    examples were removed (git status shows `D azt_collabd`,
+    `M azt_collab_client`, etc.). The recorder's azt_collab_client/ is a symlink. This was not understood earlier, but has been confirmed by the user; version drift should not be an issue.
+
+  </repo_layout>
+
+  <step1_bugfix>
+    <title>Fix open_server_ui() silent failure (and matching auto-spawn bug)</title>
+    <files>
+      <file>/home/kentr/bin/AZT/azt_recorder/azt_collab_client/__init__.py</file>
+      <file>/home/kentr/bin/AZT/azt_recorder/azt_collab_client/transports/loopback.py</file>
+      <file>/home/kentr/bin/AZT/azt-collab/azt_collab_client/__init__.py</file>
+      <file>/home/kentr/bin/AZT/azt-collab/azt_collab_client/transports/loopback.py</file>
+    </files>
+
+    <root_cause>
+      open_server_ui() at azt_collab_client/__init__.py:28-67 spawns
+      `[sys.executable, '-m', 'azt_collabd', 'ui']` with
+      stderr=subprocess.DEVNULL and reports ok=True purely on Popen
+      succeeding. When the recorder runs from /home/kentr/bin/AZT/azt_recorder/
+      without a symlink to azt_collabd, that subprocess exits 1 with
+      "No module named azt_collabd" — but stderr is swallowed and the
+      caller logs "Opened sync settings." (main.py:3207). User clicks the
+      button, sees the success log, nothing actually appears.
+
+      Same shape in transports/loopback.py:121-157 (_spawn_server) — the
+      daemon auto-spawn fires `python -m azt_collabd` the same way, with
+      the same suppressed stderr, but at least there the post-spawn
+      health-poll loop (lines 148-156) catches the failure by timing out;
+      caller eventually sees ServerUnavailable. Still worth fixing so the
+      timeout isn't the only signal.
+
+      Android is unaffected:
+        - open_server_ui() short-circuits at the top with
+          `return {'ok': False, 'error': 'desktop_only'}` for
+          platform == 'android'.
+        - On Android the client uses the ContentProvider transport
+          (transports/android_cp.py), not loopback, so _spawn_server is
+          never reached.
+    </root_cause>
+
+    <fix>
+      <change file="azt_collab_client/__init__.py">
+        Add a small private helper that locates azt_collabd:
+
+          def _locate_azt_collabd_parent():
+              """Return a directory that, when added to PYTHONPATH, makes
+              `import azt_collabd` work — or '' if azt_collabd is already
+              importable (or genuinely can't be found)."""
+              try:
+                  import azt_collabd  # noqa: F401
+                  return ''
+              except ImportError:
+                  pass
+              import os
+              here = os.path.dirname(os.path.abspath(__file__))
+              # azt_collab_client lives under either:
+              #   .../azt-collab/azt_collab_client/         (canonical)
+              #   .../<sister-app>/azt_collab_client/       (copy)
+              # Try sibling-of-grandparent .../azt-collab/azt_collabd
+              for candidate in (
+                  os.path.dirname(here),                                 # parent of azt_collab_client
+                  os.path.join(os.path.dirname(os.path.dirname(here)),
+                               'azt-collab'),                            # sibling-named azt-collab dir
+              ):
+                  if os.path.isdir(os.path.join(candidate, 'azt_collabd')):
+                      return candidate
+              return ''
+
+        Update open_server_ui():
+          - Build env: copy os.environ, prepend _locate_azt_collabd_parent()
+            to PYTHONPATH if non-empty.
+          - After Popen, poll proc.poll() for ~250 ms. If it returned a
+            non-zero code, return {'ok': False, 'error': 'spawn_exited',
+            'returncode': rc}. Otherwise {'ok': True, 'pid': proc.pid}.
+          - Pipe stderr to PIPE so we can include the first ~200 bytes in
+            the error dict on failure (not on success — keep it cheap).
+
+        On the recorder side (main.py:3198-3216 open_server_ui), the
+        existing 'desktop_only' / 'server_apk_not_installed' branches stay;
+        add a new 'spawn_exited' branch that surfaces a sensible message,
+        e.g. "Sync settings UI failed to start: {detail}" via _set_log.
+      </change>
+
+      <change file="azt_collab_client/transports/loopback.py">
+        Mirror the PYTHONPATH injection in _spawn_server (lines 121-157)
+        using the same helper. The post-spawn health-poll loop already
+        handles the failure mode, but consistency is worth it.
+      </change>
+
+      <verification>
+        - From azt_recorder/: `env/bin/python -c "from azt_collab_client
+          import open_server_ui; print(open_server_ui())"` should print
+          {'ok': True, 'pid': N} AND a Kivy settings window should open.
+        - Then kill it and rerun without azt_collabd findable (e.g.
+          temporarily move ../azt-collab/azt_collabd aside) — should print
+          {'ok': False, 'error': 'spawn_exited', ...}.
+        - Recorder UI: tap "Open sync settings" on welcome's gear page;
+          settings UI window should appear, log says "Opened sync
+          settings." On a deliberately-broken setup the log should say
+          something better than the current silent success.
+      </verification>
+
+      <do_not>
+        - Do NOT remove the 'desktop_only' early return.
+        - Do NOT change the Android ContentProvider transport.
+        - Do NOT add any user-visible Python traceback; failure path is
+          a translatable user-facing string.
+      </do_not>
+    </fix>
+  </step1_bugfix>
+
+  <step2_redesign>
+    <title>Move project-picking UX from recorder into azt_collab_client + azt_collabd</title>
+
+    <motivation>
+      "Pick or start a wordlist" is a project-registry operation. The
+      registry already lives server-side (azt_collabd/projects.py,
+      projects.json, register_project, list_projects). The recorder's
+      WelcomeScreen and LangPickerScreen and the "Start New" / clone /
+      open-file flows are duplicated work that every sister app would
+      otherwise re-implement. Move them once into the shared layer.
+
+      The recorder ends up as: "give me a project path, I'll open it
+      with my own LIFTDatabase loader." Sister apps mount the same
+      picker and supply their own loader.
+    </motivation>
+
+    <current_recorder_inventory>
+      Lines below are from /home/kentr/bin/AZT/azt_recorder/main.py at
+      the time this XML was written (commit f76210e on `collabd`). They
+      will drift; treat as starting points, then re-grep.
+
+      KV definitions:
+        - WelcomeScreen KV  : main.py:214 (registration), main.py:230 (block)
+        - LangPickerScreen  : main.py:222 (registration), main.py:1060 (block)
+
+      Python classes:
+        - class WelcomeScreen(Screen)     : main.py:1406
+        - class LangPickerScreen(Screen)  : main.py:1431
+          (uses LangPickerScreen._langtags class-level cache)
+
+      Recorder methods that drive the picker actions:
+        - open_file()                         : opens native file chooser
+                                                (Plyer / Android Intent),
+                                                returns LIFT path
+        - clone_dialog()                      : URL prompt, then clone
+        - show_start_over()                   : main.py:5009 — popup:
+                                                "Start a new wordlist
+                                                with this template?"
+        - new_from_template()                 : main.py:4266
+        - _download_and_open(url)             : downloads SILCAWL.zip,
+                                                unpacks, calls load_lift
+        - _SILCAWL_URL                        : template URL constant
+        - _pending_vernlang                   : transient state set by
+                                                LangPickerScreen, consumed
+                                                by load_lift() at
+                                                main.py:4712-4716
+
+      Recorder methods that stay recorder-only:
+        - load_lift(path)                     : LIFTDatabase + queue setup
+                                                — recorder-specific
+                                                consumer of a chosen path
+        - go_config()                         : recorder settings gear
+        - everything inside RecorderScreen and below
+
+      Recorder methods that already delegate correctly:
+        - open_server_ui (main.py:3198)       : already routes through
+                                                client; keep as-is after
+                                                step 1's fix
+        - do_sync, _auto_commit_sync, etc.    : already client-driven
+    </current_recorder_inventory>
+
+    <target_layout>
+      NEW module: /home/kentr/bin/AZT/azt-collab/azt_collab_client/ui/
+        __init__.py            — public exports
+        picker.py              — ProjectPickerScreen (KV + class)
+        langpicker.py          — LangPickerScreen (KV + class)
+        popups.py              — start_from_template_popup, clone URL
+                                 prompt, etc.
+        assets/langtags.json   — moved from azt_recorder/
+
+      NEW client API in azt_collab_client/__init__.py:
+        - open_project_from_path(path) -> Project
+            Wraps register_project(); returns the Project record. The
+            host app provides `path` from its native file picker.
+        - clone_project(url, dest_dir, host) -> Project
+            Routes through daemon (already mostly there); rename for
+            symmetry with the other two.
+        - create_project_from_template(template_url, vernlang, dest_dir)
+                                                                -> Project
+            Daemon downloads, unpacks, runs clean_template, registers.
+
+      NEW daemon endpoint(s) for the template download (so the daemon
+      owns network + disk for it):
+        POST /v1/projects/from_template
+            body: {template_url, vernlang, dest_dir}
+            returns: {ok, project: {...}}  or  {ok: False, error}
+
+      KV registration (host app does this once):
+          from azt_collab_client.ui import ProjectPickerScreen
+          ScreenManager:
+              ProjectPickerScreen:
+                  name: 'picker'
+                  on_project_ready: app.on_project_ready(*args)
+              LangPickerScreen:
+                  name: 'langpicker'   # owned by client, mounted by host
+              # ... host's own screens follow
+
+      Host callbacks the picker requires:
+        - request_file_path() -> str | None
+            Host pops its native file chooser; picker calls this when
+            the "Open from disk" action fires. Recorder wires it to its
+            existing Plyer/Android-Intent code.
+        - on_project_ready(project_path, project) -> None
+            Host receives the chosen project; for the recorder this is
+            essentially today's load_lift(project_path) + sm.current =
+            'recorder'.
+
+      Wiring pattern (host side):
+          picker = self.root.ids.picker
+          picker.request_file_path = self._native_file_picker
+          picker.bind(on_project_ready=self._on_project_ready)
+    </target_layout>
+
+    <function_relocation_table>
+      Nothing is being deleted from the ecosystem — every function moves
+      to a new home. This table is the contract.
+
+      | Recorder, today                         | New home                                                                |
+      |-----------------------------------------|-------------------------------------------------------------------------|
+      | WelcomeScreen KV (main.py:230)          | azt_collab_client/ui/picker.py KV                                       |
+      | class WelcomeScreen (main.py:1406)      | azt_collab_client/ui/picker.py — ProjectPickerScreen                    |
+      | LangPickerScreen KV (main.py:1060)      | azt_collab_client/ui/langpicker.py KV                                   |
+      | class LangPickerScreen (main.py:1431)   | azt_collab_client/ui/langpicker.py                                      |
+      | langtags asset                          | azt_collab_client/ui/assets/langtags.json                               |
+      | open_file()                             | host-supplied request_file_path() callback + open_project_from_path()  |
+      | clone_dialog()                          | URL-prompt UI in picker.py + azt_collab_client.clone_project()         |
+      | show_start_over() popup                 | azt_collab_client/ui/popups.py — start_from_template_popup()            |
+      | new_from_template()                     | azt_collab_client.create_project_from_template()                        |
+      | _download_and_open(url)                 | daemon: azt_collabd.projects.create_from_template()                     |
+      | _SILCAWL_URL                            | daemon config (azt_collabd/config.py) or a default in the client API   |
+      | clean_template logic                    | daemon: azt_collabd.projects (alongside create_from_template)           |
+      | _pending_vernlang plumbing              | internal state of ProjectPickerScreen; persisted on Project record     |
+      | existing-projects list rendering        | built into ProjectPickerScreen, driven by list_projects()              |
+
+      Stays recorder-only (genuinely recorder-specific, not migrated):
+        - load_lift(path) and everything it calls (LIFTDatabase,
+          RecorderController, queue rebuild, prefs, image cache).
+        - The gear button → go_config() → recorder settings page.
+        - The recorder's version label.
+        - Everything inside RecorderScreen.
+    </function_relocation_table>
+
+    <migration_order>
+      Land each step as its own commit; verify the recorder still works
+      between every step. Bump azt_collab_client.__version__ minor at
+      the end of step 2; bump major when step 5 lands and the recorder
+      no longer owns any picker code.
+
+      1. Step 1 bugfix (open_server_ui spawn) — already specified above;
+         lands first because it's needed to test the new picker UI from
+         the standalone azt_collabd ui app.
+
+      2. Move LangPickerScreen + langtags asset into
+         azt_collab_client/ui/langpicker.py. Recorder still owns
+         WelcomeScreen but imports LangPickerScreen from the client and
+         registers it in its ScreenManager. _pending_vernlang stays in
+         the recorder for now (consumed by load_lift). Verify: language
+         flow still works end-to-end on desktop; no behavior change.
+
+      3. Move template-download to the daemon:
+            - Add azt_collabd.projects.create_from_template(url,
+              vernlang, dest_dir, contributor) returning Project.
+            - Add POST /v1/projects/from_template endpoint.
+            - Add azt_collab_client.create_project_from_template().
+            - Recorder's new_from_template() becomes a thin wrapper that
+              calls the client API and then load_lift().
+            - SILCAWL URL moves to azt_collabd/config.py default.
+         Verify: "Start New" still produces a working LIFT.
+
+      4. Move clone path:
+            - Promote clone_project() to a public client API.
+            - The URL-prompt popup moves to ui/popups.py (callable from
+              recorder for now).
+         Verify: clone-from-URL produces a working LIFT.
+
+      5. Introduce ProjectPickerScreen in azt_collab_client/ui/picker.py.
+         Wire it into the recorder as a replacement for WelcomeScreen:
+            - Recorder's main.py imports ProjectPickerScreen, registers
+              it in the KV ScreenManager as name='picker', and removes
+              its WelcomeScreen KV+class.
+            - Host callbacks: request_file_path (recorder's existing
+              native picker), on_project_ready (load_lift + transition
+              to 'recorder' screen).
+            - Recorder deletes show_start_over, new_from_template (now
+              just inside picker), open_file (now just inside picker),
+              clone_dialog (now just inside picker).
+            - _pending_vernlang plumbing collapses into picker internals.
+         Verify: full welcome → pick / create / clone → recorder loop
+         on desktop and on Android (real device or emulator).
+
+      6. Reuse picker in standalone server UI:
+            - azt_collabd/ui/app.py adds the same ProjectPickerScreen as
+              its initial screen (replacing or augmenting today's
+              read-only "projects" tab). Validates that the picker is
+              host-app-agnostic.
+    </migration_order>
+
+    <android_considerations>
+      - Native file picker stays host-side: each app provides its own
+        request_file_path() because the Activity context is host-owned.
+        The picker UI calls the callback; it doesn't try to do anything
+        platform-specific itself.
+      - The picker UI must not import anything from azt_collabd directly
+        (the README convention: "client is free of any azt_collabd
+        dependency", azt_collab_client/paths.py:2). All daemon ops go
+        through the client RPC layer.
+      - Suite signing requirement (android/SUITE_FINGERPRINT) is
+        unchanged — the picker doesn't broaden the ContentProvider
+        surface, just calls existing endpoints.
+      - On Android the daemon runs in-process under the host APK; the
+        picker calls list_projects()/register_project() via the
+        ContentProvider transport. No subprocess.
+    </android_considerations>
+
+    <i18n>
+      All user-visible strings inside azt_collab_client/ui/* must use
+      the client's translator hook (azt_collab_client.translate.set_translator
+      pattern), not hard-code English. The recorder's existing _tr() can
+      be registered as the translator at startup. README convention:
+      "The backend has no Kivy and no i18n imports. UI marshaling and
+      translation are the host app's job." — but this UI module IS Kivy,
+      so the rule there is: pull translations through set_translator,
+      don't import gettext directly.
+      <exception>Host strings and translations from this UI here, so they can be one
+      source of truth, and sourced by clients.</exception>
+    </i18n>
+
+    <styling>
+      Use the existing theme module (recorder's theme.py), which should now be hosted in azt-collab (which should probably be renamed to `shared`, and sourced by clients from there.
+    </styling>
+
+    <do_not>
+      - Do NOT delete any function before its replacement is wired up
+        and verified — every step in the migration order must keep the
+        recorder runnable.
+      - Do NOT couple the picker to LIFT specifically. It hands back a
+        project path; whether the host treats that as a LIFT, a Toolbox
+        file, etc. is the host's problem.
+      - Do NOT introduce any synchronous network calls from the Kivy
+        main thread; template download / clone go through the daemon
+        and use request_sync / poll_job patterns where possible.
+      - Do NOT change the existing project registry on-disk format
+        without a migration. projects.json is shared with installed
+        sister apps.
+    </do_not>
+  </step2_redesign>
+
+  <ground_rules>
+    - User's CLAUDE.md says: increment version + update changelog for
+      changes; output explicit diffs to claud_diffs.txt with brief
+      rationale for each change; update setup_from_nuke.sh with each
+      step. Apply these to every commit.
+    - Sandboxing: stay inside /home/kentr/bin/AZT/azt_recorder/ unless
+      a change explicitly targets /home/kentr/bin/AZT/azt-collab/. Both
+      are in scope for this task.
+    - Build debug rule: limit build output to relevant errors; don't
+      read whole logs into context.
+    - Today's date: 2026-04-30.
+  </ground_rules>
+
+  <verification_checklist>
+    After each step, run from /home/kentr/bin/AZT/azt_recorder/:
+      env/bin/python -c "import azt_collab_client; print(azt_collab_client.__version__)"
+      env/bin/python -c "from azt_collab_client import open_server_ui; print(open_server_ui())"
+      bash tests/step15.sh   # smoke test for shared modules
+      bash tests/step16.sh   # sister-app example
+      env/bin/python main.py # launch the recorder, exercise the welcome
+                             # → picker / langpicker / loaded recorder
+                             # path that the step touched.
+
+    Cross-check both copies of azt_collab_client/ remain identical
+    (recorder copy and azt-collab copy). Diff them at the end of every
+    step.
+  </verification_checklist>
+</task>

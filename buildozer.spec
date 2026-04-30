@@ -18,23 +18,25 @@ fullscreen = 0
 
 android.permissions = INTERNET,RECORD_AUDIO,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE,CAMERA,org.atoznback.AZT_COLLAB_ACCESS
 
-# AZT collab ContentProvider — exported behind a signature-level
-# permission so only suite-signed APKs can reach it.
-android.add_src = android/src/main/java
-# Custom permission declaration + provider element. The
-# manifest_extra_xml block is appended inside <manifest> by p4a's
-# template; manifest_application_extra_xml goes inside <application>.
-android.manifest_extra_xml = <permission android:name="org.atoznback.AZT_COLLAB_ACCESS" android:protectionLevel="signature" />
-android.manifest_application_extra_xml = <provider android:name="org.atoznback.aztcollab.AZTCollabProvider" android:authorities="org.atoznback.azt_recorder.aztcollab" android:exported="true" android:permission="org.atoznback.AZT_COLLAB_ACCESS" android:grantUriPermissions="true" />
+# AZT collab ContentProvider lives in the standalone server APK
+# (org.atoznback.aztcollab). The recorder is a pure peer: it
+# <uses-permission>s the suite signature permission (declared above
+# in android.permissions) and <queries> the server APK so
+# PackageManager.queryContentProviders can see it on Android 11+.
+# Do NOT declare <permission> or <provider> here — the server APK
+# owns both (see README_NewClient.txt §3). The Java provider class
+# also ships in the server APK, so no android.add_src is needed.
+android.manifest_extra_xml = <queries><package android:name="org.atoznback.aztcollab" /></queries>
 #android.api = 33
 android.minapi = 26
 android.archs = arm64-v8a, armeabi-v7a
 android.release_artifact = apk                                                                                                         
-android.signing.keystore = /path/to/azt-suite.keystore                                                                                 
-android.signing.key_alias = azt                                                                                                        
+android.signing.keystore = /home/kentr/bin/azt-suite.keystore                                                     
+android.signing.key_alias = azt                                              
 
 p4a.branch = master
-p4a.hook = %(source.dir)s/../buildozer_tweaks/p4a_hook.py
+p4a.hook = /home/kentr/bin/raspy/buildozer_tweaks/p4a_hook.py
+p4a.local_recipes = /home/kentr/bin/raspy/buildozer_tweaks/recipes.
 android.api = 36
 #p4a.develop:
 android.ndk = 29 
@@ -58,4 +60,4 @@ android.presplash_color = #1a1612
 [buildozer]
 log_level = 2
 warn_on_root = 1
-build_dir = .buildozer
+build_dir = /home/kentr/bin/AZT/.buildozer

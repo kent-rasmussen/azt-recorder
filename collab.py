@@ -1,31 +1,32 @@
 """
 Tombstone — the legacy ``collab`` shim has been retired.
 
-Importers should use the canonical paths:
+Peer apps (including this one) are now pure clients of the AZT collab
+server APK. Use the client library:
 
-    from azt_collabd.net    import _has_internet
-    from azt_collabd.auth   import (
-        device_flow_start, device_flow_poll, get_github_username,
-        check_app_installed, app_install_url,
-        GITHUB_APP_CLIENT_ID, GITHUB_APP_NAME,
-        GITHUB_COLLABORATOR, GITHUB_APP_INSTALL_URL,
-    )
-    from azt_collabd.repo   import (
-        init_repo, clone_repo, pull_repo, sync_repo,
-        commit_and_push_branch, commit_audio_and_sync,
-        repo_status_summary,
-    )
-    from azt_collabd.status import Status, Result, AuthError
-    from azt_collabd.store  import (
-        save_tokens, get_valid_token, get_sync_credentials,
-        get_credentials_status,
+    import azt_collab_client
+    azt_collab_client.configure(app_id='azt-recorder')
+
+    from azt_collab_client import (
+        is_online, check_server_compat, open_server_ui,
+        get_credentials_status, set_collab_host,
+        github_app_install_url, github_app_client_id,
+        github_device_flow_start, github_device_flow_status,
+        save_github_tokens, mark_github_app_installed,
+        save_gitlab_credentials, migrate_from_prefs,
+        list_projects, open_project, register_project,
+        derive_langcode, init_project,
+        clone_project_start, clone_project_status,
+        project_status, sync_project, request_sync, poll_job,
+        translate_status, translate_result,
+        Status, Result, S, ServerUnavailable, SERVER_APK_INSTALL_URL,
     )
 
-This file can be deleted once you've grepped to confirm nothing in
-your tree still imports from it.
+Direct ``azt_collabd.*`` imports are forbidden in peer apps — that
+package only ships in the standalone server APK / desktop install.
 """
 
 raise ImportError(
     "the legacy 'collab' module has been retired; "
-    "import from azt_collabd.* instead "
-    "(see collab.py docstring for the mapping)")
+    "peer apps must import from azt_collab_client instead "
+    "(see collab.py docstring for the API surface)")
