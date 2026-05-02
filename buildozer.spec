@@ -11,7 +11,7 @@ source.exclude_dirs = azt_images,env,.venv,venv,__pycache__
 version.regex = __version__ = ['"](.*)['"]
 version.filename = %(source.dir)s/main.py
 
-requirements = python3,kivy==2.3.1,pillow,sounddevice,soundfile,numpy,dulwich,certifi,filetype,typing_extensions
+requirements = python3,kivy==2.3.1,pillow,sounddevice,soundfile,numpy,certifi,filetype,typing_extensions
 
 orientation = portrait
 fullscreen = 0
@@ -24,19 +24,29 @@ android.permissions = INTERNET,RECORD_AUDIO,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL
 # in android.permissions) and <queries> the server APK so
 # PackageManager.queryContentProviders can see it on Android 11+.
 # Do NOT declare <permission> or <provider> here — the server APK
-# owns both (see README_NewClient.txt §3). The Java provider class
-# also ships in the server APK, so no android.add_src is needed.
-android.manifest_extra_xml = <queries><package android:name="org.atoznback.aztcollab" /></queries>
+# owns both. The Java provider class also ships in the server APK,
+# so no android.add_src is needed.
+#
+# `manifest_extras.xml` is a symlink to
+# ../azt-collab/android/manifest_extras_peer.xml — the canonical
+# peer manifest extras shared by all suite peer apps. See
+# azt-collab/CLAUDE.md sister-app integration section.
+#
+# Note: key is `extra_manifest_xml` (buildozer silently ignores
+# `manifest_extra_xml`). Value must be a file path; inline XML is not
+# accepted (buildozer does open(value).read()).
+android.extra_manifest_xml = %(source.dir)s/manifest_extras.xml
 #android.api = 33
 android.minapi = 26
 android.archs = arm64-v8a, armeabi-v7a
-android.release_artifact = apk                                                                                                         
+#This avoids creating an aab, but also turns off signing (you need to self-sign)
+android.release_artifact = apk
 android.signing.keystore = /home/kentr/bin/azt-suite.keystore                                                     
 android.signing.key_alias = azt                                              
 
 p4a.branch = master
 p4a.hook = /home/kentr/bin/raspy/buildozer_tweaks/p4a_hook.py
-p4a.local_recipes = /home/kentr/bin/raspy/buildozer_tweaks/recipes.
+p4a.local_recipes = /home/kentr/bin/raspy/buildozer_tweaks/recipes
 android.api = 36
 #p4a.develop:
 android.ndk = 29 
@@ -44,6 +54,8 @@ android.ndk = 29
 #android.ndk = 27
 #NDK r27's cmake flags don't work with cmake 3.31 — IN_LIST requires cmake policy CMP0057. NDK r28 fixed this (but broke something else):
 #android.ndk = 28
+p4a.sign = True
+#android.release_armeabi_v7a = True
 
 # Allow reading files from external storage (shared LIFT files)
 android.allow_backup = False

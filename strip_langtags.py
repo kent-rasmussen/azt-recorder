@@ -12,7 +12,9 @@ if len(sys.argv) > 1:
     SRC = sys.argv[1]
 
 SRC = os.path.expanduser(SRC)
-DEST = os.path.join(os.path.dirname(__file__), 'langtags_mini.json.gz')
+DEST = os.path.join(os.path.dirname(__file__),
+                    'azt_collab_client', 'ui', 'assets',
+                    'langtags_mini.json.gz')
 
 KEEP = {
     'tag':       't',

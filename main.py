@@ -15,15 +15,13 @@ import traceback
 import warnings
 
 from appinfo import APP_NAME, APP_TAGLINE, APP_USER_AGENT, APP_ICON, APP_SLUG
-import theme
 from i18n import _ as _tr, set_language, current_language, available_languages
 
 # Tell the collab backend who we are. Defaults match the recorder, but
 # calling configure() documents the contract and lets other suite apps
 # override identity values via the same hook.
 import azt_collab_client
-from azt_collab_client.ui import (
-    LangPickerScreen, register_langpicker_kv, clone_url_popup)
+from azt_collab_client.ui import theme
 azt_collab_client.configure(app_id='azt-recorder')
 
 
@@ -193,7 +191,7 @@ _FONT_NAME = 'CharisSIL' if _CHARIS_AVAILABLE else 'Roboto'
 KV_TEMPLATE = '''
 #:import dp kivy.metrics.dp
 #:import sp kivy.metrics.sp
-#:import T theme
+#:import T azt_collab_client.ui.theme
 #:import _ i18n._
 #:set FONT '{font_name}'
 
@@ -213,114 +211,17 @@ KV_TEMPLATE = '''
             height: root._inset_top
         ScreenManager:
             id: sm
-            WelcomeScreen:
-                name: 'welcome'
             RecorderScreen:
                 name: 'recorder'
             ConfigScreen:
                 name: 'config'
             CollabScreen:
                 name: 'collab'
-            LangPickerScreen:
-                name: 'langpicker'
             ImagePickerScreen:
                 name: 'imagepicker'
         Widget:
             size_hint_y: None
             height: root._inset_bottom
-
-<WelcomeScreen>:
-    canvas.before:
-        Color:
-            rgba: T.BG
-        Rectangle:
-            pos: self.pos
-            size: self.size
-    BoxLayout:
-        orientation: 'vertical'
-        # ── Gear row (no padding so it hugs the right edge) ──────
-        BoxLayout:
-            size_hint_y: None
-            height: dp(44)
-            padding: 0, dp(4), dp(8), 0
-            Widget:
-            Button:
-                size_hint: None, None
-                size: dp(44), dp(44)
-                background_color: T.TRANSPARENT
-                background_normal: ''
-                on_release: app.go_config()
-                Image:
-                    source: 'icons/gear.png'
-                    size: dp(28), dp(28)
-                    size_hint: None, None
-                    center: self.parent.center
-                    allow_stretch: True
-                    keep_ratio: True
-        # ── Main content ─────────────────────────────────────────
-        BoxLayout:
-            orientation: 'vertical'
-            padding: dp(40), 0, dp(40), dp(20)
-            spacing: dp(12)
-            Image:
-                source: app.icon #'icons/icon.png'
-                size_hint: None, None
-                size: dp(200), dp(200)
-                pos_hint: {{'center_x': 0.5}}
-            Label:
-                text: app.title
-                font_size: sp(28)
-                font_name: FONT
-                bold: True
-                color: T.ACCENT
-                size_hint_y: None
-                height: dp(40)
-            Label:
-                text: app.subtitle
-                font_size: sp(16)
-                font_name: FONT
-                color: T.TEXT_DIM
-                size_hint_y: None
-                height: dp(24)
-            Widget:
-                size_hint_y: None
-                height: dp(8)
-            ScrollView:
-                size_hint_y: 1
-                do_scroll_x: False
-                BoxLayout:
-                    orientation: 'vertical'
-                    size_hint_y: None
-                    height: self.minimum_height
-                    spacing: dp(20)
-                    RecBtn:
-                        text: _('I have one on my phone')
-                        normal_color: T.ACCENT
-                        on_release: app.open_file()
-                    RecBtn:
-                        text: _('Clone Internet Repository')
-                        normal_color: T.BTN_INACTIVE
-                        on_release: app.clone_dialog()
-                    RecBtn:
-                        text: _('Start New')
-                        normal_color: T.BTN_INACTIVE
-                        on_release: app.show_start_over() #< should be Start a new wordlist
-                    # ── Existing projects ─────────────────────────────────────
-                    BoxLayout:
-                        id: project_list
-                        orientation: 'vertical'
-                        size_hint_y: None
-                        height: self.minimum_height
-                        spacing: dp(6)
-            Label:
-                text: app.version_string
-                font_size: sp(11)
-                font_name: FONT
-                color: T.TEXT_FAINT
-                size_hint_y: None
-                height: dp(20)
-                halign: 'center'
-                text_size: self.size
 
 <RecorderScreen>:
     canvas.before:
@@ -681,7 +582,7 @@ KV_TEMPLATE = '''
                     RecBtn:
                         text: _('Start over')
                         normal_color: T.BTN_INACTIVE
-                        on_release: app.go_welcome()
+                        on_release: app.start_over()
                 Widget:
                     size_hint_y: None
                     height: dp(40)
@@ -1353,31 +1254,6 @@ class RootScreen(Screen):
             print(f'[insets] top={self._inset_top:.0f}  bottom={self._inset_bottom:.0f}')
         except Exception as ex:
             print(f'[insets] could not read: {ex}')
-
-
-class WelcomeScreen(Screen):
-
-    def on_enter(self):
-        self._populate_projects()
-
-    def _populate_projects(self):
-        box = self.ids.get('project_list')
-        if not box:
-            return
-        box.clear_widgets()
-        app = App.get_running_app()
-        projects = app.list_projects()
-        if not projects:
-            return
-        for name, path in projects:
-            btn = Builder.load_string(
-                'RecBtn:\n'
-                f'    text: {name!r}\n'
-                '    normal_color: T.GREEN\n'
-            )
-            btn.lift_path = path
-            btn.bind(on_release=lambda b: app.load_lift(b.lift_path))
-            box.add_widget(btn)
 
 
 class ImagePickerScreen(Screen):
@@ -2532,7 +2408,7 @@ class ConfigScreen(Screen):
             app.recorder.rebuild_queue()
             app.go_recorder()
         else:
-            app.go_welcome()
+            app.start_over()
 
 
 class CollabScreen(Screen):
@@ -2587,11 +2463,15 @@ class CollabScreen(Screen):
         self._save_settings()
 
     def close_collab(self):
-        """X button: go back to config (if project loaded) or welcome."""
+        """X button: go back to config (if a project is loaded);
+        otherwise relaunch the picker."""
         app = App.get_running_app()
         sm = app.root.ids.sm
         sm.transition = SlideTransition(direction='right')
-        sm.current = 'config' if app.recorder else 'welcome'
+        if app.recorder:
+            sm.current = 'config'
+        else:
+            app.start_over()
 
     def _update_connect_enabled(self):
         """Grey out connect/reconnect button when name is blank."""
@@ -3467,7 +3347,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.26.0'
+__version__ = '1.28.1'
 
 
 class LIFTRecorderApp(App):
@@ -3550,11 +3430,6 @@ class LIFTRecorderApp(App):
             set_language(prefs.get('ui_language', 'en'))
             self.subtitle = _tr(APP_TAGLINE)
             Builder.load_string(KV)
-            register_langpicker_kv(
-                font_name=_FONT_NAME,
-                langtags_path=os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)),
-                    'langtags_mini.json.gz'))
             self.root = RootScreen()
             # Move any legacy credential keys out of prefs.json into
             # $AZT_HOME/credentials.json. Idempotent.
@@ -3589,11 +3464,16 @@ class LIFTRecorderApp(App):
             # azt_collab_client transport instead.
             # Handle Android back button / ESC key
             Window.bind(on_keyboard=self._on_back_button)
-            # Auto-load last used LIFT file if it still exists
+            # Auto-load last used LIFT file if it still exists; else
+            # spawn the picker subprocess so the user can choose one.
+            # The recorder no longer hosts an in-process picker — see
+            # azt_collab_picker_migration.xml step 7.
             prefs = self._load_prefs()
             last = prefs.get('last_lift', '')
             if last and os.path.isfile(last) and os.path.getsize(last) > 50:
                 Clock.schedule_once(lambda dt: self.load_lift(last), 0.3)
+            else:
+                Clock.schedule_once(lambda dt: self.start_over(), 0.3)
             # One-shot server compatibility / install probe. Defer one
             # frame so the UI is up before any toast.
             Clock.schedule_once(lambda dt: self._check_server_compat(), 0.5)
@@ -3647,80 +3527,17 @@ class LIFTRecorderApp(App):
         if key != 27:
             return False
         sm = self.root.ids.sm
-        if sm.current == 'welcome':
-            return False  # let the system close the app
         if sm.current == 'recorder':
             return False  # let the system close the app
         elif sm.current in ('config', 'collab'):
             sm.transition = SlideTransition(direction='right')
-            sm.current = 'recorder' if self.recorder else 'welcome'
-        elif sm.current == 'langpicker':
-            sm.transition = SlideTransition(direction='right')
-            sm.current = 'welcome'
+            sm.current = 'recorder'
         elif sm.current == 'imagepicker':
             sm.transition = SlideTransition(direction='right')
             sm.current = 'recorder'
         else:
             return False
         return True
-
-    def open_file(self):
-        if platform == 'android':
-            self._open_file_android()
-        elif platform == 'ios':
-            self._open_file_ios()
-        else:
-            self._open_file_desktop()
-
-    # ── Open from URL ──────────────────────────────────────────────────────────
-
-    def open_url_dialog(self):
-        """Show a dialog where the user can paste a URL to a .lift file."""
-        from kivy.uix.popup import Popup
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.textinput import TextInput
-        from kivy.uix.button import Button
-        from kivy.uix.label import Label
-
-        content = BoxLayout(orientation='vertical', spacing=dp(12), padding=dp(12))
-        content.add_widget(Label(
-            text=_tr('Paste the URL to a .lift file:'),
-            size_hint_y=None, height=dp(30),
-            font_size=sp(14), color=theme.TEXT,
-        ))
-        url_input = TextInput(
-            text='', hint_text='https://example.com/path/to/file.lift',
-            multiline=False, size_hint_y=None, height=dp(44),
-            font_size=sp(14),
-        )
-        content.add_widget(url_input)
-        btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
-        cancel_btn = Button(text=_tr('Cancel'), font_size=sp(14))
-        open_btn = Button(text=_tr('Open'), font_size=sp(14),
-                          background_color=theme.ACCENT)
-        btn_row.add_widget(cancel_btn)
-        btn_row.add_widget(open_btn)
-        content.add_widget(btn_row)
-
-        popup = Popup(
-            title=_tr('Open LIFT from URL'),
-            content=content,
-            size_hint=(0.9, None), height=dp(220),
-            auto_dismiss=True,
-        )
-        cancel_btn.bind(on_release=popup.dismiss)
-        open_btn.bind(on_release=lambda *a: self._do_open_url(
-            url_input.text.strip(), popup))
-        popup.open()
-
-    def _do_open_url(self, url, popup):
-        """Download a .lift file from *url* to user_data_dir and open it."""
-        popup.dismiss()
-        if not url:
-            return
-        import threading
-        threading.Thread(
-            target=self._download_and_open, args=(url,), daemon=True).start()
 
     @staticmethod
     def _ssl_context():
@@ -3755,123 +3572,6 @@ class LIFTRecorderApp(App):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
-
-    @staticmethod
-    def _parse_git_url(url):
-        """If url is a raw GitHub/GitLab file URL, return (clone_url, None).
-        Returns (None, None) if not recognisable as a git-hosted file."""
-        import re
-        # GitHub raw: https://raw.githubusercontent.com/OWNER/REPO/BRANCH/path
-        m = re.match(
-            r'https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/', url)
-        if m:
-            return f'https://github.com/{m.group(1)}/{m.group(2)}.git', None
-        # GitHub blob: https://github.com/OWNER/REPO/blob/BRANCH/path
-        m = re.match(
-            r'https://github\.com/([^/]+)/([^/]+)/blob/', url)
-        if m:
-            return f'https://github.com/{m.group(1)}/{m.group(2)}.git', None
-        # GitLab raw: https://gitlab.com/OWNER/REPO/-/raw/BRANCH/path
-        m = re.match(
-            r'https://gitlab\.com/([^/]+)/([^/]+)/-/raw/', url)
-        if m:
-            return f'https://gitlab.com/{m.group(1)}/{m.group(2)}.git', None
-        return None, None
-
-    def _download_and_open(self, url):
-        """Background: download a .lift file and schedule load on main thread.
-        If the URL points to a file inside a git repo, clone the repo instead."""
-        import urllib.request
-        try:
-            # When creating from template with a vernlang, use it as dir and filename
-            vernlang = getattr(self, '_pending_vernlang', '')
-
-            # Check if URL is from a git repo — clone instead of downloading
-            clone_url, _ = self._parse_git_url(url)
-            if clone_url and not vernlang:
-                # Clone the whole repo (server-driven; no progress UI here)
-                repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')
-                dest = os.path.join(self.user_data_dir, 'projects', repo_name)
-                self._clone_via_server(clone_url, dest, on_progress=None)
-                return
-
-            if vernlang:
-                project_dir = os.path.join(self.user_data_dir, 'projects', vernlang)
-                os.makedirs(project_dir, exist_ok=True)
-                dest = os.path.join(project_dir, f'{vernlang}.lift')
-                # Pre-fill the language code for publish
-                prefs = self._load_prefs()
-                prefs['collab_langcode'] = vernlang
-                self._save_prefs_dict(prefs)
-            else:
-                filename = url.rstrip('/').split('/')[-1]
-                if not filename.endswith('.lift'):
-                    filename = 'downloaded.lift'
-                name = filename.replace('.lift', '')
-                project_dir = os.path.join(self.user_data_dir, 'projects', name)
-                os.makedirs(project_dir, exist_ok=True)
-                dest = os.path.join(project_dir, filename)
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, context=self._ssl_context()) as resp:
-                content = resp.read()
-            if not content or len(content) < 50:
-                raise RuntimeError(f'Download returned {len(content)} bytes')
-            with open(dest, 'wb') as f:
-                f.write(content)
-            Clock.schedule_once(lambda dt: self.load_lift(dest), 0)
-        except Exception as ex:
-            msg = f'Could not download:\n{ex}'
-            print(f'URL download error: {ex}')
-            Clock.schedule_once(lambda dt: self._dismiss_loading_overlay(), 0)
-            Clock.schedule_once(lambda dt: self._show_error(msg), 0)
-
-    # ── New from SILCAWL template ──────────────────────────────────────────────
-
-    def new_from_template(self):
-        """Show language picker first, then ask the daemon to download
-        the SILCAWL (default) template. The daemon owns the URL, the
-        download, and project registration; the recorder just opens the
-        resulting LIFT path."""
-        if not getattr(self, '_pending_vernlang', ''):
-            sm = self.root.ids.sm
-            sm.transition = SlideTransition(direction='left')
-            sm.current = 'langpicker'
-            return
-        vernlang = self._pending_vernlang
-        dest_dir = os.path.join(
-            self.user_data_dir, 'projects', vernlang)
-        prefs = self._load_prefs()
-        prefs['collab_langcode'] = vernlang
-        self._save_prefs_dict(prefs)
-
-        def _worker():
-            from azt_collab_client import create_project_from_template
-            err = ''
-            project = None
-            try:
-                ret = create_project_from_template(
-                    vernlang=vernlang, dest_dir=dest_dir)
-            except Exception as ex:
-                err = f'exception: {ex}'
-            else:
-                if isinstance(ret, tuple):
-                    project, err = ret
-                else:
-                    project = ret
-            if project and project.lift_path:
-                Clock.schedule_once(
-                    lambda dt: self.load_lift(project.lift_path), 0)
-                return
-            print(f'[new_from_template] failed: {err}', file=sys.stderr)
-            msg = _tr('Could not download template:\n{detail}').format(
-                detail=err or 'unknown')
-            Clock.schedule_once(
-                lambda dt: self._dismiss_loading_overlay(), 0)
-            Clock.schedule_once(
-                lambda dt: self._show_error(msg), 0)
-
-        import threading
-        threading.Thread(target=_worker, daemon=True).start()
 
     def _show_loading_overlay(self, msg):
         """Show a modal overlay that stays until dismissed."""
@@ -4033,23 +3733,6 @@ class LIFTRecorderApp(App):
         btn.bind(on_release=_go)
         popup.open()
 
-    def _open_file_android(self):
-        """Use Android file picker intent."""
-        try:
-            from android.storage import primary_external_storage_path
-            from jnius import autoclass, cast
-            Intent = autoclass('android.content.Intent')
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            Uri = autoclass('android.net.Uri')
-
-            intent = Intent(Intent.ACTION_GET_CONTENT)
-            intent.setType('*/*')
-            intent.addCategory(Intent.CATEGORY_OPENABLE)
-            PythonActivity.mActivity.startActivityForResult(intent, 1001)
-            # Result handled in on_activity_result
-        except Exception as ex:
-            print(f'Android file picker error: {ex}')
-
     def _on_activity_result_wrapper(self, request_code, result_code, intent):
         """Wrapper for android.activity.bind — runs off main thread.
         Extract data from intent here (Java refs may not survive thread hop),
@@ -4058,15 +3741,7 @@ class LIFTRecorderApp(App):
         if result_code != -1:  # not RESULT_OK
             print(f'[activity-result] not RESULT_OK, ignoring')
             return
-        if request_code == 1001:
-            try:
-                uri = intent.getData()
-                path = self._uri_to_path(uri)
-                if path:
-                    Clock.schedule_once(lambda dt: self.load_lift(path), 0)
-            except Exception as ex:
-                print(f'Activity result error: {ex}')
-        elif request_code == 1002:
+        if request_code == 1002:
             try:
                 uri = intent.getData()
                 path = self._uri_to_image_path(uri)
@@ -4148,92 +3823,6 @@ class LIFTRecorderApp(App):
         except Exception as ex:
             print(f'Save bitmap error: {ex}')
             return None
-
-    def _uri_to_path(self, uri):
-        try:
-            from jnius import autoclass
-            context = autoclass('org.kivy.android.PythonActivity').mActivity
-            cursor = context.getContentResolver().query(uri, None, None, None, None)
-            cursor.moveToFirst()
-            idx = cursor.getColumnIndex('_data')
-            if idx >= 0:
-                path = cursor.getString(idx)
-                cursor.close()
-                return path
-            cursor.close()
-            # Fallback: copy to cache
-            import shutil
-            stream = context.getContentResolver().openInputStream(uri)
-            cache = os.path.join(self.user_data_dir, 'tmp.lift')
-            with open(cache, 'wb') as f:
-                buf = stream.read()
-                f.write(buf)
-            return cache
-        except Exception as ex:
-            print(f'URI to path error: {ex}')
-            return None
-
-    def _open_file_ios(self):
-        """Use UIDocumentPickerViewController on iOS."""
-        try:
-            from pyobjus import autoclass as objc_class
-            from pyobjus.dylib_manager import load_framework
-            load_framework('/System/Library/Frameworks/UIKit.framework')
-            load_framework('/System/Library/Frameworks/MobileCoreServices.framework')
-            UIDocumentPickerVC = objc_class('UIDocumentPickerViewController')
-            UTType = objc_class('NSString')
-            # kUTTypeItem — picks any file
-            picker = UIDocumentPickerVC.alloc() \
-                .initWithDocumentTypes_inMode_([UTType.stringWithString_('public.item')], 0)
-            UIApplication = objc_class('UIApplication')
-            root_vc = UIApplication.sharedApplication().keyWindow.rootViewController
-            root_vc.presentViewController_animated_completion_(picker, True, None)
-            # Poll for result — pyobjus doesn't support delegate callbacks
-            # directly, so use a scheduled check
-            self._ios_doc_picker = picker
-            Clock.schedule_interval(self._poll_ios_doc_picker, 0.3)
-        except Exception as ex:
-            print(f'iOS file picker error: {ex}')
-
-    def _poll_ios_doc_picker(self, dt):
-        """Check if the iOS document picker has been dismissed with a result."""
-        try:
-            picker = self._ios_doc_picker
-            if picker.presentingViewController is not None:
-                return  # still presented
-            Clock.unschedule(self._poll_ios_doc_picker)
-            urls = picker.URLs
-            if urls and urls.count() > 0:
-                url = urls.objectAtIndex_(0)
-                path = url.path.UTF8String()
-                if path:
-                    # Copy to app sandbox in case it's a security-scoped URL
-                    dest = os.path.join(self.user_data_dir, 'tmp.lift')
-                    import shutil
-                    shutil.copy2(path, dest)
-                    self.load_lift(dest)
-            self._ios_doc_picker = None
-        except Exception as ex:
-            print(f'iOS doc picker poll error: {ex}')
-            Clock.unschedule(self._poll_ios_doc_picker)
-            self._ios_doc_picker = None
-
-    def _open_file_desktop(self):
-        """Use tkinter file dialog on desktop."""
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root_tk = tk.Tk()
-            root_tk.withdraw()
-            path = filedialog.askopenfilename(
-                title=_tr('Open LIFT file'),
-                filetypes=[('LIFT files', '*.lift'), ('All files', '*.*')],
-            )
-            root_tk.destroy()
-            if path:
-                self.load_lift(path)
-        except Exception as ex:
-            print(f'Desktop file dialog error: {ex}')
 
     def _image_repo(self):
         """Return the configured image repo, or default."""
@@ -4602,59 +4191,94 @@ class LIFTRecorderApp(App):
         # place.
         Clock.schedule_once(lambda dt: self._update_sync_status(), 1.5)
 
-    def show_start_over(self):
-        """Show template/image repo info, then navigate to welcome screen."""
-        from kivy.uix.popup import Popup
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.label import Label
-        from kivy.uix.button import Button
-
-        content = BoxLayout(orientation='vertical', spacing=dp(6), padding=dp(6))
-        template = ''
-        image_repo = ''
-        if self.recorder:
-            template = self.recorder.db.list_type or '(unknown)'
-            image_repo = self.recorder.db.image_repo or 'https://github.com/kent-rasmussen/images_CAWL'
-        content.add_widget(Label(
-            text=f'Template: {template}\nImage repo: {image_repo}',
-            font_size=sp(14), font_name=_FONT_NAME,
-            color=theme.TEXT,
-            size_hint_y=None, height=dp(60),
-            halign='left', valign='top',
-            text_size=(dp(280), None),
-        ))
-        content.add_widget(Label(
-            text=_tr('Start a new wordlist with this template?'),
-            font_size=sp(14), font_name=_FONT_NAME,
-            color=theme.TEXT_DIM,
-            size_hint_y=None, height=dp(30),
-        ))
-        btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
-        cancel_btn = Button(text=_tr('Cancel'), font_size=sp(14))
-        go_btn = Button(text=_tr('Yes'), font_size=sp(14),
-                        background_color=theme.ACCENT)
-        btn_row.add_widget(go_btn)
-        btn_row.add_widget(cancel_btn)
-        content.add_widget(btn_row)
-
-        popup = Popup(
-            title=_tr('Start a new wordlist'),
-            content=content,
-            size_hint=(0.9, None), height=dp(240),
-            auto_dismiss=True,
-        )
-        cancel_btn.bind(on_release=popup.dismiss)
-        def _go(*a):
-            popup.dismiss()
-            self.new_from_template() #was go_welcome() #< should be langpicker
-        go_btn.bind(on_release=_go)
-        popup.open()
-
-    def go_welcome(self):
+    def start_over(self):
+        """Commit/sync, gray-out the recorder, spawn the picker helper,
+        then either load the chosen LIFT or restore the recorder window
+        on cancel."""
         self._auto_commit_sync()
-        sm = self.root.ids.sm
-        sm.transition = SlideTransition(direction='right')
-        sm.current = 'welcome'
+        self._pick_cancelled = False
+        self._show_pick_overlay()
+        from azt_collab_client import pick_project
+        import threading
+
+        def _worker():
+            result = pick_project()
+            Clock.schedule_once(
+                lambda dt: self._handle_pick(result), 0)
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_pick_overlay(self):
+        """Modal overlay that blocks input on the recorder while the
+        picker is open. Dismissed in _handle_pick on a successful or
+        failed pick; user can also dismiss it manually via the Cancel
+        button if the picker subprocess / Activity is wedged."""
+        from kivy.uix.modalview import ModalView
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.button import Button
+        from kivy.uix.label import Label
+        self._pick_overlay = ModalView(
+            size_hint=(0.7, None), height=dp(180),
+            auto_dismiss=False,
+            background_color=theme.OVERLAY_DARK)
+        box = BoxLayout(orientation='vertical', padding=dp(12),
+                        spacing=dp(10))
+        box.add_widget(Label(
+            text=_tr('Pick a project to continue.'),
+            font_name=_FONT_NAME, color=theme.TEXT))
+        cancel = Button(
+            text=_tr('Cancel'),
+            size_hint_y=None, height=dp(48),
+            font_name=_FONT_NAME)
+        cancel.bind(on_release=lambda *a: self._cancel_pick_overlay())
+        box.add_widget(cancel)
+        self._pick_overlay.add_widget(box)
+        self._pick_overlay.open()
+
+    def _cancel_pick_overlay(self):
+        """User tapped Cancel on the overlay. Dismiss it; the worker
+        thread keeps running but its result will be ignored because
+        _pick_cancelled is True."""
+        self._pick_cancelled = True
+        self._hide_pick_overlay()
+
+    def _hide_pick_overlay(self):
+        ov = getattr(self, '_pick_overlay', None)
+        if ov is not None:
+            try:
+                ov.dismiss()
+            except Exception:
+                pass
+            self._pick_overlay = None
+
+    def _handle_pick(self, result):
+        self._hide_pick_overlay()
+        if getattr(self, '_pick_cancelled', False):
+            # User already bailed out via the overlay's Cancel button;
+            # any incoming result is stale.
+            return
+        if result.get('ok'):
+            langcode = result.get('langcode', '')
+            if langcode:
+                self._pending_vernlang = langcode
+            self.load_lift(result['path'])
+            return
+        err = result.get('error', 'unknown')
+        if err == 'cancelled':
+            # Cancel on cold start (no project loaded) leaves the
+            # recorder window with no LIFT; cancel during Start over
+            # leaves the previous project loaded. Either way: silent.
+            return
+        if err == 'server_apk_not_installed':
+            from azt_collab_client import SERVER_APK_INSTALL_URL
+            import webbrowser
+            self._show_error(_tr(
+                'AZT collab service not installed. '
+                'Opening install page...'))
+            webbrowser.open(SERVER_APK_INSTALL_URL)
+            return
+        self._show_error(_tr(
+            'Could not open project picker: {error}')
+                .format(error=err))
 
     def go_config(self):
         self._auto_commit_sync()
@@ -4973,20 +4597,6 @@ class LIFTRecorderApp(App):
         ok_btn.bind(on_release=_go)
         num_input.bind(on_text_validate=_go)
         popup.open()
-
-    def clone_dialog(self):
-        """Show the shared clone-URL popup; on submit drive a server-side
-        clone job and load the resulting LIFT."""
-        def _on_submit(clone_url):
-            repo_name = clone_url.rstrip('/').split('/')[-1].replace(
-                '.git', '')
-            dest = os.path.join(
-                self.user_data_dir, 'projects', repo_name)
-            self._show_loading_overlay(_tr('Cloning repository...'))
-            self._clone_via_server(
-                clone_url, dest,
-                on_progress=lambda line: self._update_loading_detail(line))
-        clone_url_popup(_on_submit, font_name=_FONT_NAME)
 
     def refresh_recorder_ui(self):
         """Push current recorder state into the RecorderScreen widgets."""

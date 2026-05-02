@@ -7,8 +7,8 @@ Usage: python generate_presplash.py
 import re
 from PIL import Image, ImageDraw, ImageFont
 
-from appinfo import APP_NAME, APP_TAGLINE
-from theme import BG_RGB, GREEN_RGB, TEXT_RGB
+from appinfo import APP_NAME, APP_TAGLINE, APP_ICON, FILE_W_VERSION
+from azt_collab_client.ui.theme import BG_RGB, GREEN_RGB, TEXT_RGB
 
 WIDTH, HEIGHT = 480, 800
 
@@ -16,7 +16,7 @@ WIDTH, HEIGHT = 480, 800
 def read_version():
     """Read __version__ from main.py."""
     try:
-        with open('main.py') as f:
+        with open(FILE_W_VERSION) as f:
             for line in f:
                 m = re.match(r"^__version__\s*=\s*['\"](.+?)['\"]", line)
                 if m:
@@ -35,7 +35,7 @@ def generate():
 
     # Load icon and paste centered
     try:
-        icon = Image.open('icons/icon_dark.png').convert('RGBA')
+        icon = Image.open(APP_ICON).convert('RGBA')
         icon_size = 512
         icon = icon.resize((icon_size, icon_size), Image.LANCZOS)
         icon_x = (WIDTH - icon_size) // 2
