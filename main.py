@@ -23,6 +23,10 @@ from i18n import _ as _tr, set_language, current_language, available_languages
 import azt_collab_client
 from azt_collab_client.ui import theme
 azt_collab_client.configure(app_id='azt-recorder')
+# Route client status/popup translations through the recorder's catalog
+# so a single language preference covers both. The recorder's _ already
+# falls back to the client catalog for client-owned strings.
+azt_collab_client.set_translator(_tr)
 
 
 class _DeviceFlowFailure(Exception):
@@ -127,64 +131,13 @@ if platform == 'android':
     ])
 
 # ── Charis SIL font registration ──────────────────────────────────────────────
-# Place CharisSIL-Regular.ttf (and optionally Bold/Italic/BoldItalic) in a
-# 'fonts/' directory next to main.py.  Download from: https://software.sil.org/charis/
-# On Linux you can also: sudo apt install fonts-sil-charis
-# The font files are also searched in the system font directories.
-
-def _find_font(filename):
-    """Search for a font file in several likely locations."""
-    app_dir = os.path.dirname(os.path.abspath(__file__))
-    search = [
-        os.path.join(app_dir, 'fonts', filename),
-        os.path.join(app_dir, filename),
-        os.path.join('/usr/share/fonts/truetype/fonts-sil-charis', filename),
-        os.path.join('/usr/share/fonts/opentype/charis', filename),
-        os.path.join(os.path.expanduser('~'), '.fonts', filename),
-        os.path.join(os.path.expanduser('~'), '.local/share/fonts', filename),
-        # Android: Kivy bundles app assets here at runtime
-        os.path.join('/data/user/0', 'org.atoznback.azt_recorder', 'files/app/fonts', filename),
-    ]
-    for path in search:
-        if os.path.exists(path):
-            return path
-    # Broader system search (slower, only if above fails)
-    for root, dirs, files in os.walk('/usr/share/fonts'):
-        if filename in files:
-            return os.path.join(root, filename)
-    return None
-
-def _register_charis():
-    from kivy.core.text import LabelBase
-    regular = _find_font('CharisSIL-Regular.ttf')
-    if regular is None:
-        # Try alternate naming conventions
-        regular = (_find_font('CharisSIL.ttf') or
-                   _find_font('charissil.ttf') or
-                   _find_font('CharisSIL-R.ttf'))
-    if regular is None:
-        print('[WARN] Charis SIL font not found. '
-              'Place CharisSIL-Regular.ttf in a fonts/ subdirectory next to main.py, '
-              'or install with: sudo apt install fonts-sil-charis')
-        return False
-    bold    = (_find_font('CharisSIL-Bold.ttf') or
-               _find_font('CharisSIL-B.ttf') or regular)
-    italic  = (_find_font('CharisSIL-Italic.ttf') or
-               _find_font('CharisSIL-I.ttf') or regular)
-    boldita = (_find_font('CharisSIL-BoldItalic.ttf') or
-               _find_font('CharisSIL-BI.ttf') or bold)
-    LabelBase.register(
-        name='CharisSIL',
-        fn_regular=regular,
-        fn_bold=bold,
-        fn_italic=italic,
-        fn_bolditalic=boldita,
-    )
-    print(f'[INFO] Charis SIL registered: {regular}')
-    return True
-
-_CHARIS_AVAILABLE = _register_charis()
-_FONT_NAME = 'CharisSIL' if _CHARIS_AVAILABLE else 'Roboto'
+# Discovery + LabelBase.register lives in azt_collab_client.ui.fonts so the
+# recorder, the standalone picker, and the settings UI all agree on the
+# search path. The shared helper checks the recorder's fonts/ dir first.
+# Download from https://software.sil.org/charis/ or `apt install fonts-sil-charis`.
+from azt_collab_client.ui import register_charis
+_FONT_NAME = register_charis()
+_CHARIS_AVAILABLE = _FONT_NAME == 'CharisSIL'
 
 # ── KV layout ─────────────────────────────────────────────────────────────────
 # Font name is injected at build time so every widget uses Charis SIL if available.
@@ -1348,6 +1301,17 @@ class ImagePickerScreen(Screen):
         entry = self._entry
         db = app.recorder.db
 
+        # Image *additions* are owned by the daemon on URI projects
+        # (MediaHandle for kind='image' raises PermissionError on
+        # open_write — see azt_collab_client/lift_io.py). The URL stays
+        # the displayed source via lift.py's URL/cache fallback; the
+        # daemon would need a dedicated upload endpoint for peer-side
+        # adds, which doesn't exist today.
+        if getattr(db, 'is_uri', False) or not db.images_dir:
+            print('[image] skipping local save — daemon owns image '
+                  'additions on URI projects')
+            return
+
         try:
             ctx = app._ssl_context()
             req = urllib.request.Request(url)
@@ -1482,6 +1446,12 @@ class ImagePickerScreen(Screen):
         app = App.get_running_app()
         entry = self._entry
         db = app.recorder.db
+        if getattr(db, 'is_uri', False) or not db.images_dir:
+            # Daemon owns image additions on URI projects. See
+            # _download_and_set above for the rationale.
+            print('[image] skipping local save — daemon owns image '
+                  'additions on URI projects')
+            return
         try:
             from PIL import Image as PILImage
             filename = db.imagename(entry)
@@ -1939,14 +1909,14 @@ class ConfigScreen(Screen):
             row.add_widget(btn)
 
     def _set_ui_language(self, lang_code):
-        """Change the UI language and rebuild all screens."""
+        """Change the UI language and rebuild all screens. Persistence
+        lives in azt_collab_client.i18n ($AZT_HOME/config.json), so a
+        change here is visible to the picker / settings subprocess on
+        their next mtime poll."""
         if lang_code == current_language():
             return
         app = App.get_running_app()
         set_language(lang_code)
-        prefs = app._load_prefs()
-        prefs['ui_language'] = lang_code
-        app._save_prefs_dict(prefs)
         app.subtitle = _tr(APP_TAGLINE)
         # Rebuild all screens so translated strings take effect
         sm = app.root.ids.sm
@@ -3095,11 +3065,16 @@ class RecorderController:
         self._recording = False
         self._pending_rerecord = False
         self._stop_native_recording()
-        # Write filename into LIFT XML
-        if self._audio_path and os.path.exists(self._audio_path):
+        # Write filename into LIFT XML. On URI projects the
+        # daemon-served file is created by the provider on
+        # openFileDescriptor('w'), so we don't os.path.exists() it —
+        # the basename is enough; the daemon owns the file.
+        if self._audio_path:
             filename = os.path.basename(self._audio_path)
-            self.db.set_audio(self.current['guid'], filename)
-            self.current['audio_filename'] = filename
+            wrote = self.db.is_uri or os.path.exists(self._audio_path)
+            if wrote:
+                self.db.set_audio(self.current['guid'], filename)
+                self.current['audio_filename'] = filename
         self._notify_ui()
         # Auto-play after a short delay
         Clock.schedule_once(lambda dt: self.play_audio(), 0.5)
@@ -3111,15 +3086,21 @@ class RecorderController:
         if not e or not e.get('audio_filename'):
             return
         filename = e['audio_filename']
-        # Check audio/ subdir first, then the LIFT file's own directory
-        for search_dir in (self.db.audio_dir, self.db.dir):
-            candidate = os.path.join(search_dir, filename)
-            if os.path.exists(candidate):
-                path = candidate
-                break
+        # Resolve to either a content:// URI (URI projects) or a
+        # filesystem path (desktop / iOS / legacy Android). On URI
+        # projects we don't probe existence — let the resolver fail
+        # cleanly if the daemon hasn't materialised the file yet.
+        if self.db.is_uri:
+            path = self.db.audio_target(filename)
         else:
-            print(f'Audio file not found: {filename}')
-            return
+            for search_dir in (self.db.audio_dir, self.db.dir):
+                candidate = os.path.join(search_dir, filename)
+                if os.path.exists(candidate):
+                    path = candidate
+                    break
+            else:
+                print(f'Audio file not found: {filename}')
+                return
 
         self._playing = True
 
@@ -3128,7 +3109,14 @@ class RecorderController:
                 from jnius import autoclass
                 MediaPlayer = autoclass('android.media.MediaPlayer')
                 mp = MediaPlayer()
-                mp.setDataSource(path)
+                if self.db.is_uri:
+                    Uri = autoclass('android.net.Uri')
+                    PythonActivity = autoclass(
+                        'org.kivy.android.PythonActivity')
+                    mp.setDataSource(
+                        PythonActivity.mActivity, Uri.parse(path))
+                else:
+                    mp.setDataSource(path)
                 mp.prepare()
                 mp.start()
                 self._player = mp  # keep reference alive
@@ -3201,15 +3189,17 @@ class RecorderController:
 
     def _make_audio_path(self):
         e = self.current
-        audio_dir = os.path.join(self.db.dir, 'audio')
-        os.makedirs(audio_dir, exist_ok=True)
-        # Filename: {cawl}_{guid}_{en_gloss}.wav
+        # Filename: {cawl}_{guid}_{en_gloss}.wav (extension is replaced
+        # by the platform-specific recorder: .m4a on Android, .flac on
+        # iOS, .wav on desktop).
         cawl = e.get('cawl', '0000')
         guid = e.get('guid', 'unknown')[:8]
         gloss = e.get('glosses', {}).get('en', [''])[0]
         safe_gloss = ''.join(c if c.isalnum() or c in '_ ' else '_' for c in gloss)[:24].strip().replace(' ', '_')
         filename = f'{cawl}_{guid}_{safe_gloss}.wav'
-        return os.path.join(audio_dir, filename)
+        if not self.db.is_uri:
+            os.makedirs(self.db.audio_dir, exist_ok=True)
+        return self.db.audio_target(filename)
 
     def _start_native_recording(self, path):
         if platform == 'android':
@@ -3240,9 +3230,27 @@ class RecorderController:
             mr.setAudioSource(AudioSource.MIC)
             # MPEG_4/AAC gives broadest compatibility and highest quality on Android
             mr.setOutputFormat(OutputFormat.MPEG_4)
-            # Replace extension for AAC output
+            # Replace .wav with .m4a in either a path or a content:// URI
+            # — basename sits at the end of both, so str.replace works.
             aac_path = path.replace('.wav', '.m4a')
-            mr.setOutputFile(aac_path)
+            if self.db.is_uri:
+                # ContentResolver-acquired ParcelFileDescriptor: hand
+                # the underlying Java FileDescriptor straight to
+                # MediaRecorder. We must NOT detachFd() here — the pfd
+                # owns the fd lifetime and we close it after release.
+                Uri = autoclass('android.net.Uri')
+                PythonActivity = autoclass(
+                    'org.kivy.android.PythonActivity')
+                ctx = PythonActivity.mActivity
+                resolver = ctx.getContentResolver()
+                self._record_pfd = resolver.openFileDescriptor(
+                    Uri.parse(aac_path), 'w')
+                if self._record_pfd is None:
+                    raise IOError(
+                        f'openFileDescriptor returned null for {aac_path!r}')
+                mr.setOutputFile(self._record_pfd.getFileDescriptor())
+            else:
+                mr.setOutputFile(aac_path)
             mr.setAudioEncoder(AudioEncoder.AAC)
             mr.setAudioEncodingBitRate(256000)   # 256 kbps
             mr.setAudioSamplingRate(48000)        # 48 kHz
@@ -3263,6 +3271,13 @@ class RecorderController:
                 print(f'Android stop error: {ex}')
             finally:
                 self._recorder = None
+        pfd = getattr(self, '_record_pfd', None)
+        if pfd is not None:
+            try:
+                pfd.close()
+            except Exception:
+                pass
+            self._record_pfd = None
 
     # iOS: use AVAudioRecorder via pyobjus for maximum quality
     def _start_ios_recording(self, path):
@@ -3347,7 +3362,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.28.2'
+__version__ = '1.33.0'
 
 
 class LIFTRecorderApp(App):
@@ -3383,13 +3398,6 @@ class LIFTRecorderApp(App):
                     path = os.path.join(d, lift)
                     if os.path.getsize(path) > 50:
                         results.append((name, path))
-        # Also check last_lift if it's outside projects/
-        prefs = self._load_prefs()
-        last = prefs.get('last_lift', '')
-        if last and os.path.isfile(last) and os.path.getsize(last) > 50:
-            if not any(p == last for _, p in results):
-                display = os.path.basename(os.path.dirname(last)) or os.path.basename(last)
-                results.append((display, last))
         return results
 
     # ── Preferences (last used file) ──────────────────────────────────────────
@@ -3397,11 +3405,6 @@ class LIFTRecorderApp(App):
     @property
     def _prefs_path(self):
         return os.path.join(self.user_data_dir, 'prefs.json')
-
-    def _save_prefs(self, lift_path):
-        prefs = self._load_prefs()
-        prefs['last_lift'] = lift_path
-        self._save_prefs_dict(prefs)
 
     def _save_prefs_dict(self, prefs):
         import json
@@ -3424,10 +3427,30 @@ class LIFTRecorderApp(App):
 
     def build(self):
         try:
-            # Apply saved theme and language before KV is parsed
+            # Apply saved theme before KV is parsed. The active UI
+            # language is owned by azt_collab_client.i18n and applied at
+            # import time; if a legacy 'ui_language' is still sitting in
+            # prefs.json from before 1.30.0, migrate it through to the
+            # client store on the way past.
             prefs = self._load_prefs()
             theme.set_theme(prefs.get('theme', 'Ocean'))
-            set_language(prefs.get('ui_language', 'en'))
+            dirty = False
+            legacy_lang = prefs.pop('ui_language', None)
+            if legacy_lang:
+                set_language(legacy_lang)
+                dirty = True
+                print(f'[migrate] ui_language={legacy_lang!r} '
+                      f'prefs.json -> $AZT_HOME/config.json')
+            # Last-opened project moved to azt_collab_client.recent in
+            # 1.33.0. Drop the legacy key; it stops being authoritative
+            # the moment the user picks any project after upgrade.
+            if 'last_lift' in prefs:
+                prefs.pop('last_lift', None)
+                dirty = True
+                print('[migrate] dropped legacy prefs[last_lift] '
+                      '(now azt_collab_client.recent)')
+            if dirty:
+                self._save_prefs_dict(prefs)
             self.subtitle = _tr(APP_TAGLINE)
             Builder.load_string(KV)
             self.root = RootScreen()
@@ -3468,18 +3491,41 @@ class LIFTRecorderApp(App):
             # spawn the picker subprocess so the user can choose one.
             # The recorder no longer hosts an in-process picker — see
             # azt_collab_picker_migration.xml step 7.
-            prefs = self._load_prefs()
-            last = prefs.get('last_lift', '')
-            if last and os.path.isfile(last) and os.path.getsize(last) > 50:
-                Clock.schedule_once(lambda dt: self.load_lift(last), 0.3)
-            else:
-                Clock.schedule_once(lambda dt: self.start_over(), 0.3)
+            # Last-opened project is suite-wide state owned by
+            # azt_collab_client.recent — the langcode the user picked
+            # in any peer app is what we land on. open_project resolves
+            # the current path/URI for that langcode (the daemon may
+            # have moved/republished it since last launch).
+            Clock.schedule_once(lambda dt: self._auto_load_last_project(), 0.3)
             # One-shot server compatibility / install probe. Defer one
             # frame so the UI is up before any toast.
             Clock.schedule_once(lambda dt: self._check_server_compat(), 0.5)
         except Exception:
             traceback.print_exc()
             raise
+
+    def _auto_load_last_project(self):
+        """Resolve the suite-wide last-opened project's current
+        path/URI via the daemon and load it. Falls through to the
+        picker (start_over) if no project is recorded, the daemon
+        doesn't know it, or the resolution otherwise fails."""
+        try:
+            from azt_collab_client import last_project, open_project
+        except Exception:
+            self.start_over()
+            return
+        langcode = last_project()
+        if not langcode:
+            self.start_over()
+            return
+        project = open_project(langcode)
+        if project is None or not project.lift_path:
+            self.start_over()
+            return
+        # Cache the langcode so _register_current_project doesn't
+        # re-derive — the daemon just told us authoritatively.
+        self._current_langcode = langcode
+        self.load_lift(project.lift_path)
 
     def _check_server_compat(self):
         """Probe the AZT collab server's version. If it's missing or too
@@ -3500,6 +3546,13 @@ class LIFTRecorderApp(App):
                     have=result.get('server_version', '?'),
                     need=result.get('min_required', '?'))
             self._show_collab_warning(msg, SERVER_APK_INSTALL_URL)
+        elif err == 'client_too_old':
+            msg = _tr(
+                'Please update the recorder (client {have}, '
+                'server requires at least {need}).').format(
+                    have=result.get('client_version', '?'),
+                    need=result.get('min_required', '?'))
+            self._show_collab_warning(msg)
         elif err == 'server_unreachable':
             # Don't nag on every launch — only mention if the user has
             # already configured collab (i.e. has a langcode set).
@@ -3885,14 +3938,22 @@ class LIFTRecorderApp(App):
 
     def load_lift(self, path):
         self._dismiss_loading_overlay()
-        path = os.path.abspath(path)
+        # The picker can return either a filesystem path (desktop / open
+        # file) or a content:// URI (Android server-APK model). Only
+        # apply abspath when we genuinely have a filesystem path.
+        from azt_collab_client import is_content_uri
+        if not is_content_uri(path):
+            path = os.path.abspath(path)
         try:
             db = LIFTDatabase(path, image_repo=self._image_repo(),
                               image_cache_dir=self._get_image_cache_dir())
         except Exception as ex:
             self._show_error(_tr('Could not open file:\n{error}').format(error=ex))
             return
-        self._save_prefs(path)
+        # Last-opened-project state lives on the daemon store and is
+        # written via set_last_project from _handle_pick (the only
+        # path that knows the langcode authoritatively). load_lift
+        # itself is langcode-agnostic, so no peer-private mirror here.
         # Apply language code: from picker, from prefs, or from filename
         pending = getattr(self, '_pending_vernlang', '')
         if pending:
@@ -3930,7 +3991,18 @@ class LIFTRecorderApp(App):
 
     def _register_current_project(self):
         """Tell the backend about the project currently loaded. Returns the
-        langcode the backend is tracking it under (empty string on error)."""
+        langcode the backend is tracking it under (empty string on error).
+
+        The langcode is server-supplied: every load path threads the
+        daemon's canonical ``projects.json`` key into
+        ``_current_langcode`` before reaching here — the picker emits
+        it in its result (``_handle_pick``), and the startup auto-load
+        reads it from ``azt_collab_client.recent`` and resolves the
+        path via ``open_project`` (``_auto_load_last_project``).
+        ``derive_langcode`` is left as a defensive fallback for any
+        future load path that doesn't yet wire the langcode through;
+        it's a server RPC, but going through it is wasteful when we
+        already have the answer."""
         if not self.recorder:
             return ''
         try:
@@ -3938,7 +4010,9 @@ class LIFTRecorderApp(App):
                 derive_langcode, register_project)
             working_dir = self.recorder.db.dir
             lift_path = self.recorder.db.path
-            langcode = derive_langcode(working_dir, lift_path)
+            langcode = getattr(self, '_current_langcode', '')
+            if not langcode:
+                langcode = derive_langcode(working_dir, lift_path)
             if not langcode:
                 return ''
             register_project(langcode, working_dir, lift_path)
@@ -4259,7 +4333,23 @@ class LIFTRecorderApp(App):
         if result.get('ok'):
             langcode = result.get('langcode', '')
             if langcode:
+                # Picker emits langcode for both new-from-template and
+                # existing-project selections (picker.py post-0.17.x
+                # adds the existing-project case). Cache as the daemon
+                # registry key so _register_current_project can skip
+                # the derive_langcode round-trip; the new-from-template
+                # case also uses it as the vernlang to stamp on the
+                # freshly-cloned LIFT (handled in load_lift's
+                # _pending_vernlang branch).
+                self._current_langcode = langcode
                 self._pending_vernlang = langcode
+                # Suite-wide "last opened project" state: any peer
+                # opening next lands here too.
+                try:
+                    from azt_collab_client import set_last_project
+                    set_last_project(langcode)
+                except Exception as ex:
+                    print(f'[recent] set_last_project: {ex}')
             self.load_lift(result['path'])
             return
         err = result.get('error', 'unknown')
@@ -4420,6 +4510,11 @@ class LIFTRecorderApp(App):
             return  # no image
         # Already in git images/ dir
         db = self.recorder.db
+        # On URI projects the daemon owns image additions; peer can
+        # display via lift.py's URL/cache fallback but can't push a
+        # new image into the project. See _download_and_set.
+        if getattr(db, 'is_uri', False) or not db.images_dir:
+            return
         if img_path.startswith(db.images_dir):
             return
         filename = db.imagename(entry)

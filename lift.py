@@ -21,6 +21,10 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
+from azt_collab_client import (
+    LiftHandle, MediaHandle, audio_uri_for, image_uri_for, is_content_uri,
+)
+
 # Register namespaces to avoid ns0: prefix on save
 ET.register_namespace('', '')
 
@@ -209,16 +213,40 @@ class LIFTDatabase:
     """
 
     def __init__(self, path: str, image_repo: str = '', image_cache_dir: str = ''):
-        self.path = os.path.abspath(path)
-        self.dir = os.path.dirname(self.path)
-        self.images_dir = os.path.join(self.dir, 'images')
-        self.audio_dir = os.path.join(self.dir, 'audio')
+        # ``path`` may be a filesystem path (desktop, or any platform's
+        # open-file flow) or a ``content://`` URI emitted by the picker
+        # on the Android server-APK model. LiftHandle papers over the
+        # difference for read/write of the .lift file itself; sibling
+        # directory access (audio/, images/) only works when we have a
+        # real filesystem path. The Tier-3 follow-up will route those
+        # through the provider too — see azt_collab_client/CLAUDE.md
+        # "Future: audio + image cross-package access".
+        self.is_uri = is_content_uri(path)
+        self.path = path if self.is_uri else os.path.abspath(path)
+        self.handle = LiftHandle(self.path)
+        if self.is_uri:
+            self.dir = ''
+            self.images_dir = ''
+            self.audio_dir = ''
+        else:
+            self.dir = os.path.dirname(self.path)
+            self.images_dir = os.path.join(self.dir, 'images')
+            self.audio_dir = os.path.join(self.dir, 'audio')
         self.image_repo = image_repo
         self.image_cache_dir = image_cache_dir
         self._image_resolver = _CAWLImageResolver(self.dir, repo=image_repo)
 
-        self._tree = ET.parse(self.path)
+        with self.handle.open_read() as f:
+            self._tree = ET.parse(f)
         self._root = self._tree.getroot()
+
+        # Peer-side cache for sibling files that arrive via the daemon's
+        # ContentProvider on URI projects (Android server-APK model).
+        # Audio writes pass through MediaHandle.open_write; image *reads*
+        # are pulled into this dir as tmpfiles so AsyncImage can render
+        # them by path. The cache is per-LIFTDatabase instance so it
+        # gets GC'd on project switch; nothing here is durable state.
+        self._uri_image_cache = {}
 
         self.vernlang = ''      # e.g. 'lol-x-his30100'
         self.audiolang = ''     # e.g. 'lol-x-his30100-Zxxx-x-audio'
@@ -232,6 +260,55 @@ class LIFTDatabase:
         """Set vernacular language code externally (e.g. from language picker)."""
         self.vernlang = code
         self.audiolang = code + '-Zxxx-x-audio'
+
+    # ── Sibling-resource access (audio / images) ──────────────────────────────
+
+    def audio_target(self, basename: str) -> str:
+        """Return a write/read target for ``audio/<basename>`` — a
+        ``content://`` URI on Android URI projects (resolved by the
+        daemon's provider) or a filesystem path on desktop / iOS /
+        legacy-Android. Callers wrap in ``MediaHandle(target, 'audio')``
+        for the write path; the Android MediaRecorder takes the FD
+        directly via ``ContentResolver.openFileDescriptor``."""
+        if self.is_uri:
+            return audio_uri_for(self.path, basename)
+        return os.path.join(self.audio_dir, basename)
+
+    def image_target(self, basename: str) -> str:
+        """Return a read target for ``images/<basename>`` — URI on
+        URI projects, filesystem path otherwise. Image *writes* are
+        owned by the daemon on URI projects (``MediaHandle.open_write``
+        on a kind=image handle raises ``PermissionError``)."""
+        if self.is_uri:
+            return image_uri_for(self.path, basename)
+        return os.path.join(self.images_dir, basename)
+
+    def _resolve_uri_image(self, illustration_href: str) -> str:
+        """Pull a sibling image from the daemon's provider into the
+        peer's image cache dir so Kivy can display it by path. Returns
+        the local cache path on success; ``''`` on failure (caller
+        falls back to URL/cache). Memoised per-LIFTDatabase instance."""
+        if not (self.is_uri and illustration_href and self.image_cache_dir):
+            return ''
+        cached = self._uri_image_cache.get(illustration_href)
+        if cached and os.path.isfile(cached):
+            return cached
+        try:
+            dest_dir = os.path.join(self.image_cache_dir, '_uri_images')
+            os.makedirs(dest_dir, exist_ok=True)
+            dest = os.path.join(dest_dir, illustration_href)
+            uri = image_uri_for(self.path, illustration_href)
+            handle = MediaHandle(uri, 'image')
+            with handle.open_read() as src, open(dest, 'wb') as dst:
+                while True:
+                    chunk = src.read(64 * 1024)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+            self._uri_image_cache[illustration_href] = dest
+            return dest
+        except Exception:
+            return ''
 
     # ── Parsing ───────────────────────────────────────────────────────────────
 
@@ -341,12 +418,16 @@ class LIFTDatabase:
                 if ill_el is not None:
                     illustration_href = ill_el.get('href', '')
 
-        # Resolve image path: local images/ → cache → remote URL
+        # Resolve image path: local images/ (or daemon-served sibling
+        # via ContentResolver on URI projects) → CAWL cache → remote URL.
         image_path = ''
         if illustration_href:
-            candidate = os.path.join(self.images_dir, illustration_href)
-            if os.path.exists(candidate):
-                image_path = candidate
+            if self.is_uri:
+                image_path = self._resolve_uri_image(illustration_href)
+            else:
+                candidate = os.path.join(self.images_dir, illustration_href)
+                if os.path.exists(candidate):
+                    image_path = candidate
         if not image_path and cawl:
             # Check cache before falling back to remote URL
             if self.image_cache_dir:
@@ -540,13 +621,16 @@ class LIFTDatabase:
         return None
 
     def _save(self):
-        """Write updated XML back to the .lift file, preserving encoding."""
+        """Write updated XML back to the .lift file, preserving encoding.
+        Routes through LiftHandle so this works for both filesystem
+        paths and ``content://`` URIs."""
         self._indent(self._root)
-        self._tree.write(
-            self.path,
-            encoding='utf-8',
-            xml_declaration=True,
-        )
+        with self.handle.open_write() as f:
+            self._tree.write(
+                f,
+                encoding='utf-8',
+                xml_declaration=True,
+            )
 
     @staticmethod
     def _indent(elem, level=0):

@@ -1,79 +1,82 @@
 """
 A-Z+T Recorder — internationalisation helpers.
 
-Uses Python's built-in gettext backed by .po/.mo files under
-locales/<lang>/LC_MESSAGES/aztrecorder.{po,mo}.
+Recorder catalog: ``locales/<lang>/LC_MESSAGES/aztrecorder.{po,mo}``.
 
-Usage
------
-    from i18n import _, set_language, current_language
+The single source of truth for the active UI language is
+``azt_collab_client.i18n`` (persisted to ``$AZT_HOME/config.json``
+under ``ui.language``). This module wraps that with the recorder's
+own gettext catalog chained as the primary, falling back to the
+client catalog. There is no transient mode — one preference, one
+store, sticks everywhere until next changed.
 
-In KV templates the app exposes ``app._('text')`` which resolves at
-widget-creation time.
-
-The active language is persisted in the app's prefs.json under the
-key ``'ui_language'``.
+Auto-inits on import: the recorder's catalog is loaded for whatever
+language the client has already applied (its own auto-init runs
+first via the ``import`` order at the call site). Hosts can call
+``set_language(lang)`` to change the choice for the whole suite.
 """
 
 import gettext
 import os
 
+from azt_collab_client import i18n as _client_i18n
+
 _DOMAIN = 'aztrecorder'
 _LOCALE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'locales')
 
-# Fallback: returns the original string untouched (English)
 _current: gettext.GNUTranslations | gettext.NullTranslations = gettext.NullTranslations()
-_current_lang: str = 'en'
 
 
 def current_language() -> str:
-    """Return the active language code (e.g. 'en', 'fr')."""
-    return _current_lang
+    """Active UI language code; sourced from the client."""
+    return _client_i18n.current_language()
 
 
 def available_languages() -> list[tuple[str, str]]:
-    """Return [(code, display_name), ...] for every language with a .mo file,
-    plus English (always available as fallback)."""
-    langs = [('en', 'English')]
-    if os.path.isdir(_LOCALE_DIR):
-        for entry in sorted(os.listdir(_LOCALE_DIR)):
-            mo = os.path.join(_LOCALE_DIR, entry, 'LC_MESSAGES', f'{_DOMAIN}.mo')
-            if os.path.isfile(mo):
-                # Read display name from the .mo metadata if possible
-                name = _display_name(entry)
-                langs.append((entry, name))
-    return langs
+    """Languages that have a catalog in either the recorder or the client."""
+    seen = {'en'}
+    out = [('en', _client_i18n.display_name('en'))]
+    for code, name in _client_i18n.scan_catalog_languages(_LOCALE_DIR, _DOMAIN):
+        if code not in seen:
+            seen.add(code)
+            out.append((code, name))
+    for code, name in _client_i18n.available_languages():
+        if code not in seen:
+            seen.add(code)
+            out.append((code, name))
+    return out
 
 
-def _display_name(code: str) -> str:
-    """Human-readable name for a language code."""
-    _names = {
-        'fr': 'Fran\u00e7ais',
-        'es': 'Espa\u00f1ol',
-        'pt': 'Portugu\u00eas',
-        'de': 'Deutsch',
-        'sw': 'Kiswahili',
-        'zh': '\u4e2d\u6587',
-        'ar': '\u0627\u0644\u0639\u0631\u0628\u064a\u0629',
-    }
-    return _names.get(code, code)
+def _load_recorder_catalog(lang: str):
+    """Build the recorder gettext.translation for ``lang``, chained to
+    the client catalog as a fallback. Returns a NullTranslations for
+    English or when the recorder has no catalog for the language —
+    in either case the client catalog still answers via fallback."""
+    if lang == 'en':
+        cat = gettext.NullTranslations()
+    else:
+        try:
+            cat = gettext.translation(
+                _DOMAIN, localedir=_LOCALE_DIR, languages=[lang])
+        except FileNotFoundError:
+            cat = gettext.NullTranslations()
+    cat.add_fallback(_client_i18n.gettext_translation())
+    return cat
 
 
 def set_language(lang: str) -> None:
-    """Switch the active UI language.  Pass 'en' for English (no translation)."""
-    global _current, _current_lang
-    _current_lang = lang
-    if lang == 'en':
-        _current = gettext.NullTranslations()
-    else:
-        try:
-            _current = gettext.translation(
-                _DOMAIN, localedir=_LOCALE_DIR, languages=[lang])
-        except FileNotFoundError:
-            print(f'[i18n] No .mo file for {lang!r}, falling back to English')
-            _current = gettext.NullTranslations()
+    """Switch the suite-wide UI language. Persists via the client and
+    reloads the recorder's catalog (chained to client fallback)."""
+    global _current
+    _client_i18n.set_language(lang)
+    _current = _load_recorder_catalog(_client_i18n.current_language())
 
 
 def _(message: str) -> str:
-    """Translate *message* using the current language."""
+    """Translate *message* via the recorder catalog, then the client."""
     return _current.gettext(message)
+
+
+# ── auto-init ──────────────────────────────────────────────────────────────
+# Adopt whatever the client has already applied at import.
+_current = _load_recorder_catalog(_client_i18n.current_language())
