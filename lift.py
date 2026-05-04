@@ -25,8 +25,24 @@ from azt_collab_client import (
     LiftHandle, MediaHandle, audio_uri_for, image_uri_for, is_content_uri,
 )
 
-# Register namespaces to avoid ns0: prefix on save
-ET.register_namespace('', '')
+
+def _scan_namespaces(handle):
+    """Read the source through *handle* once and return its
+    {prefix: uri} declarations as encountered. ET strips original
+    prefixes during parse, so we capture them up-front and re-register
+    each before save — otherwise FLEx-produced LIFT files round-trip
+    with ``ns0:flex=...`` mangled prefixes."""
+    seen = {}
+    try:
+        with handle.open_read() as f:
+            for event, payload in ET.iterparse(f, events=('start-ns',)):
+                prefix, uri = payload
+                seen.setdefault(prefix, uri)
+    except Exception as ex:
+        # A quirky source shouldn't block parsing — we'll just emit
+        # ns0:-style prefixes in that case (still well-formed XML).
+        print(f'lift namespace scan failed: {ex}')
+    return seen
 
 # ── GitHub-hosted CAWL illustration images ───────────────────────────────────
 
@@ -236,9 +252,22 @@ class LIFTDatabase:
         self.image_cache_dir = image_cache_dir
         self._image_resolver = _CAWLImageResolver(self.dir, repo=image_repo)
 
+        # Preserve original xmlns prefixes across save (ET.parse strips
+        # them otherwise, so a FLEx file with xmlns:flex=… round-trips
+        # with ns0:-style prefixes).
+        for prefix, uri in _scan_namespaces(self.handle).items():
+            ET.register_namespace(prefix, uri)
         with self.handle.open_read() as f:
             self._tree = ET.parse(f)
         self._root = self._tree.getroot()
+        # One-time normalization to our 4-space indent style. Subsequent
+        # saves are bit-stable as long as no new elements get added
+        # between parse and save (tracked via _indent_dirty below); when
+        # set_audio / set_illustration / _clean_forms appends a new
+        # element, _indent runs once on the next save to give it
+        # whitespace, then _indent_dirty resets.
+        self._indent(self._root)
+        self._indent_dirty = False
 
         # Peer-side cache for sibling files that arrive via the daemon's
         # ContentProvider on URI projects (Android server-APK model).
@@ -531,6 +560,7 @@ class LIFTDatabase:
         ill_el = sense_el.find('illustration')
         if ill_el is None:
             ill_el = ET.SubElement(sense_el, 'illustration')
+            self._indent_dirty = True
         ill_el.set('href', filename)
         self._save()
 
@@ -570,6 +600,7 @@ class LIFTDatabase:
             vern_form = ET.SubElement(parent_el, 'form')
             vern_form.set('lang', self.vernlang)
             ET.SubElement(vern_form, 'text')
+            self._indent_dirty = True
 
     # ── Writing audio filename back to LIFT (Entry.lc.textvaluebylang) ────────
 
@@ -593,6 +624,7 @@ class LIFTDatabase:
         citation_el = entry_el.find('citation')
         if citation_el is None:
             citation_el = ET.SubElement(entry_el, 'citation')
+            self._indent_dirty = True
 
         # Find or create <form lang=audiolang>
         audio_form = None
@@ -604,11 +636,13 @@ class LIFTDatabase:
         if audio_form is None:
             audio_form = ET.SubElement(citation_el, 'form')
             audio_form.set('lang', self.audiolang)
+            self._indent_dirty = True
 
         # Set <text> child
         text_el = audio_form.find('text')
         if text_el is None:
             text_el = ET.SubElement(audio_form, 'text')
+            self._indent_dirty = True
         text_el.text = filename
 
         # Save
@@ -629,8 +663,16 @@ class LIFTDatabase:
         so a crash mid-write cannot truncate the user's lexicon — every
         set_audio rewrites the whole file, and the original recovery
         story was 'hope the OS flushed'. URI mode trusts the daemon's
-        provider, which serialises concurrent writers on its side."""
-        self._indent(self._root)
+        provider, which serialises concurrent writers on its side.
+
+        Indentation runs only when ``_indent_dirty`` is set — i.e. a
+        new element has been added since the last save. This keeps
+        text-only edits (the common case: writing a new audio
+        filename into an existing <text>) bit-stable in git, instead
+        of re-flowing the whole tree's whitespace on every save."""
+        if self._indent_dirty:
+            self._indent(self._root)
+            self._indent_dirty = False
         if self.handle.is_uri:
             with self.handle.open_write() as f:
                 self._tree.write(

@@ -3388,7 +3388,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.34.0'
+__version__ = '1.35.0'
 
 
 class LIFTRecorderApp(App):
@@ -3544,6 +3544,10 @@ class LIFTRecorderApp(App):
                 except Exception as ex:
                     print(f'[app] failed to bind activity result: {ex}')
                     traceback.print_exc()
+                # Force first-time autoclass lookups onto the main
+                # thread before any worker thread can race them. See
+                # _warm_jnius_classes.
+                self._warm_jnius_classes()
             # The AZTCollabProvider lives in the standalone server APK
             # (org.atoznback.aztcollab). Peers do NOT install provider
             # callbacks here — they reach the provider through the
@@ -3566,6 +3570,61 @@ class LIFTRecorderApp(App):
         except Exception:
             traceback.print_exc()
             raise
+
+    # ── Android lifecycle ────────────────────────────────────────────────────
+    # Without on_pause+on_resume, Kivy treats backgrounding as on_stop and the
+    # OS may kill us before MediaRecorder.stop() runs. That leaves the M4A
+    # without a moov atom — the file exists but is unplayable on next launch.
+    # Returning True from on_pause is the documented contract that says "I
+    # want to be paused, not stopped"; defining on_resume is required when
+    # on_pause is defined or Kivy still routes the event as on_stop.
+
+    def on_pause(self):
+        self._finalise_active_recording('on_pause')
+        return True
+
+    def on_resume(self):
+        return True
+
+    def on_stop(self):
+        self._finalise_active_recording('on_stop')
+
+    def _finalise_active_recording(self, where):
+        if self.recorder and getattr(self.recorder, '_recording', False):
+            try:
+                self.recorder.stop_recording()
+            except Exception as ex:
+                print(f'[{where}] stop_recording failed: {ex}')
+
+    def _warm_jnius_classes(self):
+        """Force first-time autoclass lookups onto the Kivy main thread so
+        worker threads (image-download, picker callback, sync) don't race
+        the documented PyJNI ClassLoader-scope hazard
+        (memory: feedback_pyjnius_threading.md). Once autoclass has cached
+        the proxy on the main thread, worker-thread lookups are safe."""
+        if platform != 'android':
+            return
+        try:
+            from jnius import autoclass
+        except Exception:
+            return
+        for cls in (
+                'android.media.MediaRecorder',
+                'android.media.MediaRecorder$AudioSource',
+                'android.media.MediaRecorder$OutputFormat',
+                'android.media.MediaRecorder$AudioEncoder',
+                'android.media.MediaPlayer',
+                'android.net.Uri',
+                'android.content.Intent',
+                'android.os.ParcelFileDescriptor',
+                'java.io.ByteArrayOutputStream',
+                'java.io.FileOutputStream',
+                'org.kivy.android.PythonActivity',
+        ):
+            try:
+                autoclass(cls)
+            except Exception as ex:
+                print(f'[jnius warm] {cls}: {ex}')
 
     def _auto_load_last_project(self):
         """Resolve the suite-wide last-opened project's current

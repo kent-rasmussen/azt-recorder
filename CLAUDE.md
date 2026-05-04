@@ -96,18 +96,11 @@ string via regex; bump there, not in the spec.
 
 ### Tests
 
-`tests/stepN.sh` are stack verification scripts (not unit tests).
-Each exercises one slice end-to-end against a temp `$AZT_HOME`. Run
-them with the recorder's venv active:
-
-```bash
-bash tests/step12.sh   # LIFT merge driver
-bash tests/step16.sh   # sister-app example (auto-spawns daemon)
-```
-
-Step 16 kills any running daemon, sets `AZT_HOME=/tmp/aztest_home`,
-and runs `examples/sister_app.py` (which lives in the symlinked
-sibling). If the daemon hangs, `pkill -f "python -m azt_collabd"`.
+There is no local test suite. The legacy `tests/stepN.sh` stack
+scripts were removed once the slices they exercised had stabilised
+in production usage; smoke runs happen against
+`examples/sister_app.py` (in the symlinked sibling) by hand when a
+daemon-touching change needs end-to-end validation.
 
 ## Project-specific conventions
 

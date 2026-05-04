@@ -272,18 +272,10 @@ mostly useful for development or debugging.
 
 ## Testing
 
-`tests/` (in `../azt_recorder/`) holds the canonical step-by-step
-verification scripts. Each `tests/stepN.sh` exercises one slice of the
-stack. Run with the recorder's venv:
-
-```bash
-cd ../azt_recorder
-bash tests/step12.sh   # LIFT merge driver
-bash tests/step16.sh   # sister-app example
-```
-
-Sister apps can copy + adapt these patterns; nothing in `tests/` needs
-to be sister-app-specific.
+There is no automated test suite. The legacy
+`azt_recorder/tests/stepN.sh` stack scripts were removed once their
+slices stabilised. Daemon-touching changes get a manual smoke run
+against `examples/sister_app.py` from a sibling app's venv.
 
 ## Plans + cleanup
 

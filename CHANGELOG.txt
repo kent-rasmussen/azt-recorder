@@ -1,5 +1,45 @@
 CHANGELOG — A-Z+T Recorder
 
+1.35.0
+  P1 audit cluster: Android lifecycle, LIFT round-trip fidelity,
+  and PyJNI thread-warming.
+    - Android backgrounding mid-record no longer corrupts the M4A.
+      LIFTRecorderApp grew on_pause / on_resume / on_stop hooks; the
+      pause path runs stop_recording() so MediaRecorder writes its
+      moov atom before the OS pauses us. on_pause returns True so
+      Kivy doesn't fall through to on_stop, and on_resume is defined
+      as required by the contract.
+    - PyJNI ClassLoader-scope hazard mitigated. on_start eagerly
+      autoclasses MediaRecorder / MediaPlayer / Uri / Intent /
+      ParcelFileDescriptor / ByteArrayOutputStream / FileOutputStream
+      / PythonActivity on the Kivy main thread, so subsequent
+      worker-thread provider writes (image-download, picker callback,
+      sync) hit cached proxies. (See feedback_pyjnius_threading.md.)
+    - LIFT save no longer re-indents on every write. lift.py grew an
+      _indent_dirty flag, set on new-element insertion (set_audio /
+      set_illustration / _clean_forms) and cleared after save.
+      Text-only edits (the common case: writing a new audio filename
+      into an existing <text>) are now bit-stable in git, dramatically
+      reducing diff churn and merge-conflict surface in azt_collabd.
+    - LIFT namespace round-trip preserves original prefixes. lift.py
+      now scans the source for xmlns:* declarations via iterparse
+      before ET.parse and re-registers each prefix. FLEx-produced
+      LIFT files no longer round-trip with ns0:flex= mangled prefixes.
+
+1.34.1
+  Build / repo hygiene (audit findings C4, C6).
+    - setup_from_nuke.sh now installs the full runtime dep set
+      (kivy==2.3.1 pillow sounddevice soundfile numpy certifi filetype
+      typing_extensions dulwich) so a fresh-clone `python main.py`
+      works out of the box, and creates the load-bearing
+      ../azt-collab symlinks (azt_collab_client/, examples/,
+      manifest_extras.xml). Idempotent via `ln -sfn`.
+    - Obsolete tests/stepN.sh removed; .gitignore drops the
+      tests/ entry; CLAUDE.md / AZT_COLLAB_README.md / suite-level
+      and azt-collab CLAUDE.md updated to reflect "no automated
+      test suite anywhere in the suite — manual smoke against
+      examples/sister_app.py."
+
 1.34.0
   Peer-private prefs.json drained into the suite-wide
   $AZT_HOME/config.json; structured CLONE_AUTH_REQUIRED replaces
