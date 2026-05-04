@@ -1,0 +1,1358 @@
+CHANGELOG — A-Z+T Recorder
+
+1.33.0
+  Last-opened project moves from prefs.json to the suite-wide
+  daemon-owned store, mirroring the UI-language pattern. Switching
+  projects in the recorder is now visible to the next peer (viewer,
+  future apps) on its next launch.
+    - on_start auto-load: was prefs['last_lift'] → load_lift(path).
+      Now last_project() (azt_collab_client.recent) → open_project
+      (langcode → daemon-authoritative Project record) → load_lift
+      (project.lift_path). Stale paths from a daemon move/republish
+      get re-resolved automatically; no peer-side guess.
+    - _handle_pick: writes set_last_project(langcode) after every
+      successful pick so the suite-wide state tracks user intent.
+    - load_lift: dropped self._save_prefs(path); the local mirror
+      doesn't exist any more. Removed _save_prefs() entirely (no
+      remaining callers).
+    - list_projects: dropped the legacy "also surface last_lift"
+      branch — the recorder no longer hosts the picker in-process,
+      so this method is dead-ish anyway, and the legacy reference
+      would have read a key that no longer exists.
+    - One-shot migration in build(): drop legacy prefs['last_lift']
+      on first 1.33.0 launch (and the existing 1.30.0 ui_language
+      migration is still here too).
+    - _register_current_project / _auto_load_last_project: prefer
+      the daemon-supplied langcode (cached as _current_langcode);
+      derive_langcode is now strictly a defensive fallback for any
+      future load path that doesn't wire the langcode through.
+    - Requires azt_collab_client 0.19.0+ (recent.last_project /
+      set_last_project).
+
+1.32.0
+  Tier 3: audio + image cross-package access on Android URI projects.
+  Recording and playback now work end-to-end on projects opened from
+  the standalone server APK; image additions remain daemon-owned but
+  the recorder fetches sibling illustration files from the provider
+  for display.
+    - lift.py: new audio_target(basename) / image_target(basename)
+      helpers wrap audio_uri_for / image_uri_for so callers stay
+      blind to the path-vs-URI distinction. New _resolve_uri_image
+      pulls sibling images via MediaHandle.open_read() into
+      <image_cache_dir>/_uri_images/<href> on first render so Kivy
+      AsyncImage can render by path; memoised per LIFTDatabase
+      instance. _parse_entry routes through it on URI projects.
+    - main.py _make_audio_path: no longer pre-creates audio_dir on
+      URI projects (the daemon's provider auto-creates the dir on
+      openFile('w')). Composes via db.audio_target so the same
+      filename math produces a URI on Android URI projects and a
+      path everywhere else.
+    - main.py _start_android_recording: when db.is_uri, opens the
+      audio URI via ContentResolver.openFileDescriptor('w') and
+      hands the Java FileDescriptor to MediaRecorder.setOutputFile.
+      Holds the ParcelFileDescriptor on self._record_pfd until
+      _stop_android_recording closes it after release. Critical:
+      we do NOT detachFd — the pfd owns the fd lifetime.
+    - main.py play_audio: on URI projects, uses
+      MediaPlayer.setDataSource(ctx, Uri.parse(audio_uri)) instead
+      of the path-string overload; skips os.path.exists probing
+      since the URI is resolved by the daemon's provider.
+    - main.py stop_recording: skips the os.path.exists check on
+      URI projects (daemon-served files don't appear at any
+      filesystem path the peer can stat) and trusts the recorder
+      stack to have written successfully.
+    - main.py start_recording: removed the Tier-1+2 URI gate; URI
+      audio writes now work.
+    - main.py _save_remote_image / _download_and_set / _copy_and_set:
+      gate messages updated to reflect that this is the architectural
+      rule (daemon owns image additions on URI projects), not a
+      Tier-3 TODO.
+    - main.py _handle_pick: cache result.langcode as
+      _current_langcode in addition to _pending_vernlang so
+      _register_current_project skips the derive_langcode round-trip.
+    - main.py _register_current_project: prefer the picker-supplied
+      _current_langcode over derive_langcode. The langcode is
+      server-supplied — the picker registers every emitted project
+      (existing-tap / clone / new-from-template / open-file) with
+      the daemon and threads the canonical projects.json key
+      through the result. derive_langcode (itself a server RPC) is
+      only the fallback for the recorder's startup auto-load from
+      prefs['last_lift'], which skips the picker.
+    - Requires azt_collab_client 0.18.0+ (MediaHandle, audio_uri_for,
+      image_uri_for).
+
+1.31.0
+  Adopt LiftHandle so .lift files emitted as content:// URIs from the
+  Android picker work end-to-end. Tier 1+2 only — audio writes and
+  image saves are gated off when the project came from a URI; the
+  daemon-side endpoints for sibling resources (audio/, images/) are
+  the Tier 3 follow-up tracked in azt_collab_client/CLAUDE.md
+  "Future: audio + image cross-package access".
+    - lift.py LIFTDatabase: __init__ takes path-or-URI, branches on
+      is_content_uri(); reads via LiftHandle(path).open_read() and
+      writes via .open_write() so set_audio / set_illustration /
+      clean_template all transparently route through the daemon's
+      ContentResolver on Android. Sibling self.dir / images_dir /
+      audio_dir are '' on URIs so callers can detect "no local FS"
+      via `if not db.dir:` or `db.is_uri`.
+    - main.py load_lift: skip os.path.abspath() when the picker
+      handed us a URI (abspath on a content:// string returns
+      garbage).
+    - main.py start_recording: when db.is_uri, surface a translated
+      message ("Recording not yet supported for projects opened from
+      the Android collaboration service. Open the LIFT file directly
+      to record.") instead of writing to an inaccessible cwd-relative
+      audio/ dir.
+    - main.py _save_remote_image / _download_and_set / _copy_and_set:
+      skip the local images/ write when db.is_uri; the URL/cache
+      fallback in lift.py keeps the displayed image rendering even
+      without a local copy.
+    - Requires azt_collab_client 0.17.0+ (LiftHandle, is_content_uri).
+
+1.30.0
+  Single source of truth for UI language; recorder i18n.py shrinks to
+  a thin layer over azt_collab_client.i18n.
+    - i18n.py: dropped recorder-side language persistence and the
+      duplicated _DISPLAY_NAMES table. Active language now sourced
+      from azt_collab_client.i18n.current_language() (persisted in
+      $AZT_HOME/config.json). available_languages() merges recorder
+      catalogs with the client's via the new public
+      i18n.scan_catalog_languages() helper. set_language() reduces
+      to: client.set_language(lang) + reload the recorder's
+      gettext.translation chained to client.gettext_translation()
+      as fallback. Auto-inits on import — no more Kivy-App-time
+      bootstrap; the recorder catalog is ready by the time main.py
+      first uses _tr.
+    - main.py build(): dropped the
+      ``set_language(prefs.get('ui_language', 'en'))`` line. Added a
+      one-shot migration: any legacy 'ui_language' key still in
+      prefs.json is written through to the client store and removed
+      from prefs the first time build() runs after upgrade.
+    - main.py _set_ui_language: no longer writes
+      prefs['ui_language'] (single source of truth on the client
+      side). Picker / settings subprocesses observe the change via
+      their existing config.json mtime watchers.
+    - Requires azt_collab_client 0.16.0 (drops the persist=False
+      argument on set_language and exposes display_name +
+      scan_catalog_languages).
+
+1.29.0
+  Catch up to azt_collab_client 0.15.0 changes.
+    - i18n: the recorder's gettext catalog now chains the client
+      catalog (azt_collab_client.i18n) as a fallback via
+      add_fallback(_client.gettext_translation()). Strings the client
+      owns (picker, popups, status translations) translate without
+      duplication into aztrecorder.po. Companion: set_language()
+      now also calls azt_collab_client.i18n.set_language(lang) so
+      subprocesses (picker / settings UI) follow the recorder's
+      language via $AZT_HOME/config.json. available_languages()
+      merges the recorder's locales with the client's so any catalog
+      shipped only with the client still surfaces in the language
+      toggle.
+    - Startup: register the recorder's _ via
+      azt_collab_client.set_translator(_tr). The client no longer
+      reaches into a top-level i18n module implicitly (changelog
+      0.15.0); without the explicit registration, host-owned strings
+      passed through translate.tr() would no longer go through the
+      recorder catalog. Falls back to the client catalog
+      transparently for client-owned strings.
+    - _check_server_compat: handle the new client_too_old branch
+      from check_server_compat() (azt_collab_client 0.14.0 +
+      azt_collabd 0.12.0 introduced MIN_CLIENT_VERSION). Surfaces a
+      translatable warning instead of being silently ignored.
+    - Drop the bespoke _register_charis()/_find_font() block and
+      use azt_collab_client.ui.register_charis() (changelog 0.13.6).
+      Removes ~50 lines of drift between this file and the canonical
+      helper; both still find the recorder's fonts/ dir first.
+
+1.28.2
+  Picker no longer hangs on Android with the modal overlay alone.
+    - azt_collab_client 0.13.2 -> 0.13.3. _pick_project_android now
+      dispatches all JNI work (autoclass, Intent build,
+      resolveActivity, android.activity.bind, startActivityForResult)
+      onto the Kivy main thread via Clock.schedule_once. The worker
+      thread spawned by start_over() only waits for the result. Root
+      cause: PyJNI's thread hook attaches worker threads to the JVM
+      but does not install the app ClassLoader on them, so creating
+      the ActivityResultListener proxy on the worker raised
+      JavaException: ClassNotFoundException for
+      org/kivy/android/PythonActivity$ActivityResultListener. The
+      worker died before startActivityForResult ever ran, leaving the
+      recorder showing only the "Pick a project to continue. Cancel"
+      modal with no picker Activity behind it. No API change.
+    - Recorder version bump only; no recorder code change beyond the
+      version string. The fix is entirely in the symlinked client.
+
+1.28.1
+  Picker resilience fixes after first Android run of step 7.
+    - azt_collab_client.pick_project (Android branch): pre-check Intent
+      resolvability via PackageManager.resolveActivity. If the server
+      APK is not installed (or its manifest is missing the
+      PICK_PROJECT intent-filter), return
+      {'ok': False, 'error': 'server_apk_not_installed'} immediately
+      instead of relying on ActivityNotFoundException from
+      startActivityForResult, which some OEM builds don't propagate
+      cleanly to pyjnius. Also caps done.wait() at 10 minutes (was
+      None = infinite) so a launched-but-hung Activity can't wedge
+      the recorder forever. Bumps client to 0.13.1.
+    - Recorder _show_pick_overlay: now has a Cancel button. User can
+      always dismiss the "Pick a project to continue" overlay; any
+      late-arriving worker-thread result is discarded via the
+      _pick_cancelled flag.
+
+1.28.0
+  Picker migration step 7
+  (azt_collab_picker_migration.xml::step7_picker_entrypoint): the
+  recorder no longer hosts an in-process project picker. Project
+  selection runs in a helper subprocess
+  (`python -m azt_collabd projects`); on Android the same picker
+  ships as a PICK_PROJECT Activity in the standalone server APK.
+  Same call-site (`azt_collab_client.pick_project()`) on both
+  platforms; sister apps using any UI toolkit can drive the picker
+  via the AZT_PICK\\t<path>\\t<langcode> stdout protocol.
+
+  Removed from main.py (now lives in azt_collabd/ui/picker_app.py):
+    - ProjectPickerScreen + LangPickerScreen ScreenManager mounts.
+    - Imports of ProjectPickerScreen, LangPickerScreen,
+      register_picker_kv, register_langpicker_kv, clone_url_popup.
+    - open_file() and platform-specific _open_file_android /
+      _open_file_ios / _poll_ios_doc_picker / _open_file_desktop /
+      _uri_to_path / open_url_dialog / _do_open_url / _parse_git_url
+      / _download_and_open helpers.
+    - new_from_template() and the _pending_vernlang plumbing that
+      fed it (the picker now sets vernlang internally and returns it
+      to the recorder via the AZT_PICK protocol so load_lift can
+      apply set_vernlang + clean_template on a fresh template).
+    - show_start_over() popup.
+    - clone_dialog() and the _on_activity_result_wrapper 1001
+      branch (Android system file chooser).
+    - go_picker() (no other caller after start_over and cold-start
+      switched to pick_project).
+
+  Added to main.py:
+    - start_over(): commits/syncs, shows a modal overlay to block
+      input on the recorder window, spawns pick_project on a worker
+      thread, dispatches the result.
+    - _show_pick_overlay / _hide_pick_overlay (the modal that backs
+      "user can't interact with both windows simultaneously").
+    - _handle_pick: load_lift on success, install-prompt on
+      server_apk_not_installed (Android), silent on cancel.
+    - on_start: if no last_lift, calls start_over() instead of
+      landing on the picker screen.
+
+  KV: ScreenManager block shrinks to RecorderScreen / ConfigScreen /
+  CollabScreen / ImagePickerScreen. "Start over" RecBtn now calls
+  app.start_over(). _on_back_button no longer routes to picker /
+  langpicker (those screens don't exist in the recorder).
+
+1.27.2
+  Documentation refresh — no code change.
+    - README.md: manual-install snippet now includes ``dulwich`` (the
+      daemon's git library; required in the recorder venv because the
+      daemon auto-spawns into it). Added a "Collaboration architecture"
+      section that names the peer/daemon split, the desktop loopback +
+      Android ContentProvider transports, and the sibling-symlink that
+      ``azt_collab_client/`` is. Cross-links AZT_COLLAB_README.md and
+      README_NewClient.txt for the canonical details.
+    - docs/Setup.md: removed dangling "input your" bullet; split the
+      collaboration section into "### GitHub" (device flow, no PAT)
+      and "### GitLab" (PAT + username). Reflects the actual paths in
+      main.py (github_device_flow_* vs save_gitlab_credentials).
+
+1.27.1
+  Picker migration step 6 (azt_collab_picker_migration.xml): the
+  standalone collab UI (``python -m azt_collabd ui``) now uses the
+  shared ProjectPickerScreen as its 'projects' surface. Recorder code
+  is unchanged; this entry captures the cross-repo work done from
+  inside the recorder repo.
+    - azt-collab/theme.py (new): mirror of recorder/theme.py so the
+      standalone UI satisfies ``import theme`` for the shared picker
+      module's KV imports. Same palettes, same set_theme() API.
+    - azt-collab/azt_collabd/ui/app.py:
+      * imports theme + ProjectPickerScreen + register_picker_kv +
+        clone_url_popup + clone_project.
+      * KV adds ``#:import T theme`` and a minimal
+        ``<RecBtn@Button>:`` rule (so the picker's RecBtn buttons
+        render).
+      * ScreenManager swaps ProjectsScreen → ProjectPickerScreen
+        ('projects' → 'picker'); the existing 'Projects' nav button
+        now sends to 'picker'.
+      * the old read-only ProjectsScreen KV+class are removed.
+      * CollabUIApp gains the ProjectPickerScreen host contract:
+        icon/subtitle/version_string properties; go_config (→ settings),
+        list_projects (langcode/working_dir tuples), load_lift (shows
+        the path in the settings label and tells the user to open it
+        in the recorder), open_file/show_start_over stubs that point
+        the user back to the recorder, and clone_dialog that runs
+        clone_project synchronously on a worker thread with the
+        clone_url_popup as the URL prompt.
+      * build() calls theme.set_theme('Ocean') and register_picker_kv
+        before constructing RootSM.
+
+1.27.0
+  Picker migration step 5 (azt_collab_picker_migration.xml): replace
+  WelcomeScreen with the shared ProjectPickerScreen. The recorder's
+  entry surface now lives in azt_collab_client/ui/picker.py and any
+  sister app drops it into its ScreenManager with one
+  ``register_picker_kv()`` call.
+    - azt_collab_client/ui/picker.py (new): ProjectPickerScreen +
+      ``register_kv(font_name)``. Defines the same 'open / clone /
+      start new / existing-projects list' surface the recorder had,
+      delegating to the host App's ``open_file``, ``clone_dialog``,
+      ``show_start_over``, ``go_config``, ``list_projects``,
+      ``load_lift`` (host contract documented in the module docstring).
+    - azt_collab_client/ui/__init__.py: re-exports
+      ``ProjectPickerScreen`` and ``register_picker_kv``.
+    - azt_collab_client/__version__: 0.11.0 → 0.12.0.
+    - main.py: KV ScreenManager block changed
+      ``WelcomeScreen: name: 'welcome'`` →
+      ``ProjectPickerScreen: name: 'picker'``; the ``<WelcomeScreen>:``
+      KV block (~95 lines) and ``class WelcomeScreen`` (~25 lines) were
+      removed. ``go_welcome`` renamed to ``go_picker``; every
+      ``sm.current = 'welcome'`` and ``app.go_welcome()`` updated. New
+      ``register_picker_kv(font_name=_FONT_NAME)`` call in ``build()``
+      between ``Builder.load_string(KV)`` and ``register_langpicker_kv``.
+
+1.26.0
+  Picker migration step 4 (azt_collab_picker_migration.xml): the
+  clone-from-URL popup moves into the shared client; a synchronous
+  ``clone_project`` wrapper joins the existing start/status pair so
+  sister apps can call clone in one line when they don't need streamed
+  progress.
+    - azt_collab_client/ui/popups.py (new): ``clone_url_popup`` —
+      Kivy URL-prompt modal. Translations through translate.tr;
+      host-supplied theme; font_name kwarg.
+    - azt_collab_client/ui/__init__.py: re-exports clone_url_popup.
+    - azt_collab_client/__init__.py: new ``clone_project`` (synchronous
+      driver around clone_project_start/clone_project_status). Returns
+      ``{ok, lift_path, result, error}``.
+    - azt_collab_client/__version__: 0.10.0 → 0.11.0.
+    - main.py: clone_dialog body deleted (~60 lines); now a 10-line
+      wrapper that calls clone_url_popup and forwards the URL into the
+      existing _clone_via_server driver (recorder keeps its own driver
+      because of auth-failure detection that's recorder-specific).
+
+1.25.0
+  Picker migration step 3 (azt_collab_picker_migration.xml): move the
+  template-download path off the recorder and into the daemon. The
+  recorder no longer hard-codes the SILCAWL URL or owns the download
+  thread; it asks the daemon for a project from a template and opens
+  the resulting LIFT.
+    - azt_collabd/projects.py: new ``create_from_template(template_url,
+      vernlang, dest_dir)`` — downloads the URL (size-capped at 10 MiB,
+      60 s timeout), atomically writes ``<vernlang>.lift`` into
+      dest_dir via ``os.replace`` over a temp file, and registers the
+      Project. Returns the Project.
+    - azt_collabd/config.py: new ``default_template_url()`` (overridable
+      via ``configure(template_url=...)`` or ``AZT_DEFAULT_TEMPLATE_URL``
+      env var). Default still points at the SILCAWL.lift on
+      kent-rasmussen/lift_templates/main.
+    - azt_collabd/server.py: new ``POST /v1/projects/from_template``
+      endpoint (synchronous, body {template_url?, vernlang, dest_dir},
+      response ``{ok, project}`` or ``{ok: False, error}``); daemon
+      bumped 0.8.0 → 0.9.0.
+    - azt_collab_client/__init__.py: new
+      ``create_project_from_template(vernlang, dest_dir, template_url='')``
+      that returns a Project on success or None on failure. Client
+      bumped 0.9.0 → 0.10.0; ``MIN_SERVER_VERSION`` bumped 0.7.0 → 0.9.0
+      so older daemons surface as ``server_too_old`` rather than 404
+      on the new endpoint.
+    - main.py: removed ``_SILCAWL_URL`` constant; ``new_from_template``
+      now spawns a worker thread that calls
+      ``create_project_from_template`` and on success schedules
+      ``load_lift(project.lift_path)`` on the Kivy main thread. On
+      failure dismisses the loading overlay and surfaces an error.
+
+1.24.0
+  Picker migration step 2 (azt_collab_picker_migration.xml): move
+  LangPickerScreen + KV into the shared azt_collab_client.ui package
+  so sister apps can mount it. The recorder still owns WelcomeScreen
+  and the load_lift / new_from_template plumbing; only the language
+  picker moved.
+    - azt_collab_client/ui/__init__.py (new): package marker; exports
+      LangPickerScreen and register_langpicker_kv.
+    - azt_collab_client/ui/langpicker.py (new): the LangPickerScreen
+      class + KV (both the screen rule and the inline _SELECTION_KV
+      sub-rule). Translations route through azt_collab_client.translate
+      (KV ``#:import _ azt_collab_client.translate.tr``); host font is
+      injected at registration time.
+    - azt_collab_client/translate.py: added a ``tr`` module-level
+      wrapper so KV ``#:import`` always picks up the current
+      ``set_translator`` target instead of binding once.
+    - azt_collab_client/__version__: 0.8.1 → 0.9.0 (additive API:
+      ui.LangPickerScreen + register_langpicker_kv + translate.tr).
+    - main.py: removed the inline ``<LangPickerScreen>:`` KV block
+      (~50 lines) and the ``LangPickerScreen`` class (~390 lines);
+      added ``from azt_collab_client.ui import LangPickerScreen,
+      register_langpicker_kv`` and a ``register_langpicker_kv(...)``
+      call right after ``Builder.load_string(KV)`` in ``build()``,
+      passing the recorder's font name and existing
+      ``langtags_mini.json.gz`` path.
+    - Asset move (langtags_mini.json.gz → ui/assets/) is deferred to
+      a follow-up commit because the current sandbox has no shell to
+      copy the binary file. The shared module accepts an explicit
+      langtags_path so this is forward-compatible: when the file is
+      moved, the recorder's main.py call site drops the langtags_path
+      kwarg and the default takes over.
+
+1.23.1
+  Bug fix: open_server_ui silent failure (azt_collab_picker_migration step 1).
+    - azt_collab_client/_spawn.py: new module with
+      ``_locate_azt_collabd_parent`` and ``build_spawn_env``. Locates the
+      canonical ``azt-collab/`` repo when ``azt_collabd`` isn't on
+      ``sys.path`` and prepends it to PYTHONPATH for the spawned child.
+    - azt_collab_client/__init__.py: open_server_ui injects the env via
+      build_spawn_env(), keeps stderr on PIPE, polls proc.poll() for
+      ~250 ms, and returns ``{'ok': False, 'error': 'spawn_exited',
+      'returncode', 'detail'}`` on early exit. Bumped client version
+      from 0.8.0 to 0.8.1.
+    - azt_collab_client/transports/loopback.py: ``_spawn_server`` mirrors
+      the same env injection so the loopback auto-spawn doesn't silently
+      crash for the same reason (the existing health-poll still catches
+      it but consistency keeps the failure path uniform).
+    - main.py: ``open_server_ui`` adds a ``spawn_exited`` branch that
+      surfaces the daemon's first-200-byte stderr via ``_set_log``,
+      replacing the previous silent "Opened sync settings." log.
+
+1.23.0
+  Pure-peer migration to the standalone AZT collab server APK
+  (per README_NewClient.txt). The recorder no longer imports the
+  daemon directly; everything goes through azt_collab_client + new
+  server endpoints.
+    - main.py: dropped every ``from azt_collabd ...`` import. Configure
+      now uses ``azt_collab_client.configure(app_id='azt-recorder')``;
+      the unused daemon-side ``configure(app_slug=...)`` is gone.
+    - main.py: open_server_ui() delegates to
+      ``azt_collab_client.open_server_ui()``; on
+      ``server_apk_not_installed`` the recorder opens
+      ``SERVER_APK_INSTALL_URL`` (step 7).
+    - main.py: open_install_page() resolves the GitHub App install URL
+      via ``azt_collab_client.github_app_install_url()`` (was
+      daemon-side ``GITHUB_APP_INSTALL_URL``).
+    - main.py: GitHub device flow runs server-side. The recorder calls
+      ``github_device_flow_start()`` then polls
+      ``github_device_flow_status(job_id)`` until DONE/FAILED. Tokens
+      never cross the client/server boundary.
+    - main.py: clone runs server-side as a job; the popup UI uses
+      ``clone_project_start`` + repeated ``clone_project_status``
+      calls so the loading overlay still streams progress lines.
+    - main.py: publish/auto-publish use ``init_project`` (the server
+      uses store-resident credentials).
+    - main.py: ``_register_current_project`` uses
+      ``derive_langcode`` + ``register_project`` from the client.
+    - main.py: ``_check_server_compat`` runs at startup; if the server
+      is missing or older than ``MIN_SERVER_VERSION`` the recorder
+      surfaces a non-blocking warning (step 6).
+    - main.py: removed the in-process Android ContentProvider
+      callback install — the server APK owns the provider now.
+    - buildozer.spec: dropped the recorder's own ``<permission>`` and
+      ``<provider>`` declarations (server APK owns both); added
+      ``<queries><package android:name="org.atoznback.aztcollab"/></queries>``
+      for Android 11+ visibility (step 3).
+    - collab.py: tombstone now points to ``azt_collab_client`` and
+      forbids direct ``azt_collabd.*`` imports in peers.
+  Server-side companion changes (sister repo ../azt-collab):
+    - server.py: new endpoints ``/v1/credentials/github/install_url``,
+      ``/v1/credentials/github/client_id``,
+      ``/v1/credentials/github/device_flow/start`` +
+      ``/v1/credentials/github/device_flow/{job_id}``,
+      ``/v1/projects/derive_langcode``, ``/v1/projects/init``,
+      ``/v1/projects/clone`` + ``/v1/projects/clone/{job_id}``.
+
+1.22.19
+  Cleanup — Android ContentProvider transport
+    - android/src/main/java/org/atoznback/aztcollab/AZTCollabProvider.java:
+      Java ContentProvider stub. call(method, arg, extras) and
+      openFile(uri, mode) delegate to Python callbacks registered at
+      app startup. Replies to "ping" without the callback so install-
+      time discovery probes succeed before Python is ready.
+    - azt_collabd/android_cp/service.py: pyjnius shim that registers
+      the dispatch + openFile callbacks. Path resolution is scoped to
+      $AZT_HOME/projects/ to block path-traversal attacks from
+      malicious-but-signed siblings (defense in depth — Android's
+      signature check is the primary gate).
+    - azt_collab_client/transports/android_cp.py: client transport
+      that probes installed providers (authority ending in
+      ".aztcollab"), pings each, picks the first responder. Funnels
+      JSON requests through ContentResolver.call. Falls back to
+      LoopbackTransport via pick_transport() if nothing answers.
+    - main.py: on_start() now installs the provider callbacks on
+      Android.
+    - buildozer.spec: added the suite custom permission
+      org.atoznback.AZT_COLLAB_ACCESS, the <provider> declaration,
+      and android.add_src pointing at the Java sources.
+    - android/SUITE_FINGERPRINT records the SHA-256 fingerprint of
+      the suite signing key for verification scripts.
+    - SHA-256 used for provider-permission signature gate:
+      4F:D7:7D:16:B7:D5:79:BC:5D:C6:C0:C6:13:66:99:4E:93:11:93:54:
+      D0:13:7A:D4:2C:CF:F8:4A:90:4C:67:DE
+    - Manual follow-ups (see claud_diffs.txt):
+        * Verify buildozer's manifest_extra_xml /
+          manifest_application_extra_xml keys are honored by your
+          buildozer version. If not, p4a_hook.py needs to insert the
+          <permission> + <provider> elements after manifest
+          generation.
+        * Replace `/path/to/azt-suite.keystore` in buildozer.spec
+          with the real keystore path (or set via env var).
+
+1.22.18
+  Cleanup — transport seam (prep for ContentProvider)
+    - azt_collabd/server.py: extracted dispatch table out of _Handler
+      into a top-level dispatch(method, path, body) → (status, dict)
+      function. Each handler is now a plain function returning a
+      (status, response) tuple instead of calling self._send_json
+      directly. _Handler is a thin HTTP wrapper that does bearer-token
+      auth + json body parsing then delegates to dispatch().
+      UNAUTHENTICATED_PATHS lists the paths the dispatcher serves
+      without auth (just /v1/health for now).
+    - azt_collab_client/transports/__init__.py: Transport ABC,
+      ServerUnavailable, pick_transport() with cache + reset(). Cached
+      result lets the future Android transport probe once and reuse.
+    - azt_collab_client/transports/loopback.py: LoopbackTransport
+      class wrapping the existing rpc logic. _read_server_info,
+      _server_alive, _pid_alive, _spawn_server, _call_once are now
+      methods/staticmethods of the class instead of module-level
+      helpers — same behavior, scoped to the loopback transport.
+    - azt_collab_client/rpc.py: collapsed to a 20-line facade
+      (call, health, ServerUnavailable) delegating to
+      pick_transport(). Keeps `from azt_collab_client.rpc import …`
+      callers working.
+    - No behavior change. Sets up the seam Android ContentProvider
+      transport will plug into.
+
+1.22.17
+  Cleanup — wire Open Sync Settings button (cleanup draft 2)
+    - CollabScreen KV: new "Advanced" section with an "Open Sync
+      Settings" button below the Publish row. Calls
+      root.open_server_ui() — fires the existing helper that
+      subprocess.Popens `python -m azt_collabd ui` detached.
+    - open_server_ui gains an Android branch: the bundled p4a
+      interpreter can't be subprocessed, so on Android it shows a
+      "desktop-only for now" log line. Becomes "deeplink into the
+      sister-app provider" once the ContentProvider transport
+      cleanup (cleanup draft 1) lands.
+
+1.22.16
+  Collaboration refactor — step 16 (sister-app example)
+    - examples/sister_app.py: end-to-end demo for any AZT suite app
+      that wants to use the shared collaboration daemon. Identifies
+      itself via configure(), confirms the daemon is reachable, lists
+      / registers a project, makes a tiny .lift edit, fires
+      request_sync, polls, and prints a translated Result. Auto-init
+      handles repos that aren't git yet so the example runs cold.
+    - tests/step16.sh exercises the example end-to-end.
+    - Migration plan complete: 16 of 16 steps landed.
+
+1.22.15
+  Collaboration refactor — step 15 (retire the collab shim)
+    - Every `from collab import X` in main.py rewritten to import
+      from the canonical azt_collabd submodules:
+        _has_internet            → azt_collabd.net._has_internet
+        GITHUB_APP_*             → azt_collabd.auth (module __getattr__)
+        device_flow_start/poll,
+        get_github_username,
+        check_app_installed,
+        app_install_url          → azt_collabd.auth
+        init_repo, clone_repo    → azt_collabd.repo
+    - collab.py replaced with a tombstone that raises ImportError on
+      use, with the migration map in the docstring. The file can be
+      removed entirely once a stale-import grep is clean.
+    - Client API tightened: dropped the legacy sync_repo(project_dir,
+      contributor) function and the matching POST /v1/sync endpoint.
+      All sync flows go through sync_project / request_sync (langcode
+      addressing).
+
+1.22.14
+  Collaboration refactor — step 14 (SERVICE_RESTARTED + crash log)
+    - New status code SERVICE_RESTARTED (mirrored client-side).
+    - Server: install sys.excepthook that appends a JSON record to
+      $AZT_HOME/state/crash.log with type/message/traceback/pid/ts/
+      version. _Handler.handle_one_request also routes per-request
+      exceptions through the same logger.
+    - Server records every successful start in
+      $AZT_HOME/state/started.json (pid, ts, version).
+    - GET /v1/health gains started_at + last_crash fields when a
+      previous crash is on file.
+    - Server version "0.5.0" → "0.6.0".
+    - Client rpc.call retry budget bumped to 3 attempts (initial +
+      respawn + post-respawn fallback). Each respawn logs
+      "[azt_collab_client] SERVICE_RESTARTED ..." to stderr/console
+      so UI hiccups can be correlated with daemon crashes.
+    - Recorder _auto_commit_sync now catches ServerUnavailable and
+      surfaces it via the standard error popup.
+
+1.22.13
+  Collaboration refactor — step 13 (merge commit message format)
+    - New azt_collabd/merge_commit.py: build_merge_message(branch,
+      local_commits, remote_commits, conflicts) → str. Header
+      "Merge origin/<branch> into <branch>", optional Local /
+      Remote commits sections (sha + subject + author), optional
+      Conflicts section listing path + guid + kind, deduplicated
+      Co-authored-by trailers. Author/committer for the merge
+      commit comes from bot_identity() = "<slug>[bot] <
+      <slug>[bot]@users.noreply.github.com>"; the slug picks up
+      azt_collabd.config so renaming via configure() is instant.
+    - The new sync flow (step 12) consumes this directly when it
+      lands a merge.
+
+1.22.12
+  Collaboration refactor — step 12 (LIFT-aware merge driver)
+    - New azt_collabd/lift_merge.py: three_way_merge(base, ours,
+      theirs) → MergeResult(merged_bytes, conflicts). Per-entry
+      granularity in v1; per-field is a future improvement.
+        * Entry only on one side, no base → keep.
+        * One side modified, other unchanged → take modified.
+        * Both modified to same canonical XML → take it.
+        * Both modified differently OR add/add diverge OR
+          modify/delete → keep both copies, each tagged with
+          <annotation name="azt-lift-conflict" value="ours|theirs">.
+          The "theirs" version gets a "-theirs" guid suffix to keep
+          the document valid.
+    - sync_repo rewritten:
+        * Stage + commit local changes BEFORE fetching so they
+          form a real commit on local <branch>.
+        * porcelain.fetch instead of porcelain.pull.
+        * Fast-forward when local is an ancestor of origin/<branch>.
+        * Skip when origin is an ancestor of local.
+        * Otherwise call _merge_diverged for a three-way merge:
+            - .lift files → lift_merge.three_way_merge
+            - other files → take changed side, prefer ours on tie,
+              record a 'non-lift-modify-modify' conflict.
+            - merge commit authored as the bot, with
+              porcelain.commit(merge_heads=[remote_sha]). Falls back
+              to grafting a second parent for older dulwich versions.
+        * Push, with a retry loop (sync.merge_retry_max from settings)
+          for races.
+    - New helpers in repo.py: _walk_tree, _find_merge_base
+      (uses dulwich.graph.find_merge_base when available; BFS
+      fallback otherwise), _commits_between (limit 20), _is_ancestor.
+    - New status code CONFLICTS (mirrored client-side); translation
+      added: "Merge conflicts in {paths}".
+
+1.22.11
+  Collaboration refactor — step 11 (debounced scheduler + watcher)
+    - New azt_collabd/settings.py: $AZT_HOME/config.json holds
+      sync.debounce_ms (default 500), sync.merge_retry_max (default
+      3, used by the upcoming merge driver), and
+      sync.connectivity_poll_s (default 30). Env vars
+      AZT_SYNC_DEBOUNCE_MS / AZT_SYNC_MERGE_RETRY_MAX /
+      AZT_SYNC_CONNECTIVITY_POLL_S override at startup.
+    - New azt_collabd/scheduler.py:
+        * Debounced job queue keyed by langcode. request_sync(langcode,
+          contributor) schedules a sync to fire after debounce_ms;
+          subsequent calls within the window reset the timer (last
+          contributor wins) and run as a single commit/push.
+        * Job table (max 100) for client polling: PENDING → RUNNING
+          → DONE.
+        * Connectivity watcher thread polls _has_internet every
+          connectivity_poll_s seconds. Offline → online edge drains
+          projects flagged pending_push (set when an attempted sync
+          finishes COMMITTED_OFFLINE / COMMITTED_LOCAL etc.).
+    - New endpoints (server v0.5.0):
+        POST /v1/projects/<code>/sync_async  → {job_id}
+        GET  /v1/jobs/<id>                   → job status + Result
+    - New client functions: request_sync(langcode, contributor) and
+      poll_job(job_id).
+    - main.py:
+        * _auto_commit_sync now fires request_sync (non-blocking) on
+          screen transitions / edits — the user no longer waits for
+          the network on every navigation.
+        * _update_sync_status is scheduled 1.5 s out so the
+          server-stamped last_sync is in place by the time we read it.
+    - do_sync (manual sync button) still uses the blocking path so
+      users get immediate feedback when they explicitly press it.
+
+1.22.10
+  Collaboration refactor — step 10 finish (editable server UI)
+    - Server UI is now editable end-to-end:
+        Settings: host toggle (GitHub|GitLab), Connect/Disconnect
+                  buttons for both hosts.
+        github   screen: full device-flow UI (begin → user_code +
+                 auto-open browser → poll → save tokens via client).
+        gitlab   screen: username + PAT form (saves via client).
+        projects screen: read-only list (publish/sync controls land
+                 in a follow-up).
+    - Recorder gains MyApp.open_server_ui() — spawns
+      `python -m azt_collabd ui` as a detached subprocess. Wired up
+      to a button in CollabScreen later (KV layout untouched in
+      this response to limit blast radius).
+    - Recorder's CollabScreen still exists; full deletion is a
+      separate task once the server UI is verified in user-facing
+      flows.
+
+1.22.9
+  Collaboration refactor — step 10 (server UI scaffolding)
+    - New azt_collabd/ui/ package with a minimal standalone Kivy app.
+    - python -m azt_collabd          → starts the daemon (unchanged).
+    - python -m azt_collabd ui       → launches the settings UI.
+    - python -m azt_collabd help     → entrypoint listing.
+    - Two read-only screens for now:
+        Settings — credentials status (host, github/gitlab connected,
+                   username, app_installed) + online indicator.
+        Projects — registered projects from projects.json with remote
+                   URL + last-sync timestamps.
+    - UI runs as a separate process; uses azt_collab_client (auto-spawn
+      ensures the daemon is up).
+    - Recorder's CollabScreen + LangPickerScreen are NOT yet removed —
+      that migration is the follow-up step. Until then both UIs exist.
+
+1.22.8
+  Collaboration refactor — step 9 (auto-spawn + single-instance guard)
+    - Server: flock-based single-instance guard on
+      $AZT_HOME/server.lock. A second `python -m azt_collabd` against
+      the same AZT_HOME exits 1 with a clear message.
+    - Client rpc layer auto-spawns `python -m azt_collabd` as a
+      detached subprocess when server.json is missing or the server
+      it points to is dead (PID gone or /v1/health doesn't respond).
+      Retries the RPC once after spawn. Disable via env var
+      AZT_CLIENT_AUTOSPAWN=0.
+    - Stale-server detection uses os.kill(pid, 0) on POSIX + a ~1.5s
+      health probe; cheap enough to run once per call attempt.
+    - Server version bumped "0.3.0" → "0.4.0".
+    - Android ContentProvider transport (probe sibling suite apps
+      before loopback) is deferred — requires Android bindings and a
+      buildozer service entry. Loopback + auto-spawn already cover the
+      desktop case and are the fallback the provider will route to on
+      Android.
+
+1.22.7
+  Collaboration refactor — step 8 (per-project file locking)
+    - New azt_collabd/locks.py: per-working_dir advisory lock backed by
+      fcntl.flock on POSIX; re-entrant within a process so nested ops
+      (commit_audio_and_sync → sync_repo) don't deadlock.
+    - Lock files live at $AZT_HOME/locks/<sha1-of-abspath>.lock with
+      0600 perms; contents record pid + ts for diagnostics.
+    - Each public op in azt_collabd.repo (init_repo, clone_repo,
+      pull_repo, commit_and_push_branch, sync_repo, commit_audio_and_sync)
+      wraps its body in `with project_lock(...)` and returns a
+      Result(BUSY) on timeout.
+    - New status code BUSY; translated as "Another sync is in progress.
+      Try again in a moment."
+    - Default lock timeout 10 s; the module constants
+      DEFAULT_TIMEOUT / POLL_INTERVAL can be tuned later if needed.
+
+1.22.6
+  Collaboration refactor — step 7 (project handle + registry)
+    - New azt_collabd/projects.py: projects.json registry mapping
+      langcode → {working_dir, lift_path, remote_url, last_sync,
+      created_at}. register(), get(), list_all(), set_last_sync(),
+      set_remote_url(), derive_remote_url(), derive_langcode().
+    - Server endpoints (v0.3.0):
+        GET  /v1/projects                        list
+        POST /v1/projects/register               register in-place
+        GET  /v1/projects/<langcode>             get project
+        GET  /v1/projects/<langcode>/status      branch / remote /
+                                                  n_changes / last_sync
+        POST /v1/projects/<langcode>/sync        body {contributor}
+        POST /v1/projects/<langcode>/last_sync   body {timestamp?}
+    - sync by langcode stamps last_sync on the project automatically
+      when PUSHED / PULLED / COMMITTED_AND_PUSHED appears in the Result.
+    - Client API: list_projects, open_project, register_project,
+      project_status, sync_project, record_project_sync_time.
+      Project + ProjectStatus dataclasses. Legacy sync_repo(project_dir,
+      contributor) kept for transitional use.
+    - main.py:
+        * load_lift() auto-registers the current project: derives a
+          langcode (git remote name → .lift basename → working_dir
+          basename) and calls client.register_project.
+        * _auto_commit_sync and do_sync use sync_project(langcode).
+        * _sync_status_text reads last_sync from the per-project
+          project_status(); no more prefs['last_sync'].
+        * _record_sync_time removed — server stamps last_sync on
+          sync result, recorder just refreshes the status label.
+    - Migration: the credentials migration also strips the now-dead
+      `last_sync` key from prefs.json.
+
+1.22.5
+  Collaboration refactor — step 6 (move credentials server-side)
+    - Credentials now live in $AZT_HOME/credentials.json, owned by
+      azt_collabd; the recorder's prefs.json no longer holds tokens.
+    - azt_collabd/store.py rewritten with a structured schema
+      (collab_host + github{access_token, refresh_token, token_time,
+      username, app_installed} + gitlab{username, token}). Atomic
+      writes at mode 0600.
+    - One-shot migrate_from_prefs(prefs_path) lifts legacy keys
+      (gh_*, gl_*, collab_host) out of prefs.json into credentials.json
+      and strips them from prefs.json. Also strips the dead write-only
+      keys collab_username / collab_token. Runs idempotently at each
+      app build().
+    - New server endpoints:
+        GET  /v1/credentials/status               describes what's set
+        POST /v1/credentials/host                 {host}
+        POST /v1/credentials/github/tokens        {access_token, …}
+        POST /v1/credentials/github/app_installed {installed}
+        POST /v1/credentials/gitlab               {username, token}
+        POST /v1/credentials/migrate_from_prefs   {prefs_path}
+    - POST /v1/sync body is now {project_dir, contributor}; server
+      reads sync credentials from the store. When none are set, the
+      Result carries an AUTH_REQUIRED status (translated client-side).
+    - azt_collab_client: new functions get_credentials_status,
+      set_collab_host, save_github_tokens, mark_github_app_installed,
+      save_gitlab_credentials, migrate_from_prefs. sync_repo signature
+      simplified to (project_dir, contributor).
+    - main.py:
+        * Deleted _get_gh_credentials, _get_sync_credentials.
+        * _mark_gh_app_installed now calls the client.
+        * New _clone_credentials() helper reads directly from the
+          store for the remaining in-process clone/publish callers
+          (those move through the server in step 7+).
+        * CollabScreen: on_enter, set_host, save_gitlab_credentials,
+          _update_gh_status, update_publish_url, _get_credentials_for_host,
+          _device_flow_worker, start_device_flow all read/write via the
+          server-owned store.
+        * _auto_commit_sync silently no-ops on AUTH_REQUIRED instead
+          of pushing an empty string to the log.
+    - Bumped server version string "0.1.0" → "0.2.0".
+
+1.22.4
+  Collaboration refactor — step 5 (inject GitHub App config)
+    - New azt_collabd/config.py holds client_id / app_slug / collaborator;
+      azt_collabd.configure(...) sets them.
+    - Defaults match the recorder's original values (client_id
+      Iv23li66Fo9MBReatv6i, slug azt-recorder, collaborator
+      kent-rasmussen); env-var overrides: AZT_GITHUB_APP_CLIENT_ID,
+      AZT_GITHUB_APP_SLUG, AZT_GITHUB_COLLABORATOR (the latter are used
+      when azt_collabd runs standalone via `python -m azt_collabd`).
+    - Removed `from appinfo import APP_SLUG` in azt_collabd/auth.py.
+    - auth.py's four legacy constants (GITHUB_APP_CLIENT_ID /
+      GITHUB_APP_NAME / GITHUB_COLLABORATOR / GITHUB_APP_INSTALL_URL)
+      are now resolved dynamically via module __getattr__, so they
+      always reflect the current config.
+    - Same __getattr__ proxy added to azt_collabd/__init__.py and
+      collab.py so late/lazy imports pick up post-configure values.
+    - repo.py dropped the GITHUB_APP_NAME / GITHUB_COLLABORATOR
+      constant imports and reads them from config.get() at call time.
+    - main.py now imports APP_SLUG and calls azt_collabd.configure(
+      app_slug=APP_SLUG) at module load — documents the contract
+      even though defaults match.
+
+1.22.3
+  Collaboration refactor — step 4 (strip i18n from backend)
+    - New azt_collabd.status: Status + Result dataclasses, ~30 status
+      code constants, AuthError exception.
+    - azt_collabd.repo: every public op (init_repo, clone_repo, pull_repo,
+      sync_repo, commit_and_push_branch, commit_audio_and_sync) now
+      returns a Result instead of a translated log string. _diagnose_403
+      renamed to diagnose_403 and returns a Status (AUTH_REQUIRED /
+      APP_NOT_INSTALLED / REPO_NOT_AUTHORIZED / ACCESS_DENIED).
+    - azt_collabd.auth: device_flow_poll raises AuthError(Status(
+      AUTH_EXPIRED|AUTH_DENIED|AUTH_TIMEOUT)) — no more _tr in backend.
+    - azt_collab_client.status: client-side copy of code constants +
+      decode dataclasses.
+    - azt_collab_client.translate: translate_status / translate_result /
+      set_translator (defaults to i18n._); translations are lazy so they
+      pick up the current language at render time.
+    - azt_collab_client.sync_repo: returns Result instead of str.
+      Server-unavailable and server-error conditions surface as synthetic
+      SERVER_UNAVAILABLE / SERVER_ERROR codes.
+    - Server /v1/sync now serializes {ok, result: {statuses:[...]}}.
+    - main.py callers swapped substring log-matching for code-based
+      checks (result.has(S.PUSHED|PULLED|NOT_A_REPO|…)). CollabScreen._run
+      auto-translates Result for log display; device-flow worker catches
+      AuthError and translates its Status.
+    - No i18n imports remain in azt_collabd/.
+
+1.22.2
+  Collaboration refactor — step 3 (strip Kivy from backend)
+    - Removed azt_collabd/threading_utils.py and its run_async helper
+    - Inlined the two run_async call sites in main.py with plain
+      threading.Thread + Clock.schedule_once
+    - azt_collabd/__init__.py no longer re-exports run_async
+    - collab.py shim no longer re-exports run_async
+    - azt_collabd and azt_collab_client now contain zero Kivy imports
+
+1.22.1
+  Collaboration refactor — step 2 (loopback RPC)
+    - azt_collabd/server.py: stdlib http.server on 127.0.0.1:<auto-port>,
+      writes $AZT_HOME/server.json with {port, token, pid, version}
+      (0600 perms). Bearer-token auth on every endpoint except
+      GET /v1/health.
+    - azt_collabd/__main__.py: `python -m azt_collabd` starts the server;
+      SIGTERM/SIGINT trigger a graceful shutdown that removes server.json.
+    - azt_collabd/paths.py: $AZT_HOME resolution (env var, XDG, macOS
+      Application Support).
+    - azt_collab_client/rpc.py + paths.py: reads server.json, posts JSON
+      with bearer token, handles connection failure via ServerUnavailable.
+    - azt_collab_client/__init__.py: public `sync_repo(...)` wraps the
+      RPC with the same signature as azt_collabd.repo.sync_repo.
+    - main.py: _auto_commit_sync and do_sync now call
+      azt_collab_client.sync_repo, routing sync end-to-end through the
+      server. `collab` module still used elsewhere (device flow, init,
+      clone); those move in later steps.
+    - Endpoints: GET /v1/health, GET /v1/online, POST /v1/sync.
+    - Dev setup note: `env/bin/pip install dulwich certifi` on desktop
+      (Android ships them via buildozer).
+
+1.22.0
+  Collaboration refactor — step 1 (skeleton)
+    - New package azt_collabd/ holds all collaboration logic, split into
+      submodules: net (SSL patching, connectivity), auth (GitHub device
+      flow, token refresh, app install checks, GitLab add-collaborator),
+      store (token persistence), repo (dulwich init/clone/pull/push/
+      commit/sync), threading_utils (run_async)
+    - New empty package azt_collab_client/ (placeholder for step 2)
+    - collab.py is now a thin shim re-exporting everything from
+      azt_collabd — main.py imports keep working unchanged
+    - No behaviour change; groundwork for azt_collabd local sync service
+      (see azt_collabd_plan.xml for the full design)
+
+1.21.2
+  Recorder progress label
+    - Show language code instead of template name before entry number
+
+1.21.1
+  UX & clone improvements
+    - Clone dialog simplified: single URL field instead of host/owner/repo
+    - Collab name saved on leaving screen (not just on publish)
+    - GitHub/GitLab toggle: sections removed from widget tree when hidden
+      (fixes touch interception blocking toggle buttons)
+    - Translated "Now install the app..." and "Select All repositories"
+    - New French translations for clone prompt string
+
+1.21.0
+  Collaboration & navigation improvements
+    - "Setup Collaboration" button always visible on Settings page (even
+      without a loaded project)
+    - Collab screen title renamed from "Setup" to "Setup Collaboration"
+    - Publish section hidden on collab screen when no project loaded
+    - Collab screen X button navigates to config or welcome as appropriate
+    - Clone: retries without credentials on auth failure (public repos);
+      shows "set up collaboration" prompt when credentials are needed
+    - Backup warning overlay shown when opening a database with no git
+      remote configured ("Your data isn't being backed up!")
+    - Back button on recorder screen now closes the app (was: go to welcome)
+    - New French translations for backup/collab prompt strings
+
+1.20.2
+  Welcome screen & settings fixes
+    - Fixed welcome screen layout: gear button in top-right, centered icon,
+      all three project buttons visible, version label at bottom
+    - Reduced icon/spacing/padding for better fit on smaller screens
+    - Language switch now uses NoTransition and sets sm.current synchronously
+      instead of deferred Clock.schedule_once (fixes "goes back" bug)
+    - Early return when clicking already-active language button
+    - Settings X button handles no-database case (goes to welcome instead
+      of crashing on app.recorder access)
+
+1.20.0
+  Internationalisation (i18n) support
+    - New i18n.py module using Python gettext for UI translations
+    - All user-facing strings in KV templates wrapped with _() for translation
+    - All user-facing strings in Python code (popups, toasts, status messages)
+      wrapped with _tr() for translation
+    - French (fr) translation provided with ~140 translated strings
+    - UI language selector added to Settings screen (below "Last operation")
+    - Language preference persisted in prefs.json under 'ui_language' key
+    - Language loaded before KV parsing so all widgets render in chosen language
+    - Locale files in locales/<lang>/LC_MESSAGES/aztrecorder.{po,mo}
+    - Adding new languages requires only a new .po/.mo file in locales/
+
+1.19.3
+  Settings layout reorder
+    - Share icon moved from top bar into full-width "Share this app" button
+      with inline icon
+    - New order: Share → Recording task → three blue collapsible buttons
+      (gloss languages, filter words, image repository) → Setup
+      Collaboration → Start over
+    - Gloss language grid height deferred one frame so content below shifts
+      down correctly on expand
+    - Removed extra spacer widgets; tighter spacing (dp(14))
+
+1.19.1
+  Settings
+    - "Change gloss languages" button replaces always-visible language grid;
+      grid cleared on collapse to prevent touch interception
+    - "Change image repository" button replaces always-visible text input;
+      shows owner/repo summary when collapsed
+    - Word filter, gloss languages, and image repo all start collapsed
+    - All collapsible panels use accent-colored button when closed,
+      dim when open
+
+1.19.0
+  Settings
+    - Word filter section collapsed behind "Filter words" button
+    - One-line filter summary shown next to button (CAWL range, gloss
+      search, unrecorded-only); updates on panel close
+    - Filters applied immediately when panel is closed
+    - Button brightens (accent color) when panel is hidden, dims when open
+    - Hidden filter TextInputs zeroed to prevent touch interception
+
+1.18.0
+  Collaboration setup
+    - "Install GitHub App" is now a proper button (replaces non-tappable
+      ref link)
+    - GitHub App install status stored in prefs (gh_app_installed);
+      install prompt skipped if already installed
+    - Installation status reset when "Reconnect" is clicked
+    - App marked as installed after first successful push
+    - Tapping "Reconnect" no longer brings up the keyboard (hidden GitLab
+      TextInputs collapsed to zero height so they can't intercept touches)
+    - "Publish this project" section hidden when a git remote already exists
+      (cloned projects don't show publish controls)
+  Synchronization
+    - Page swipe now pulls remote changes (pull + commit + push)
+      instead of commit + push only
+    - Data reloaded after pull to show collaborator's changes
+
+1.17.0
+  Welcome screen
+    - Title shows app name (A-Z+T Recorder) above tagline (Record My Wordlist)
+    - Removed "From Internet" button
+    - Renamed "Clone Repository" to "Clone Internet Repository"
+    - Project buttons scroll; header/image stay pinned at top
+  Language picker
+    - Selection details, variant code input, and Continue button now appear
+      directly below the search field (above results) so the keyboard doesn't
+      obscure them
+    - Continue button hidden until a language is selected
+  Collaboration setup
+    - Page no longer scrolls (touch swipe no longer triggers keyboard)
+    - Red asterisk on "Your name" label
+    - Connect/Reconnect button greyed out until name is entered
+    - First-visit overlay prompts user to enter their name
+    - Language code (repo name) derived from current project's git remote,
+      so switching projects shows the correct publish URL
+  Synchronization
+    - "Not a git repository" sync error navigates to collaboration setup
+    - Sync status shows "4 days ago" instead of "-4d"
+    - Sync status label smaller font (sp(13)) and wider container to avoid
+      text wrapping
+  GitHub device flow
+    - Browser auto-opens github.com/login/device after 3s (no more
+      non-clickable link / keyboard popup)
+    - Token saved immediately after authorization; app install check is
+      best-effort (network errors no longer block connection)
+    - Network errors (errno 7) retried during device flow polling
+    - Fixed Python 3.13 closure scoping error in authorization error handler
+  Android
+    - KIVY_HOME set to writable location before Kivy import (fixes
+      "Permission denied" on icon copy at first launch)
+    - typing_extensions added to buildozer requirements (fixes dulwich
+      import on device)
+
+1.16.0
+  (internal: intermediate version during 1.17.0 development)
+
+1.15.5
+  (internal: intermediate version during 1.17.0 development)
+
+1.15.4
+  (internal: intermediate version during 1.17.0 development)
+
+1.15.3
+  Overlay
+    - Bug fixes for overlay problems
+
+1.15.2
+  Layout
+    - Safe area insets for Android 15+ (API 35+) edge-to-edge enforcement
+    - App content no longer overlaps status bar or navigation bar
+    - Insets read from WindowInsets.Type.systemBars() with pre-API 30 fallback
+  Theme
+    - Default theme changed to Ocean
+
+1.15.1
+  Theme
+    - reboot on theme choice confirmation
+1.15.0
+  Theme
+    - Five colour themes: Earth (default), Ocean, Forest, Slate, Light
+    - Theme selector in Settings with one-tap switching
+    - All palettes defined in theme.py with set_theme() API
+    - Selected theme saved in prefs; applied on next launch
+
+1.14.2
+  Clone
+    - Progress display splits on colon for narrow screens (phase and detail
+      on separate lines)
+  Bug fixes
+    - Fixed top bar showing all field types (Plural, Imperative); now only
+      shows the wordlist field type (e.g. SILCAWL)
+
+1.14.1
+  Clone
+    - Fixed "File exists" error on re-clone: destination cleared before cloning
+    - Live git progress shown during clone (Receiving objects, Resolving deltas)
+    - "Cloning repository..." overlay with progress detail line
+  Bug fixes
+    - Fixed RecBtn crash: normal_color fallback when property not yet applied
+    - Recording label uses self-sizing (no circular width dependency)
+
+1.14.0
+  Theme
+    - All colours extracted to theme.py; single-file theming
+    - Colour constants annotated with hex values and descriptive roles
+    - KV uses #:import T theme; Python uses import theme
+    - generate_presplash.py uses theme colour constants
+  Settings
+    - Recording task shown as "Recording:" label + tappable button (always visible)
+    - Recording task overlay selector replaces dropdown
+    - Recording task availability checks actual LIFT field elements
+      (Entry/field[@type='Plural'] and Entry/field[@type='Imperative'])
+      instead of grammatical-info heuristic
+    - "Show past work" defaults to off; persisted across sessions
+    - Gloss language toggles show names (English, español, português)
+      instead of codes; falls back to code for unlisted languages
+    - "Use these Settings" button removed; X applies settings and returns
+  Collaboration
+    - GitHub/GitLab toggle on setup page below "Your name"
+    - GitLab: personal access token + username entry
+    - Publish URL, sync, clone, and auto-publish all respect host selection
+    - Host preference persisted as collab_host in prefs
+
+1.13.2
+  Bug fixes
+    - Fixed image flashing on play/record: only reloads when source changes
+    - Fixed images saved from texture displaying upside down
+    - Fixed UI hang when no repo configured (token refresh moved to background)
+    - Recording task selector changed to single-select dropdown
+    - "Setting up your wordlist..." overlay on language picker Continue button
+    - FreeSVG URLs with spaces now percent-encoded
+
+1.13.1
+  Packaging
+    - Canonical app identity in appinfo.py (APP_NAME, APP_SLUG, APP_TAGLINE,
+      APP_USER_AGENT); all files reference these constants
+    - Package renamed to org.atoznback.azt_recorder
+    - Docstrings updated to reference A-Z+T suite
+    - GitHub App renamed to azt-recorder
+  Image resolver
+    - Files with __ in filename (generic images) prioritized as default
+    - Cache version bumped to invalidate stale single-URL-per-CAWL caches
+    - All files in {line}_{gloss}/ subdirectories offered in image picker
+
+1.13.0
+  Image picker — new sources
+    - FreeSVG: search freesvg.org for public domain SVG images
+    - Wikimedia Commons: search commons.wikimedia.org, filtered to public
+      domain and CC0 only
+    - All three web sources (openclipart, FreeSVG, Wikimedia) auto-fetched
+      when <10 CAWL images available
+    - Button row split: web sources (openclipart/FreeSVG/Wikimedia) on top,
+      local sources (Photo/File/Cancel) below
+    - Repeated taps page through results for all sources
+
+1.12.0
+  Image resolver
+    - Fixed: root-level image files (0001.png) now recognized in addition to
+      subdirectory files (0001_word/image.png); brings in all repo images
+  Recorder
+    - Image height capped at 500dp on recording page
+  Settings
+    - Recording task selector only shown when >1 task is relevant to the data
+    - Relevance detected from LIFT grammatical-info (noun/verb) and examples
+  Share
+    - Fixed APK sharing: use MediaStore content:// URI instead of file://
+      (file:// blocked by receiving apps on modern Android)
+
+1.11.0
+  Image caching
+    - Silent background pre-fetch of all CAWL images for offline use
+    - Images cached in app storage (not in git) until user views and swipes past
+    - On swipe, cached image copied to images/ dir and committed to git
+    - Entries display cached images when available (no network needed)
+  Network resilience
+    - All network operations wrapped in try/except — app never crashes on
+      no internet
+    - Image pre-fetch silently skips failures (spotty internet expected)
+    - get_github_username() and refresh_access_token() now handle network errors
+  Git
+    - Data repo .gitignore includes image_cache/
+
+1.10.0
+  Image picker
+    - Fixed images displaying tiny: replaced Button+child AsyncImage with
+      ButtonBehavior+AsyncImage so the image IS the tappable widget
+    - Openclipart: rewrote to scrape HTML search results (JSON API is defunct);
+      extracts /image/800px/{id} thumbnail URLs from search page
+    - Fixed camera/file picker results not being processed: activity result
+      listener was never bound; added android.activity.bind in on_start
+    - Added diagnostic logging for camera and file picker activity results
+  Settings
+    - Image repository now shows full URL; accepts both full GitHub URLs
+      and owner/repo shorthand
+    - New "Recording" section with four recording task options:
+      Citation forms (active), Second forms for nouns, Second forms for
+      verbs, Examples (last three disabled — future infrastructure)
+  Git
+    - Suppressed dulwich debug logging (gitconfig path spam)
+
+1.9.1
+  Device flow UX
+    - GitHub URL is now a clickable link that opens in the device browser
+    - Copy button next to the 8-character device code for easy pasting
+
+1.9.0
+  GitHub App authentication (device flow)
+    - New GitHub App "azt-recorder" replaces manual PAT entry
+    - User taps "Connect to GitHub", enters a short code at
+      github.com/login/device — no PATs, no git knowledge required
+    - Only the public client_id is embedded in the app (no private key,
+      no server component)
+    - Access tokens auto-refresh every 8 hours via refresh token;
+      user re-authorizes ~twice a year (6-month refresh token)
+    - get_valid_token() transparently refreshes before operations
+  Repo setup automation
+    - Publishing auto-creates repo on GitHub under the user's account
+    - kent-rasmussen automatically added as collaborator on new repos
+    - add_collaborator() API call on every _ensure_remote_repo
+  Commit attribution
+    - Commits now have contributor as author, azt-recorder[bot] as committer
+    - All four commit sites updated (init, branch, sync, auto-sync)
+  Setup screen redesign
+    - Replaced username + PAT text inputs with "Connect to GitHub" button
+    - Device code + instructions shown inline during authorization
+    - Connection status label shows "Connected as {username}" or
+      "Not connected"
+    - Publish section simplified: just language code input (username
+      derived from GitHub connection)
+    - Clone dialog no longer asks for credentials (uses stored token)
+  All credential consumers updated
+    - _auto_commit_sync, do_sync, _try_auto_publish, _download_and_open,
+      clone_dialog all use _get_gh_credentials() with auto-refresh
+    - All dulwich push/pull/clone calls use username='x-access-token'
+
+1.8.4
+  Auto-sync
+    - Fire _auto_commit_sync on every word navigation (nav_prev/nav_next),
+      not just on screen transitions; fixes swipe not syncing
+
+1.8.3
+  Image redo overlay
+    - Replaced Button with custom ImageRedoBtn widget: claims touch on down,
+      cancels on any movement, only fires on stationary tap+release.
+      Swipe is always the default; redo never triggers during a swipe.
+
+1.8.2
+  Image redo overlay
+    - Exclude redo button from swipe zone so taps register as clicks, not swipes
+  Image picker
+    - Images sized to half screen height (min dp(200)); 1 column when ≤2 images,
+      2 columns when more
+    - Openclipart: more robust response parsing with fallback key paths;
+      diagnostic logging when no results found; grid switches to 2 cols
+      when openclipart images arrive
+    - File picker (Android): rewrote URI→file copy using Java FileOutputStream
+      for correct InputStream bridging (fixes bytearray/Java type mismatch)
+    - Photo button falls back to file picker on desktop
+
+1.8.1
+  Camera permission
+    - CAMERA permission requested on-demand when user taps "Photo",
+      not at app startup
+
+1.8.0
+  List name
+    - Now read from LIFT entry field/@type (e.g. "SILCAWL") instead of filename
+  Status bar
+    - Sync status text 2x larger (sp(20)) and more visible color
+  Image redo overlay
+    - Button doubled in size (dp(80)) for easier tapping
+  Image picker
+    - Prompt text 2x larger (sp(30))
+    - Images displayed at 1/4 screen size in 2x2 grid
+    - "openclipart" button fetches ~5 relevant images from openclipart.org
+    - Auto-fetches from openclipart if internet available and < 10 CAWL images
+    - "Photo" button launches device camera (Android)
+    - "File" picker fixed: uses ACTION_OPEN_DOCUMENT with read permission
+      grant and proper URI content stream reading for Android
+    - Camera result handler saves bitmap to temp PNG and processes it
+  Image repository
+    - Configurable in Settings (owner/repo format)
+    - Default remains kent-rasmussen/images_CAWL
+    - Setting saved in prefs and passed to LIFTDatabase/resolver
+  Start over
+    - Shows current template name and image repo before navigating
+    - Confirmation dialog with Cancel/Start over buttons
+
+1.7.0
+  Status bar
+    - Left: shows list name (up to 8 chars), CAWL number (unpadded), / total
+    - Center: sync icon + last sync time (HH:MM if today, 'yesterday HH:MM',
+      or '-Nd HH:MM' for older)
+    - Whole center area tappable to sync
+  Image picker
+    - Redo overlay button (icons/redo.png) on lower-right of entry image
+    - Image picker screen shows all available CAWL images at quarter size
+    - User can select from CAWL repo images or pick from device files/camera
+    - Selected image is scaled to max 1284px, saved to images/ as
+      {cawl}_{glosses_underlined}.png (matching azt convention)
+    - Illustration href written back to LIFT XML
+    - Image committed and pushed with audio on next page transition
+  CAWL image resolver
+    - Now indexes ALL images per CAWL number (not just first)
+    - Accepts extensionless files (2247 additional images)
+    - CAWL number normalization: tries exact, zero-padded, and stripped forms
+    - Cache format updated to store all URLs per CAWL
+
+1.6.0
+  Template cleaning
+    - New projects from template: remove empty non-vernlang form nodes in
+      citation and definition elements; add empty vernlang form if missing
+  Image scraping
+    - Accept JPEG/JPG images from CAWL illustration repo (not just PNG);
+      fixes ~1600 missing illustrations including 0057_fist
+  Audio tagging
+    - Persist vernlang in prefs; re-apply on every load and reload so
+      audiolang is always {vernlang}-Zxxx-x-audio (fixes en-Zxxx-x-audio bug)
+  Auto-publish
+    - After setting vernlang on a new project, auto-publish if git
+      credentials and language code are already configured
+  Sync improvements
+    - Preserve current word position (by guid) across sync/reload
+    - Don't attempt git commit when there are no staged changes
+  Git
+    - Auto-commit audio and .lift changes on every page transition
+    - Sync (push) automatically if internet is available
+    - Create ~/.gitconfig in app private dir to suppress dulwich warnings
+  Suppress Pillow olefile import warning
+
+1.5.0
+  UI overhaul
+    - Icons moved to icons/ subdirectory
+    - Welcome screen: project picker replaces "Continue with my work" button;
+      supports multiple projects under user_data_dir/projects/
+    - Recorder top bar: sync button (icons/sync_dark.png) in center
+    - Config page: version in top bar, share icon in top bar, removed
+      "Settings" title and "Open" button, 3-column tappable gloss language
+      toggles, "Show past work" (reversed logic), "Use these Settings",
+      "Setup Collaboration", "Start over"
+    - Collab page renamed to "Setup"; sync button removed (moved to recorder)
+  New projects
+    - LIFT file saved as {vernlang}/{vernlang}.lift under projects/
+    - Language code pre-fills publish settings
+  URL downloads
+    - Detect GitHub/GitLab raw URLs and clone the full repo instead of
+      downloading a single file
+    - All projects stored under user_data_dir/projects/
+
+1.4.0
+  Language picker
+    - Language code selection from compressed langtags data (langtags_mini.json.gz)
+    - Region picker, dialect variant input, live code assembly
+    - strip_langtags.py build-time script for data compression
+  Clone dialog
+    - Build clone URL from host/owner/repo components with live preview
+  File handling
+    - Validate downloaded LIFT content is non-empty
+    - Auto-load checks file size > 50 bytes
+    - try/except around load_lift to handle corrupt files
+
+1.3.0
+  Git collaboration (collab.py)
+    - SSL certificate handling for Android (certifi + urllib3 patching)
+    - Auto-create GitHub/GitLab repos on publish
+    - Fix push to empty remote repos (implicit refspec)
+    - Stage audio files inside untracked directories
+  Swipe animation
+    - Finger-following swipe on picture/glosses area (not on buttons)
+    - Dead-zone, snap-back, and directional slide transitions
+  UI fixes
+    - Play/redo button proportions (X = 1/3 width)
+    - Android adaptive icon support (foreground/background layers)
+
+1.1.0
+  Initial public version
+    - LIFT XML parsing and audio recording
+    - Kivy UI with recorder, config, and collaboration screens
+    - Android APK via Buildozer
