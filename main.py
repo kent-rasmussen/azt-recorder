@@ -21,6 +21,7 @@ from i18n import _ as _tr, set_language, current_language, available_languages
 # calling configure() documents the contract and lets other suite apps
 # override identity values via the same hook.
 import azt_collab_client
+from azt_collab_client import peer_pref, set_peer_pref
 from azt_collab_client.ui import theme
 azt_collab_client.configure(app_id='azt-recorder')
 # Route client status/popup translations through the recorder's catalog
@@ -1858,10 +1859,9 @@ class ConfigScreen(Screen):
             gs.text = app.recorder.gloss_search or ''
         ir = self.ids.get('image_repo_input')
         if ir:
-            ir.text = app._load_prefs().get('image_repo', '')
+            ir.text = peer_pref('image_repo', '') or ''
         # Restore show-past-work toggle (default False)
-        prefs = app._load_prefs()
-        show_past = prefs.get('show_past_work', False)
+        show_past = bool(peer_pref('show_past_work', False))
         toggle = self.ids.get('unrecorded_toggle')
         if toggle:
             toggle.active = show_past
@@ -2019,10 +2019,7 @@ class ConfigScreen(Screen):
             return
         if self._imgrepo_open:
             # Save on close
-            app = App.get_running_app()
-            prefs = app._load_prefs()
-            prefs['image_repo'] = inp.text.strip()
-            app._save_prefs_dict(prefs)
+            set_peer_pref('image_repo', inp.text.strip())
             inp.height = 0
             inp.opacity = 0
             inp.disabled = True
@@ -2135,9 +2132,7 @@ class ConfigScreen(Screen):
         app = App.get_running_app()
         if app.recorder:
             app.recorder.only_unrecorded = not show_past
-        prefs = app._load_prefs()
-        prefs['show_past_work'] = show_past
-        app._save_prefs_dict(prefs)
+        set_peer_pref('show_past_work', bool(show_past))
 
     def _build_theme_buttons(self):
         """Populate theme selector row with one button per theme."""
@@ -2165,9 +2160,7 @@ class ConfigScreen(Screen):
         if name == theme.current_theme:
             return
         app = App.get_running_app()
-        prefs = app._load_prefs()
-        prefs['theme'] = name
-        app._save_prefs_dict(prefs)
+        set_peer_pref('theme', name)
         # Update button highlights
         row = self.ids.get('theme_row')
         if row:
@@ -2201,9 +2194,7 @@ class ConfigScreen(Screen):
         )
         def _cancel(b):
             # Revert pref to current theme
-            prefs2 = app._load_prefs()
-            prefs2['theme'] = theme.current_theme
-            app._save_prefs_dict(prefs2)
+            set_peer_pref('theme', theme.current_theme)
             if row:
                 for btn in row.children:
                     btn.background_color = theme.GREEN \
@@ -2245,13 +2236,11 @@ class ConfigScreen(Screen):
         available = self._available_rec_tasks(app)
         self._rec_available = available
         # Restore saved selection (or default to citation)
-        prefs = app._load_prefs()
-        saved_key = prefs.get('rec_task', 'citation')
+        saved_key = peer_pref('rec_task', 'citation') or 'citation'
         # If saved key is no longer available, fall back to citation
         if not any(k == saved_key for k, _ in available):
             saved_key = 'citation'
-            prefs['rec_task'] = saved_key
-            app._save_prefs_dict(prefs)
+            set_peer_pref('rec_task', saved_key)
         saved_label = next((t for k, t in available if k == saved_key), available[0][1])
         btn.text = saved_label
         row.height = dp(44)
@@ -2267,9 +2256,7 @@ class ConfigScreen(Screen):
         if len(available) <= 1:
             return
 
-        app = App.get_running_app()
-        prefs = app._load_prefs()
-        current_key = prefs.get('rec_task', 'citation')
+        current_key = peer_pref('rec_task', 'citation') or 'citation'
 
         view = ModalView(
             size_hint=(0.85, None),
@@ -2295,9 +2282,7 @@ class ConfigScreen(Screen):
             )
 
             def _select(k=key, l=label, v=view):
-                prefs2 = app._load_prefs()
-                prefs2['rec_task'] = k
-                app._save_prefs_dict(prefs2)
+                set_peer_pref('rec_task', k)
                 task_btn = self.ids.get('rec_task_btn')
                 if task_btn:
                     task_btn.text = l
@@ -2371,9 +2356,7 @@ class ConfigScreen(Screen):
                 app.recorder.gloss_search = gs.text.strip()
             ir = self.ids.get('image_repo_input')
             if ir:
-                prefs = app._load_prefs()
-                prefs['image_repo'] = ir.text.strip()
-                app._save_prefs_dict(prefs)
+                set_peer_pref('image_repo', ir.text.strip())
             app.recorder.only_unrecorded = self.only_unrecorded
             app.recorder.rebuild_queue()
             app.go_recorder()
@@ -2385,16 +2368,17 @@ class CollabScreen(Screen):
 
     def on_enter(self):
         app = App.get_running_app()
-        prefs = app._load_prefs()
+        from azt_collab_client import get_contributor
         has_db = app.recorder is not None
         w = self.ids.get('name_input')
         if w and not w.text:
-            w.text = prefs.get('collab_name', '')
+            w.text = get_contributor() or ''
         # Derive langcode from current project's git remote, fall back to pref
         langcode = ''
         has_remote = False
         if has_db:
-            langcode = self._langcode_from_project(app) or prefs.get('collab_langcode', '')
+            langcode = (self._langcode_from_project(app)
+                        or peer_pref('collab_langcode', '') or '')
             has_remote = bool(self._langcode_from_project(app))
         w = self.ids.get('langcode_input')
         if w:
@@ -2656,15 +2640,13 @@ class CollabScreen(Screen):
             self._set_log(_tr('Code copied to clipboard'))
 
     def _save_settings(self):
-        app = App.get_running_app()
-        prefs = app._load_prefs()
+        from azt_collab_client import set_contributor
         w = self.ids.get('name_input')
         if w:
-            prefs['collab_name'] = w.text
+            set_contributor(w.text)
         w = self.ids.get('langcode_input')
         if w:
-            prefs['collab_langcode'] = w.text
-        app._save_prefs_dict(prefs)
+            set_peer_pref('collab_langcode', w.text)
 
     def _set_log(self, text):
         lbl = self.ids.get('log_label')
@@ -3406,7 +3388,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.33.1'
+__version__ = '1.34.0'
 
 
 class LIFTRecorderApp(App):
@@ -3444,57 +3426,94 @@ class LIFTRecorderApp(App):
                         results.append((name, path))
         return results
 
-    # ── Preferences (last used file) ──────────────────────────────────────────
+    # ── Preferences ──────────────────────────────────────────────────────────
+    # Live prefs (theme, show_past_work, image_repo, vernlang,
+    # rec_task, collab_langcode) live in $AZT_HOME/config.json via
+    # azt_collab_client.peer_pref / set_peer_pref. The committer name
+    # lives there too via get_contributor / set_contributor. The
+    # legacy peer-private prefs.json under user_data_dir is kept
+    # readable for one-shot migration only — see
+    # _migrate_prefs_to_suite_store.
 
     @property
     def _prefs_path(self):
         return os.path.join(self.user_data_dir, 'prefs.json')
 
-    def _save_prefs_dict(self, prefs):
-        import json
-        try:
-            os.makedirs(self.user_data_dir, exist_ok=True)
-            with open(self._prefs_path, 'w') as f:
-                json.dump(prefs, f)
-        except Exception as ex:
-            print(f'Prefs save error: {ex}')
-
-    def _load_prefs(self):
+    def _load_legacy_prefs(self):
         import json
         try:
             with open(self._prefs_path) as f:
-                return json.load(f)
-        except Exception:
+                return json.load(f) or {}
+        except (FileNotFoundError, ValueError):
             return {}
+        except Exception as ex:
+            print(f'Legacy prefs read error: {ex}')
+            return {}
+
+    def _write_legacy_prefs(self, prefs):
+        """Write back to prefs.json — called only by the migration
+        path to drain keys after they've moved to the suite store."""
+        import json
+        try:
+            os.makedirs(self.user_data_dir, exist_ok=True)
+            tmp = self._prefs_path + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(prefs, f)
+            os.replace(tmp, self._prefs_path)
+        except Exception as ex:
+            print(f'Legacy prefs write error: {ex}')
+
+    def _migrate_prefs_to_suite_store(self):
+        """Drain the legacy peer-private prefs.json into $AZT_HOME/config.json
+        via azt_collab_client. Idempotent: keys already present in the
+        suite store are left alone (a sister app that ran first wins).
+        After drain, the keys are popped from prefs.json so subsequent
+        launches do nothing — no daemon contact, no repeated work."""
+        legacy = self._load_legacy_prefs()
+        if not legacy:
+            return
+        moved = []
+        # ui_language and last_lift were drained in 1.30.0 / 1.33.0; if
+        # any old install still has them, finish the job here.
+        legacy_lang = legacy.pop('ui_language', None)
+        if legacy_lang:
+            set_language(legacy_lang)
+            moved.append('ui_language')
+        if legacy.pop('last_lift', None) is not None:
+            moved.append('last_lift (dropped)')
+        # Committer name has a dedicated suite endpoint.
+        if 'collab_name' in legacy:
+            try:
+                from azt_collab_client import get_contributor, set_contributor
+                value = legacy.pop('collab_name')
+                if value and not get_contributor():
+                    set_contributor(value)
+                moved.append('collab_name -> contributor')
+            except Exception as ex:
+                print(f'[migrate] collab_name failed: {ex}')
+        # Generic peer-shared keys.
+        for key in ('theme', 'show_past_work', 'collab_langcode',
+                    'image_repo', 'rec_task', 'vernlang'):
+            if key in legacy:
+                value = legacy.pop(key)
+                if peer_pref(key) is None and value not in ('', None):
+                    set_peer_pref(key, value)
+                moved.append(key)
+        if moved:
+            self._write_legacy_prefs(legacy)
+            print(f'[migrate] prefs.json -> $AZT_HOME/config.json: {moved}')
 
     # ── App lifecycle ─────────────────────────────────────────────────────────
 
     def build(self):
         try:
-            # Apply saved theme before KV is parsed. The active UI
-            # language is owned by azt_collab_client.i18n and applied at
-            # import time; if a legacy 'ui_language' is still sitting in
-            # prefs.json from before 1.30.0, migrate it through to the
-            # client store on the way past.
-            prefs = self._load_prefs()
-            theme.set_theme(prefs.get('theme', 'Ocean'))
-            dirty = False
-            legacy_lang = prefs.pop('ui_language', None)
-            if legacy_lang:
-                set_language(legacy_lang)
-                dirty = True
-                print(f'[migrate] ui_language={legacy_lang!r} '
-                      f'prefs.json -> $AZT_HOME/config.json')
-            # Last-opened project moved to azt_collab_client.recent in
-            # 1.33.0. Drop the legacy key; it stops being authoritative
-            # the moment the user picks any project after upgrade.
-            if 'last_lift' in prefs:
-                prefs.pop('last_lift', None)
-                dirty = True
-                print('[migrate] dropped legacy prefs[last_lift] '
-                      '(now azt_collab_client.recent)')
-            if dirty:
-                self._save_prefs_dict(prefs)
+            # Drain the legacy peer-private prefs.json into the
+            # suite-wide $AZT_HOME/config.json. Idempotent — keys
+            # already in the suite store are left alone, so a sister
+            # app that ran first wins. Apply *before* reading the theme
+            # below so a fresh upgrade still finds the user's choice.
+            self._migrate_prefs_to_suite_store()
+            theme.set_theme(peer_pref('theme', 'Ocean') or 'Ocean')
             self.subtitle = _tr(APP_TAGLINE)
             Builder.load_string(KV)
             self.root = RootScreen()
@@ -3600,8 +3619,7 @@ class LIFTRecorderApp(App):
         elif err == 'server_unreachable':
             # Don't nag on every launch — only mention if the user has
             # already configured collab (i.e. has a langcode set).
-            prefs = self._load_prefs()
-            if prefs.get('collab_langcode'):
+            if peer_pref('collab_langcode'):
                 msg = _tr(
                     'AZT collaboration service is not running '
                     'or not installed.')
@@ -3923,7 +3941,7 @@ class LIFTRecorderApp(App):
 
     def _image_repo(self):
         """Return the configured image repo, or default."""
-        return self._load_prefs().get('image_repo', '')
+        return peer_pref('image_repo', '') or ''
 
     def _get_image_cache_dir(self):
         """Return the image cache directory (not in git, for offline use)."""
@@ -4004,17 +4022,14 @@ class LIFTRecorderApp(App):
             db.set_vernlang(pending)
             db.clean_template()
             self._pending_vernlang = ''
-            prefs = self._load_prefs()
-            prefs['vernlang'] = pending
-            self._save_prefs_dict(prefs)
+            set_peer_pref('vernlang', pending)
         else:
-            prefs = self._load_prefs()
-            saved_vern = prefs.get('vernlang', '')
+            saved_vern = peer_pref('vernlang', '') or ''
             if saved_vern:
                 db.set_vernlang(saved_vern)
         self.recorder = RecorderController(db)
         # Apply persisted show-past-work preference (default: hide past work)
-        show_past = self._load_prefs().get('show_past_work', False)
+        show_past = bool(peer_pref('show_past_work', False))
         self.recorder.only_unrecorded = not show_past
         self.recorder.rebuild_queue()
         # Register this project with the sync backend so future ops can
@@ -4086,8 +4101,7 @@ class LIFTRecorderApp(App):
             print(f'Reload failed: {ex}')
             return
         # Re-apply saved vernlang
-        prefs = self._load_prefs()
-        saved_vern = prefs.get('vernlang', '')
+        saved_vern = peer_pref('vernlang', '') or ''
         if saved_vern:
             db.set_vernlang(saved_vern)
         old_settings = (
@@ -4115,7 +4129,7 @@ class LIFTRecorderApp(App):
         thread for each new progress line if provided. Always dismisses
         any loading overlay before reporting."""
         from azt_collab_client import (
-            clone_project_start, clone_project_status, translate_result)
+            clone_project_start, clone_project_status, translate_result, S)
         import threading
         import time
 
@@ -4155,20 +4169,12 @@ class LIFTRecorderApp(App):
                             Clock.schedule_once(
                                 lambda dt: self.load_lift(lift_path), 0)
                         else:
-                            looks_auth = False
-                            try:
-                                for st in (result.statuses if result
-                                           else []):
-                                    msg = (st.params.get(
-                                        'error', '') or '').lower()
-                                    if st.code == 'CLONE_FAILED' and (
-                                            'credential' in msg
-                                            or 'auth' in msg):
-                                        looks_auth = True
-                                        break
-                            except Exception:
-                                pass
-                            if looks_auth:
+                            # Daemon attaches CLONE_AUTH_REQUIRED to the
+                            # Result when a CLONE_FAILED looks auth-shaped
+                            # (server.py:_clone_failed_looks_auth). Branch
+                            # on the structured code instead of substring-
+                            # matching translated error text.
+                            if result and result.has(S.CLONE_AUTH_REQUIRED):
                                 Clock.schedule_once(
                                     lambda dt: (
                                         self._dismiss_loading_overlay(),
@@ -4187,17 +4193,17 @@ class LIFTRecorderApp(App):
                                 self._show_error(e)), 0)
                         return
             except Exception as ex:
+                # No structured Result on this path (transport blew
+                # up before the daemon got to emit one). Auth-shape
+                # detection here would have to substring-match a
+                # locale-dependent string — skip it; the daemon-emitted
+                # CLONE_AUTH_REQUIRED branch above handles real auth
+                # failures.
                 print(f'[clone] error: {ex}')
-                err = str(ex).lower()
-                if 'credential' in err or 'auth' in err:
-                    Clock.schedule_once(
-                        lambda dt: (self._dismiss_loading_overlay(),
-                                    self._show_collab_prompt()), 0)
-                else:
-                    Clock.schedule_once(
-                        lambda dt, e=str(ex): (
-                            self._dismiss_loading_overlay(),
-                            self._show_error(e)), 0)
+                Clock.schedule_once(
+                    lambda dt, e=str(ex): (
+                        self._dismiss_loading_overlay(),
+                        self._show_error(e)), 0)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -4206,12 +4212,12 @@ class LIFTRecorderApp(App):
         automatically. The server runs the publish using its own
         credentials store; the peer just tells it the working dir +
         remote URL."""
-        prefs = self._load_prefs()
-        langcode = prefs.get('collab_langcode', '')
+        langcode = peer_pref('collab_langcode', '') or ''
         if not (langcode and self.recorder):
             return
         from azt_collab_client import (
-            get_credentials_status, init_project, translate_result)
+            get_contributor, get_credentials_status, init_project,
+            translate_result)
         status = get_credentials_status()
         host = status.get('host', 'github')
         if host == 'gitlab':
@@ -4227,7 +4233,7 @@ class LIFTRecorderApp(App):
         if not (user and token_ok):
             return
         remote_url = f'https://{domain}/{user}/{langcode}.git'
-        name = prefs.get('collab_name', '') or 'Recorder'
+        name = get_contributor() or 'Recorder'
         import threading
 
         def _worker():
@@ -4286,8 +4292,8 @@ class LIFTRecorderApp(App):
         refreshes its sync indicator after a short delay."""
         if not self.recorder:
             return
-        prefs = self._load_prefs()
-        name = prefs.get('collab_name', '') or 'Recorder'
+        from azt_collab_client import get_contributor
+        name = get_contributor() or 'Recorder'
         langcode = self._current_langcode_or_register()
         if not langcode:
             return
@@ -4480,12 +4486,12 @@ class LIFTRecorderApp(App):
     def do_sync(self):
         if not self.recorder:
             return
-        prefs = self._load_prefs()
-        name = prefs.get('collab_name', '') or 'Recorder'
+        from azt_collab_client import (
+            get_contributor, sync_project, translate_result, S)
+        name = get_contributor() or 'Recorder'
         langcode = self._current_langcode_or_register()
         if not langcode:
             return
-        from azt_collab_client import sync_project, translate_result, S
         import threading
 
         saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''

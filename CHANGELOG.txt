@@ -1,5 +1,29 @@
 CHANGELOG — A-Z+T Recorder
 
+1.34.0
+  Peer-private prefs.json drained into the suite-wide
+  $AZT_HOME/config.json; structured CLONE_AUTH_REQUIRED replaces
+  substring-matched 'credential'/'auth' detection in the clone path
+  (audit findings A7, B5).
+    - azt_collab_client gains peer_pref(key, default=None) /
+      set_peer_pref(key, value), persisting under a top-level
+      peer_prefs object in $AZT_HOME/config.json. Mirrors the
+      recent.last_langcode and i18n.ui.language patterns.
+    - Recorder migrates theme, show_past_work, collab_langcode,
+      image_repo, rec_task, vernlang to peer_pref. Committer name
+      moves to azt_collab_client.set_contributor / get_contributor
+      (the suite already had this endpoint; the recorder was just
+      not using it). Migration is one-shot in build() and idempotent
+      after the first launch.
+    - Clone error path: substring-matching st.params['error'] for
+      'credential'/'auth' replaced with result.has(S.CLONE_AUTH_REQUIRED).
+      The catch-all transport-failure branch drops auth detection
+      entirely — it had no structured Result to inspect, and
+      substring-matching English error text is exactly the
+      regression CLAUDE.md prohibits.
+    - Client bumped to 0.20.1 for the new peer_pref / set_peer_pref
+      API surface.
+
 1.33.1
   Data-integrity fixes around recording + LIFT save (audit findings
   B1, B3).
