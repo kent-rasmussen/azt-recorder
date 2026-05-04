@@ -1,5 +1,51 @@
 CHANGELOG — A-Z+T Recorder
 
+1.36.2
+  Removed the "Pick a project to continue." modal that blocked the
+  recorder while the picker spawned. start_over now calls
+  pick_project() on a worker thread directly; the result still
+  lands in _handle_pick on the Kivy main thread. Helper methods
+  _show_pick_overlay / _cancel_pick_overlay / _hide_pick_overlay
+  and the _pick_cancelled flag are gone — cancellation is signalled
+  by the picker itself returning err='cancelled' (already handled
+  in _handle_pick).
+
+1.36.1
+  Walking back the cold-start changes from 1.36.0. When no project
+  is loaded on launch, _auto_load_last_project goes back to firing
+  the picker (start_over) — that's the right behaviour, the user
+  doesn't want Settings on first run. The X button on Settings and
+  on Collab also restore their pre-1.36.0 fallback to start_over
+  when no project is loaded. The Select Project button stays — but
+  is moved to the bottom of Settings (below Setup Collaboration),
+  styled with BTN_INACTIVE to signal it's a rare action, not a
+  primary one. Replaces the old (project-only) Start over button
+  that lived in db_nav_box.
+
+1.36.0
+  Cold-start flow no longer fires the project picker uninvited.
+  When _auto_load_last_project can't resolve a project (no saved
+  langcode, daemon doesn't know it, or open_project fails), the
+  app now lands on Settings instead of calling start_over() and
+  blocking the user with the "Pick a project to continue." modal
+  + the server-APK picker Activity. Settings grew a top-level
+  "Select Project" button (always visible) so the user can change
+  projects from there at any time. The redundant "Start over"
+  button inside db_nav_box and the db_nav_box BoxLayout itself
+  are removed. Settings X (apply_and_go) is a no-op when no
+  project is loaded — it no longer punts back into the picker.
+  CollabScreen close_collab also goes to Settings unconditionally.
+
+1.35.1
+  Settings UX: gloss-language picker is now a modal overlay instead
+  of an inline collapsible grid. With many gloss languages the inline
+  grid grew past three rows and shifted the visible region of the
+  ScrollView so neighbouring rows fell off the top of the viewport.
+  The overlay (matching _show_rec_overlay) sizes itself to the lang
+  count, scrolls internally on tall lists, and never reflows the
+  Settings layout. Active langs now appear as a dim summary next to
+  the button (mirroring the Filter / Image-repository rows).
+
 1.35.0
   P1 audit cluster: Android lifecycle, LIFT round-trip fidelity,
   and PyJNI thread-warming.

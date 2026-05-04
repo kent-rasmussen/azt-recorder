@@ -395,19 +395,26 @@ KV_TEMPLATE = '''
                             normal_color: T.SURFACE
                             on_release: root._show_rec_overlay()
                     # ── Three blue collapsible buttons ─────────────────────
-                    RecBtn:
-                        id: gloss_toggle_btn
-                        text: _('Change gloss languages')
-                        normal_color: T.ACCENT
-                        font_size: sp(14)
-                        on_release: root.toggle_gloss_panel()
-                    GridLayout:
-                        id: lang_box
-                        cols: 3
+                    BoxLayout:
                         size_hint_y: None
-                        height: 0
-                        opacity: 0
-                        spacing: dp(6)
+                        height: dp(44)
+                        spacing: dp(8)
+                        RecBtn:
+                            id: gloss_toggle_btn
+                            text: _('Change gloss languages')
+                            normal_color: T.ACCENT
+                            font_size: sp(14)
+                            on_release: root._show_gloss_overlay()
+                        Label:
+                            id: gloss_summary_label
+                            text: ''
+                            font_size: sp(12)
+                            font_name: FONT
+                            color: T.TEXT_DIM
+                            halign: 'left'
+                            valign: 'middle'
+                            text_size: self.size
+                            markup: True
                     BoxLayout:
                         size_hint_y: None
                         height: dp(44)
@@ -525,18 +532,11 @@ KV_TEMPLATE = '''
                     text: _('Setup Collaboration')
                     normal_color: T.SURFACE
                     on_release: app.go_collab()
-                # ── Navigation (database-dependent) ───────────────────
-                BoxLayout:
-                    id: db_nav_box
-                    orientation: 'vertical'
-                    size_hint_y: None
-                    height: 0
-                    opacity: 0
-                    spacing: dp(14)
-                    RecBtn:
-                        text: _('Start over')
-                        normal_color: T.BTN_INACTIVE
-                        on_release: app.start_over()
+                # ── Select Project (rare, kept at bottom) ─────────────
+                RecBtn:
+                    text: _('Select Project')
+                    normal_color: T.BTN_INACTIVE
+                    on_release: app.start_over()
                 Widget:
                     size_hint_y: None
                     height: dp(40)
@@ -1838,10 +1838,8 @@ class ConfigScreen(Screen):
         # Show/hide database-dependent sections.
         # When hiding: zero height on every descendant so nothing has a
         # hit area (disabled=True alone doesn't block touches in Kivy).
-        for box_id in ('db_settings_box', 'db_nav_box'):
-            box = self.ids.get(box_id)
-            if not box:
-                continue
+        box = self.ids.get('db_settings_box')
+        if box:
             if has_db:
                 box.opacity = 1
                 Clock.schedule_once(
@@ -1850,7 +1848,6 @@ class ConfigScreen(Screen):
                 self._hide_box_tree(box)
         if not app.recorder:
             return
-        self.build_lang_toggles()
         cawl_in = self.ids.get('cawl_input')
         if cawl_in:
             cawl_in.text = app.recorder.cawl_filter or ''
@@ -1868,8 +1865,8 @@ class ConfigScreen(Screen):
         self.only_unrecorded = not show_past
         # All panels start collapsed
         self._update_filter_summary()
+        self._update_gloss_summary()
         self._collapse_filter_panel()
-        self._collapse_gloss_panel()
         self._collapse_imgrepo_panel(ir)
         # Build recording options
         self._build_rec_options(app)
@@ -1932,20 +1929,6 @@ class ConfigScreen(Screen):
         # Restore normal transition after rebuild
         Clock.schedule_once(lambda dt: setattr(sm, 'transition', old_transition), 0.1)
 
-    def build_lang_toggles(self):
-        app = App.get_running_app()
-        box = self.ids.get('lang_box')
-        if box is None:
-            return
-        box.clear_widgets()
-        for lang in app.recorder.all_gloss_langs:
-            t = LangToggle(
-                lang=lang,
-                active=lang in app.recorder.active_gloss_langs,
-                callback=self._toggle_lang,
-            )
-            box.add_widget(t)
-
     def _toggle_lang(self, lang, active):
         app = App.get_running_app()
         langs = set(app.recorder.active_gloss_langs)
@@ -1954,21 +1937,80 @@ class ConfigScreen(Screen):
         else:
             langs.discard(lang)
         app.recorder.active_gloss_langs = sorted(langs)
+        self._update_gloss_summary()
+
+    def _update_gloss_summary(self):
+        """Show selected gloss langs next to the button."""
+        lbl = self.ids.get('gloss_summary_label')
+        if not lbl:
+            return
+        app = App.get_running_app()
+        if not app.recorder:
+            lbl.text = ''
+            return
+        langs = list(app.recorder.active_gloss_langs)
+        lbl.text = ', '.join(langs) if langs else _tr('(none selected)')
 
     _filter_open = False
-    _gloss_open = False
     _imgrepo_open = False
 
-    def _collapse_gloss_panel(self):
-        lang_box = self.ids.get('lang_box')
-        btn = self.ids.get('gloss_toggle_btn')
-        if lang_box:
-            lang_box.clear_widgets()
-            lang_box.height = 0
-            lang_box.opacity = 0
-        if btn:
-            btn.normal_color = theme.ACCENT
-        self._gloss_open = False
+    def _show_gloss_overlay(self):
+        """Show a modal overlay with one toggle per available gloss language."""
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.button import Button
+        from kivy.uix.gridlayout import GridLayout
+        from kivy.uix.modalview import ModalView
+        from kivy.uix.scrollview import ScrollView
+
+        app = App.get_running_app()
+        if not app.recorder:
+            return
+        langs = list(app.recorder.all_gloss_langs)
+        if not langs:
+            return
+
+        cols = 3
+        rows = (len(langs) + cols - 1) // cols
+        grid_h = rows * dp(44) + max(0, rows - 1) * dp(6)
+
+        view = ModalView(
+            size_hint=(0.9, None),
+            height=min(grid_h + dp(96), Window.height * 0.85),
+            background_color=theme.OVERLAY_DARK,
+            auto_dismiss=True,
+        )
+        outer = BoxLayout(
+            orientation='vertical', spacing=dp(8),
+            padding=(dp(10), dp(10)),
+        )
+        scroll = ScrollView(size_hint=(1, 1))
+        grid = GridLayout(
+            cols=cols, spacing=dp(6),
+            size_hint_y=None,
+        )
+        grid.bind(minimum_height=grid.setter('height'))
+        for lang in langs:
+            grid.add_widget(LangToggle(
+                lang=lang,
+                active=lang in app.recorder.active_gloss_langs,
+                callback=self._toggle_lang,
+            ))
+        scroll.add_widget(grid)
+        outer.add_widget(scroll)
+
+        done_btn = Button(
+            text=_tr('Done'),
+            font_name=_FONT_NAME,
+            font_size=sp(16),
+            size_hint_y=None, height=dp(44),
+            background_color=theme.ACCENT,
+            color=theme.TEXT,
+        )
+        done_btn.bind(on_release=lambda inst: view.dismiss())
+        outer.add_widget(done_btn)
+
+        view.add_widget(outer)
+        view.open()
 
     def _collapse_imgrepo_panel(self, inp=None):
         if inp is None:
@@ -1988,29 +2030,6 @@ class ConfigScreen(Screen):
                 repo = '/'.join(repo.rstrip('/').rsplit('/', 2)[-2:])
             lbl.text = repo
         self._imgrepo_open = False
-
-    def toggle_gloss_panel(self):
-        lang_box = self.ids.get('lang_box')
-        btn = self.ids.get('gloss_toggle_btn')
-        if not lang_box:
-            return
-        if self._gloss_open:
-            lang_box.clear_widgets()
-            lang_box.height = 0
-            lang_box.opacity = 0
-            self._gloss_open = False
-            if btn:
-                btn.normal_color = theme.ACCENT
-        else:
-            self.build_lang_toggles()
-            lang_box.opacity = 1
-            self._gloss_open = True
-            if btn:
-                btn.normal_color = theme.BTN_INACTIVE
-            # Defer height read so minimum_height is recalculated after layout
-            def _set_h(dt):
-                lang_box.height = lang_box.minimum_height
-            Clock.schedule_once(_set_h, 0)
 
     def toggle_imgrepo_panel(self):
         inp = self.ids.get('image_repo_input')
@@ -3388,7 +3407,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.35.0'
+__version__ = '1.36.2'
 
 
 class LIFTRecorderApp(App):
@@ -4375,12 +4394,9 @@ class LIFTRecorderApp(App):
         Clock.schedule_once(lambda dt: self._update_sync_status(), 1.5)
 
     def start_over(self):
-        """Commit/sync, gray-out the recorder, spawn the picker helper,
-        then either load the chosen LIFT or restore the recorder window
-        on cancel."""
+        """Commit/sync, then spawn the picker helper directly. The
+        result lands in _handle_pick on the main thread."""
         self._auto_commit_sync()
-        self._pick_cancelled = False
-        self._show_pick_overlay()
         from azt_collab_client import pick_project
         import threading
 
@@ -4390,55 +4406,7 @@ class LIFTRecorderApp(App):
                 lambda dt: self._handle_pick(result), 0)
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _show_pick_overlay(self):
-        """Modal overlay that blocks input on the recorder while the
-        picker is open. Dismissed in _handle_pick on a successful or
-        failed pick; user can also dismiss it manually via the Cancel
-        button if the picker subprocess / Activity is wedged."""
-        from kivy.uix.modalview import ModalView
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.button import Button
-        from kivy.uix.label import Label
-        self._pick_overlay = ModalView(
-            size_hint=(0.7, None), height=dp(180),
-            auto_dismiss=False,
-            background_color=theme.OVERLAY_DARK)
-        box = BoxLayout(orientation='vertical', padding=dp(12),
-                        spacing=dp(10))
-        box.add_widget(Label(
-            text=_tr('Pick a project to continue.'),
-            font_name=_FONT_NAME, color=theme.TEXT))
-        cancel = Button(
-            text=_tr('Cancel'),
-            size_hint_y=None, height=dp(48),
-            font_name=_FONT_NAME)
-        cancel.bind(on_release=lambda *a: self._cancel_pick_overlay())
-        box.add_widget(cancel)
-        self._pick_overlay.add_widget(box)
-        self._pick_overlay.open()
-
-    def _cancel_pick_overlay(self):
-        """User tapped Cancel on the overlay. Dismiss it; the worker
-        thread keeps running but its result will be ignored because
-        _pick_cancelled is True."""
-        self._pick_cancelled = True
-        self._hide_pick_overlay()
-
-    def _hide_pick_overlay(self):
-        ov = getattr(self, '_pick_overlay', None)
-        if ov is not None:
-            try:
-                ov.dismiss()
-            except Exception:
-                pass
-            self._pick_overlay = None
-
     def _handle_pick(self, result):
-        self._hide_pick_overlay()
-        if getattr(self, '_pick_cancelled', False):
-            # User already bailed out via the overlay's Cancel button;
-            # any incoming result is stale.
-            return
         if result.get('ok'):
             langcode = result.get('langcode', '')
             if langcode:
