@@ -1,5 +1,30 @@
 CHANGELOG — A-Z+T Recorder
 
+1.33.1
+  Data-integrity fixes around recording + LIFT save (audit findings
+  B1, B3).
+    - Recorder state no longer leaks across a failed start. start_recording
+      computes the path, calls the platform start, and only flips
+      _recording / _audio_path / _record_ok = True on success. A
+      MediaRecorder.prepare() throw on URI projects used to write a
+      bogus basename into <citation><form> because the URI short-circuit
+      assumed the file existed; now the basename is written only when
+      both start and stop ran clean.
+    - _start_android_recording / _start_ios_recording / _start_desktop_recording
+      re-raise on failure (after releasing the partial MediaRecorder
+      and closing the pfd / sounddevice stream) instead of swallowing
+      with print(). _start_native_recording returns the actual path
+      used so extension-swapped paths (.m4a / .flac) flow back to the
+      caller.
+    - _stop_*_recording flip _record_ok = False on stop failure
+      (Android IllegalStateException → no moov atom; desktop empty
+      frames; iOS stop throw). The auto-play-on-stop schedule is
+      skipped when the recording wasn't successful.
+    - lift.py _save now writes filesystem-mode .lift files via a
+      tmp-file + fsync + os.replace dance so a crash mid-write cannot
+      truncate the lexicon. URI mode unchanged — the daemon's provider
+      serialises concurrent writers on its side.
+
 1.33.0
   Last-opened project moves from prefs.json to the suite-wide
   daemon-owned store, mirroring the UI-language pattern. Switching

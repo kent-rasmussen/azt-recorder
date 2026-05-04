@@ -623,14 +623,40 @@ class LIFTDatabase:
     def _save(self):
         """Write updated XML back to the .lift file, preserving encoding.
         Routes through LiftHandle so this works for both filesystem
-        paths and ``content://`` URIs."""
+        paths and ``content://`` URIs.
+
+        Filesystem mode is committed via tmp-file + fsync + os.replace
+        so a crash mid-write cannot truncate the user's lexicon — every
+        set_audio rewrites the whole file, and the original recovery
+        story was 'hope the OS flushed'. URI mode trusts the daemon's
+        provider, which serialises concurrent writers on its side."""
         self._indent(self._root)
-        with self.handle.open_write() as f:
-            self._tree.write(
-                f,
-                encoding='utf-8',
-                xml_declaration=True,
-            )
+        if self.handle.is_uri:
+            with self.handle.open_write() as f:
+                self._tree.write(
+                    f, encoding='utf-8', xml_declaration=True)
+            return
+        target = self.handle.path_or_uri
+        tmp = target + '.tmp'
+        try:
+            with open(tmp, 'wb') as f:
+                self._tree.write(
+                    f, encoding='utf-8', xml_declaration=True)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    # Some filesystems (containers, exotic mounts)
+                    # reject fsync; the os.replace below still gives
+                    # the rename atomicity we care about.
+                    pass
+            os.replace(tmp, target)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     @staticmethod
     def _indent(elem, level=0):

@@ -2903,6 +2903,12 @@ class RecorderController:
         self._pending_rerecord = False
         self._audio_path = None
         self._recorder = None
+        self._record_pfd = None
+        # Cleared on every start; flipped to True only when the
+        # platform start path returns clean. stop_recording gates the
+        # LIFT basename write on this so a failed start cannot leave
+        # a bogus filename in <citation><form>.
+        self._record_ok = False
 
         # Gloss languages
         self.all_gloss_langs = sorted(db.gloss_langs)
@@ -3054,9 +3060,19 @@ class RecorderController:
     def start_recording(self):
         if self._recording or not self.current:
             return
+        path = self._make_audio_path()
+        # Clear before the attempt so a previous successful flag
+        # cannot survive into a now-failing start.
+        self._record_ok = False
+        try:
+            actual_path = self._start_native_recording(path)
+        except Exception as ex:
+            print(f'Recording start failed: {ex}')
+            self._notify_ui()
+            return
+        self._audio_path = actual_path or path
         self._recording = True
-        self._audio_path = self._make_audio_path()
-        self._start_native_recording(self._audio_path)
+        self._record_ok = True
         self._notify_ui()
 
     def stop_recording(self):
@@ -3065,19 +3081,17 @@ class RecorderController:
         self._recording = False
         self._pending_rerecord = False
         self._stop_native_recording()
-        # Write filename into LIFT XML. On URI projects the
-        # daemon-served file is created by the provider on
-        # openFileDescriptor('w'), so we don't os.path.exists() it —
-        # the basename is enough; the daemon owns the file.
-        if self._audio_path:
+        # Write filename into LIFT XML only if both start and stop
+        # ran clean. _record_ok flips False on a stop exception so a
+        # half-finalised M4A (no moov atom, etc.) does not get
+        # advertised as the entry's canonical recording.
+        if self._audio_path and self._record_ok:
             filename = os.path.basename(self._audio_path)
-            wrote = self.db.is_uri or os.path.exists(self._audio_path)
-            if wrote:
-                self.db.set_audio(self.current['guid'], filename)
-                self.current['audio_filename'] = filename
+            self.db.set_audio(self.current['guid'], filename)
+            self.current['audio_filename'] = filename
         self._notify_ui()
-        # Auto-play after a short delay
-        Clock.schedule_once(lambda dt: self.play_audio(), 0.5)
+        if self._record_ok:
+            Clock.schedule_once(lambda dt: self.play_audio(), 0.5)
 
     def play_audio(self):
         if self._playing:
@@ -3202,12 +3216,14 @@ class RecorderController:
         return self.db.audio_target(filename)
 
     def _start_native_recording(self, path):
+        """Returns the actual on-disk path/URI used (extension may
+        differ from ``path`` per platform). Raises on failure so
+        ``start_recording`` can keep recorder state in sync."""
         if platform == 'android':
-            self._start_android_recording(path)
-        elif platform == 'ios':
-            self._start_ios_recording(path)
-        else:
-            self._start_desktop_recording(path)
+            return self._start_android_recording(path)
+        if platform == 'ios':
+            return self._start_ios_recording(path)
+        return self._start_desktop_recording(path)
 
     def _stop_native_recording(self):
         if platform == 'android':
@@ -3219,20 +3235,21 @@ class RecorderController:
 
     # Android: use MediaRecorder via pyjnius for maximum quality (PCM WAV)
     def _start_android_recording(self, path):
-        try:
-            from jnius import autoclass
-            MediaRecorder = autoclass('android.media.MediaRecorder')
-            AudioSource = autoclass('android.media.MediaRecorder$AudioSource')
-            OutputFormat = autoclass('android.media.MediaRecorder$OutputFormat')
-            AudioEncoder = autoclass('android.media.MediaRecorder$AudioEncoder')
+        from jnius import autoclass
+        MediaRecorder = autoclass('android.media.MediaRecorder')
+        AudioSource = autoclass('android.media.MediaRecorder$AudioSource')
+        OutputFormat = autoclass('android.media.MediaRecorder$OutputFormat')
+        AudioEncoder = autoclass('android.media.MediaRecorder$AudioEncoder')
 
-            mr = MediaRecorder()
+        # Replace .wav with .m4a in either a path or a content:// URI —
+        # basename sits at the end of both, so str.replace works.
+        aac_path = path.replace('.wav', '.m4a')
+        mr = MediaRecorder()
+        pfd = None
+        try:
             mr.setAudioSource(AudioSource.MIC)
             # MPEG_4/AAC gives broadest compatibility and highest quality on Android
             mr.setOutputFormat(OutputFormat.MPEG_4)
-            # Replace .wav with .m4a in either a path or a content:// URI
-            # — basename sits at the end of both, so str.replace works.
-            aac_path = path.replace('.wav', '.m4a')
             if self.db.is_uri:
                 # ContentResolver-acquired ParcelFileDescriptor: hand
                 # the underlying Java FileDescriptor straight to
@@ -3243,12 +3260,11 @@ class RecorderController:
                     'org.kivy.android.PythonActivity')
                 ctx = PythonActivity.mActivity
                 resolver = ctx.getContentResolver()
-                self._record_pfd = resolver.openFileDescriptor(
-                    Uri.parse(aac_path), 'w')
-                if self._record_pfd is None:
+                pfd = resolver.openFileDescriptor(Uri.parse(aac_path), 'w')
+                if pfd is None:
                     raise IOError(
                         f'openFileDescriptor returned null for {aac_path!r}')
-                mr.setOutputFile(self._record_pfd.getFileDescriptor())
+                mr.setOutputFile(pfd.getFileDescriptor())
             else:
                 mr.setOutputFile(aac_path)
             mr.setAudioEncoder(AudioEncoder.AAC)
@@ -3257,10 +3273,20 @@ class RecorderController:
             mr.setAudioChannels(1)                # mono for voice
             mr.prepare()
             mr.start()
-            self._recorder = mr
-            self._audio_path = aac_path
-        except Exception as ex:
-            print(f'Android recording error: {ex}')
+        except Exception:
+            try:
+                mr.release()
+            except Exception:
+                pass
+            if pfd is not None:
+                try:
+                    pfd.close()
+                except Exception:
+                    pass
+            raise
+        self._recorder = mr
+        self._record_pfd = pfd
+        return aac_path
 
     def _stop_android_recording(self):
         if self._recorder:
@@ -3268,10 +3294,14 @@ class RecorderController:
                 self._recorder.stop()
                 self._recorder.release()
             except Exception as ex:
+                # IllegalStateException here typically means the M4A
+                # has no moov atom — file is unplayable. Don't let
+                # stop_recording advertise the basename.
                 print(f'Android stop error: {ex}')
+                self._record_ok = False
             finally:
                 self._recorder = None
-        pfd = getattr(self, '_record_pfd', None)
+        pfd = self._record_pfd
         if pfd is not None:
             try:
                 pfd.close()
@@ -3281,33 +3311,34 @@ class RecorderController:
 
     # iOS: use AVAudioRecorder via pyobjus for maximum quality
     def _start_ios_recording(self, path):
-        try:
-            from pyobjus import autoclass, objc_dict
-            from pyobjus.dylib_manager import load_framework
-            load_framework('/System/Library/Frameworks/AVFoundation.framework')
-            NSURL = autoclass('NSURL')
-            AVAudioRecorder = autoclass('AVAudioRecorder')
-            AVFormatIDKey = 'AVFormatIDKey'
-            AVSampleRateKey = 'AVSampleRateKey'
-            AVNumberOfChannelsKey = 'AVNumberOfChannelsKey'
-            AVEncoderAudioQualityKey = 'AVEncoderAudioQualityKey'
-            AVAudioQualityMax = 127
+        from pyobjus import autoclass, objc_dict
+        from pyobjus.dylib_manager import load_framework
+        load_framework('/System/Library/Frameworks/AVFoundation.framework')
+        NSURL = autoclass('NSURL')
+        AVAudioRecorder = autoclass('AVAudioRecorder')
+        AVFormatIDKey = 'AVFormatIDKey'
+        AVSampleRateKey = 'AVSampleRateKey'
+        AVNumberOfChannelsKey = 'AVNumberOfChannelsKey'
+        AVEncoderAudioQualityKey = 'AVEncoderAudioQualityKey'
+        AVAudioQualityMax = 127
 
-            # Record as FLAC for lossless quality
-            flac_path = path.replace('.wav', '.flac')
-            url = NSURL.fileURLWithPath_(flac_path)
-            settings = objc_dict({
-                AVFormatIDKey: 1718378851,  # kAudioFormatFLAC
-                AVSampleRateKey: 48000.0,
-                AVNumberOfChannelsKey: 1,
-                AVEncoderAudioQualityKey: AVAudioQualityMax,
-            })
-            recorder, err = AVAudioRecorder.alloc().initWithURL_settings_error_(url, settings, None)
-            recorder.record()
-            self._recorder = recorder
-            self._audio_path = flac_path
-        except Exception as ex:
-            print(f'iOS recording error: {ex}')
+        # Record as FLAC for lossless quality
+        flac_path = path.replace('.wav', '.flac')
+        url = NSURL.fileURLWithPath_(flac_path)
+        settings = objc_dict({
+            AVFormatIDKey: 1718378851,  # kAudioFormatFLAC
+            AVSampleRateKey: 48000.0,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderAudioQualityKey: AVAudioQualityMax,
+        })
+        recorder, err = AVAudioRecorder.alloc().initWithURL_settings_error_(
+            url, settings, None)
+        if recorder is None:
+            raise RuntimeError(f'AVAudioRecorder init failed: {err}')
+        if not recorder.record():
+            raise RuntimeError('AVAudioRecorder.record() returned NO')
+        self._recorder = recorder
+        return flac_path
 
     def _stop_ios_recording(self):
         if self._recorder:
@@ -3315,29 +3346,35 @@ class RecorderController:
                 self._recorder.stop()
             except Exception as ex:
                 print(f'iOS stop error: {ex}')
+                self._record_ok = False
             finally:
                 self._recorder = None
 
     # Desktop fallback: sounddevice → WAV (for development/testing)
     def _start_desktop_recording(self, path):
+        import sounddevice as sd
+        self._desktop_frames = []
+        self._desktop_samplerate = 48000
+
+        def callback(indata, frames, time, status):
+            self._desktop_frames.append(indata.copy())
+
+        stream = sd.InputStream(
+            samplerate=self._desktop_samplerate,
+            channels=1,
+            dtype='int16',
+            callback=callback,
+        )
         try:
-            import sounddevice as sd
-            import numpy as np
-            self._desktop_frames = []
-            self._desktop_samplerate = 48000
-
-            def callback(indata, frames, time, status):
-                self._desktop_frames.append(indata.copy())
-
-            self._desktop_stream = sd.InputStream(
-                samplerate=self._desktop_samplerate,
-                channels=1,
-                dtype='int16',
-                callback=callback,
-            )
-            self._desktop_stream.start()
-        except Exception as ex:
-            print(f'Desktop recording error: {ex}')
+            stream.start()
+        except Exception:
+            try:
+                stream.close()
+            except Exception:
+                pass
+            raise
+        self._desktop_stream = stream
+        return path
 
     def _stop_desktop_recording(self):
         try:
@@ -3345,11 +3382,18 @@ class RecorderController:
             import numpy as np
             self._desktop_stream.stop()
             self._desktop_stream.close()
-            if self._desktop_frames:
-                data = np.concatenate(self._desktop_frames, axis=0)
-                sf.write(self._audio_path, data, self._desktop_samplerate, subtype='PCM_16')
+            if not self._desktop_frames:
+                # No samples were captured (start raced past stop, or
+                # the input device produced nothing). Don't write a
+                # zero-byte file and don't advertise a basename.
+                self._record_ok = False
+                return
+            data = np.concatenate(self._desktop_frames, axis=0)
+            sf.write(self._audio_path, data, self._desktop_samplerate,
+                     subtype='PCM_16')
         except Exception as ex:
             print(f'Desktop stop error: {ex}')
+            self._record_ok = False
 
     # ── UI notification ────────────────────────────────────────────────────────
 
@@ -3362,7 +3406,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.33.0'
+__version__ = '1.33.1'
 
 
 class LIFTRecorderApp(App):

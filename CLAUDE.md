@@ -34,19 +34,17 @@ back into the LIFT XML.
 - Status-code business logic uses `result.has(S.CODE)` — never parse
   translated strings (see `AZT_COLLAB_README.md` for the full code list).
 
-### Picker / theme migration is in progress
+### Picker / theme migration is complete
 
-- `azt_collab_picker_migration.xml` tracks the live migration of
-  WelcomeScreen, LangPickerScreen, project-create/clone popups, and
-  `theme.py` from this repo into `azt_collab_client/ui/`.
-- Steps 1–6 done as of recorder 1.27.x. `theme.py` has been removed
-  from this repo; the recorder now imports `theme` from
-  `azt_collab_client.ui` (main.py:24-27).
-- Open follow-ups: copy `langtags_mini.json.gz` into the shared client
-  (currently passed via `langtags_path=` kwarg in `build()`), dedupe
-  the two `theme.py` copies, fold
-  `show_start_over`/`new_from_template`/`open_file`/`clone_dialog`
-  into the picker.
+WelcomeScreen, LangPickerScreen, the project-create/clone popups, and
+`theme.py` all live in `azt_collab_client/ui/` now. The recorder
+imports `theme` from there (main.py:24) and lets the client own the
+picker callbacks (`show_start_over` / `new_from_template` / `open_file`
+/ `clone_dialog` are no longer recorder-side methods). `langtags_mini.json.gz`
+ships inside `azt_collab_client/ui/assets/`, resolved via the client's
+own default in `langpicker.py` — no `langtags_path=` kwarg gets passed
+from here. `azt_collab_picker_migration.xml` is kept as the migration
+record; it has no live build/runtime role.
 
 ### Audio recording is platform-split
 
