@@ -1,5 +1,19 @@
 CHANGELOG — A-Z+T Recorder
 
+1.36.3
+  Align db.vernlang with the server-supplied langcode on every
+  load path, not just picker selections. Auto-loaded projects
+  (_auto_load_last_project) had _current_langcode set but were
+  falling through to peer_pref('vernlang') — which is per-peer
+  cached state that can drift from the suite-wide last_project.
+  RecorderController.progress_text consequently rendered the
+  cached pref instead of the project's actual langcode. load_lift
+  and _reload_and_restore now prefer _current_langcode and only
+  fall back to the peer pref when no server-authoritative answer
+  is in scope. clean_template() is decoupled from the vernlang-
+  apply path; it only runs when _pending_vernlang is set (its
+  real semantic — new-from-template).
+
 1.36.2
   Removed the "Pick a project to continue." modal that blocked the
   recorder while the picker spawned. start_over now calls

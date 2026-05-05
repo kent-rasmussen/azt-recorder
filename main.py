@@ -3407,7 +3407,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.36.2'
+__version__ = '1.36.3'
 
 
 class LIFTRecorderApp(App):
@@ -4090,21 +4090,32 @@ class LIFTRecorderApp(App):
         except Exception as ex:
             self._show_error(_tr('Could not open file:\n{error}').format(error=ex))
             return
-        # Last-opened-project state lives on the daemon store and is
-        # written via set_last_project from _handle_pick (the only
-        # path that knows the langcode authoritatively). load_lift
-        # itself is langcode-agnostic, so no peer-private mirror here.
-        # Apply language code: from picker, from prefs, or from filename
+        # vernlang priority:
+        #   1. _current_langcode — server-authoritative langcode for
+        #      this project (set by _handle_pick AND by
+        #      _auto_load_last_project before reaching load_lift).
+        #      This is what should drive db.vernlang so progress_text
+        #      and downstream LIFT writes use the same code the daemon
+        #      stores under.
+        #   2. _pending_vernlang — set only by new-from-template flows;
+        #      its real semantic is "also run clean_template()."
+        #   3. peer_pref('vernlang') — last-known cache, fallback for
+        #      load paths that haven't threaded the langcode through.
+        authoritative = getattr(self, '_current_langcode', '')
         pending = getattr(self, '_pending_vernlang', '')
-        if pending:
+        if authoritative:
+            db.set_vernlang(authoritative)
+            set_peer_pref('vernlang', authoritative)
+        elif pending:
             db.set_vernlang(pending)
-            db.clean_template()
-            self._pending_vernlang = ''
             set_peer_pref('vernlang', pending)
         else:
             saved_vern = peer_pref('vernlang', '') or ''
             if saved_vern:
                 db.set_vernlang(saved_vern)
+        if pending:
+            db.clean_template()
+        self._pending_vernlang = ''
         self.recorder = RecorderController(db)
         # Apply persisted show-past-work preference (default: hide past work)
         show_past = bool(peer_pref('show_past_work', False))
@@ -4178,10 +4189,16 @@ class LIFTRecorderApp(App):
         except Exception as ex:
             print(f'Reload failed: {ex}')
             return
-        # Re-apply saved vernlang
-        saved_vern = peer_pref('vernlang', '') or ''
-        if saved_vern:
-            db.set_vernlang(saved_vern)
+        # Re-apply vernlang: prefer the server-authoritative
+        # _current_langcode set when the project was loaded; fall
+        # back to the peer pref only if we never resolved one.
+        authoritative = getattr(self, '_current_langcode', '')
+        if authoritative:
+            db.set_vernlang(authoritative)
+        else:
+            saved_vern = peer_pref('vernlang', '') or ''
+            if saved_vern:
+                db.set_vernlang(saved_vern)
         old_settings = (
             self.recorder.cawl_filter,
             self.recorder.gloss_search,
