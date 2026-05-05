@@ -483,10 +483,25 @@ KV_TEMPLATE = '''
                             foreground_color: T.TEXT
                             cursor_color: T.ACCENT
                             multiline: False
-                        UnrecordedToggle:
-                            id: unrecorded_toggle
-                            active: False
-                            on_active: root.toggle_show_past(self.active)
+                        BoxLayout:
+                            id: filter_bottom_row
+                            orientation: 'horizontal'
+                            size_hint_y: None
+                            height: dp(56)
+                            spacing: dp(8)
+                            UnrecordedToggle:
+                                id: unrecorded_toggle
+                                active: False
+                                size_hint_x: 3
+                                on_active: root.toggle_show_past(self.active)
+                            RecBtn:
+                                id: filter_ok_btn
+                                text: _('OK')
+                                size_hint_x: 1
+                                height: dp(56)
+                                normal_color: T.GREEN
+                                font_size: sp(15)
+                                on_release: root.toggle_filter_panel()
                     BoxLayout:
                         size_hint_y: None
                         height: dp(44)
@@ -2072,11 +2087,14 @@ class ConfigScreen(Screen):
             if w:
                 w.height = dp(48)
                 w.disabled = False
-        toggle = self.ids.get('unrecorded_toggle')
-        if toggle:
-            toggle.height = dp(56)
-            toggle.opacity = 1
-        # dp(36)*2 labels + dp(48)*2 inputs + dp(56) toggle + dp(8)*4 spacing
+        bottom_row = self.ids.get('filter_bottom_row')
+        if bottom_row:
+            bottom_row.height = dp(56)
+            bottom_row.opacity = 1
+        ok_btn = self.ids.get('filter_ok_btn')
+        if ok_btn:
+            ok_btn.disabled = False
+        # dp(36)*2 labels + dp(48)*2 inputs + dp(56) bottom row + dp(8)*4 spacing
         panel.height = dp(256)
         panel.opacity = 1
         self._filter_open = True
@@ -2095,10 +2113,13 @@ class ConfigScreen(Screen):
                 w.height = 0
                 w.disabled = True
                 w.focus = False
-        toggle = self.ids.get('unrecorded_toggle')
-        if toggle:
-            toggle.height = 0
-            toggle.opacity = 0
+        bottom_row = self.ids.get('filter_bottom_row')
+        if bottom_row:
+            bottom_row.height = 0
+            bottom_row.opacity = 0
+        ok_btn = self.ids.get('filter_ok_btn')
+        if ok_btn:
+            ok_btn.disabled = True
         panel.height = 0
         panel.opacity = 0
         self._filter_open = False
@@ -3407,7 +3428,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.36.3'
+__version__ = '1.37.0'
 
 
 class LIFTRecorderApp(App):
@@ -4411,13 +4432,19 @@ class LIFTRecorderApp(App):
         Clock.schedule_once(lambda dt: self._update_sync_status(), 1.5)
 
     def start_over(self):
-        """Commit/sync, then spawn the picker helper directly. The
-        result lands in _handle_pick on the main thread."""
-        self._auto_commit_sync()
+        """Spawn the picker directly. Runs the auto-commit/sync and
+        the picker call in the same worker so the tap returns
+        immediately — keeping the main thread free for the picker's
+        own UI-thread JNI dispatch (Clock.schedule_once'd inside
+        pick_project on Android)."""
         from azt_collab_client import pick_project
         import threading
 
         def _worker():
+            try:
+                self._auto_commit_sync()
+            except Exception as ex:
+                print(f'[start_over] auto_commit_sync failed: {ex}')
             result = pick_project()
             Clock.schedule_once(
                 lambda dt: self._handle_pick(result), 0)
@@ -4471,10 +4498,35 @@ class LIFTRecorderApp(App):
         sm.current = 'config'
 
     def go_collab(self):
-        self._auto_commit_sync()
-        sm = self.root.ids.sm
-        sm.transition = SlideTransition(direction='left')
-        sm.current = 'collab'
+        """Open the server's collab settings UI. The recorder no
+        longer hosts its own setup screen — there's one canonical
+        settings UI in the suite, owned by azt_collabd, reached via
+        azt_collab_client.open_server_ui(). _auto_commit_sync runs
+        in a worker so a slow request_sync RPC can't freeze the tap
+        (same pattern as start_over)."""
+        from azt_collab_client import open_server_ui as _open_server_ui
+        import threading
+
+        def _worker():
+            try:
+                self._auto_commit_sync()
+            except Exception as ex:
+                print(f'[go_collab] auto_commit_sync failed: {ex}')
+            result = _open_server_ui(
+                on_status=lambda m: print(f'[go_collab] {m}'))
+            if result.get('ok') or result.get('prompted'):
+                return
+            err = result.get('error', 'unknown')
+            if err == 'desktop_only':
+                msg = _tr('Sync settings UI is desktop-only for now.')
+            elif err == 'server_apk_not_installed':
+                msg = _tr('AZT collab service not installed.')
+            else:
+                msg = _tr(
+                    'Could not open sync settings: {error}'
+                ).format(error=err)
+            Clock.schedule_once(lambda dt: self._show_toast(msg), 0)
+        threading.Thread(target=_worker, daemon=True).start()
 
     def share_apk(self):
         """Share the running APK via Android's share sheet using MediaStore content:// URI."""

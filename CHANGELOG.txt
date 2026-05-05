@@ -1,5 +1,42 @@
 CHANGELOG — A-Z+T Recorder
 
+1.37.0
+  Setup Collaboration now delegates to the server's canonical
+  settings UI via azt_collab_client.open_server_ui() instead of
+  navigating to the recorder's own CollabScreen. There should be
+  one collab-setup UI in the suite, owned by azt_collabd, reused
+  by every peer; the recorder's local copy was duplicating that
+  surface (and slowly drifting from it). go_collab also moved
+  _auto_commit_sync into a worker thread so a slow request_sync
+  RPC can't stall the tap (same pattern as start_over in 1.36.4).
+  CollabScreen and its KV are still registered for now — the back
+  button handler and _show_collab_warning both call
+  sm.get_screen('collab') for log-line side-effects — but no UI
+  path navigates to it anymore. A follow-up can remove the screen
+  entirely once those two call sites are routed elsewhere.
+
+1.36.5
+  Filter words panel grew an OK button on the same row as the
+  "Show past work" toggle (1/4 of the row width, green). Tapping
+  it collapses the panel via the existing toggle_filter_panel
+  close branch — which already applies cawl/gloss filters and
+  refreshes the summary — so the panel no longer covers other
+  Settings rows with no way back. UnrecordedToggle and OK button
+  are now wrapped in a filter_bottom_row BoxLayout that the
+  expand/collapse helpers zero/restore as a unit.
+
+1.36.4
+  Select Project / start_over now runs _auto_commit_sync in the
+  same worker thread as pick_project, instead of synchronously on
+  the Kivy main thread before spawning the worker. With a project
+  loaded, _auto_commit_sync issues a request_sync RPC that on the
+  Android Binder transport (and a busy daemon) can stall long
+  enough that the tap appears to do nothing — the main thread
+  blocks on the RPC, which also blocks the JNI startActivity
+  dispatch the picker schedules on the same thread. Moving both
+  into the worker frees the main thread so the picker Activity
+  can come up immediately.
+
 1.36.3
   Align db.vernlang with the server-supplied langcode on every
   load path, not just picker selections. Auto-loaded projects
@@ -1505,3 +1542,350 @@ CHANGELOG — A-Z+T Recorder
     - LIFT XML parsing and audio recording
     - Kivy UI with recorder, config, and collaboration screens
     - Android APK via Buildozer
+
+
+================================================================
+Appendix: detailed diffs (formerly in claud_diffs.txt)
+Moved here once; not maintained going forward.
+================================================================
+
+================================================================
+1.36.3 — Align db.vernlang with server langcode on every load
+================================================================
+
+Why: User reported RecorderController.progress_text was showing
+the wrong langcode. Tracing it: progress_text uses
+self.db.vernlang. db.vernlang is set in two places — at LIFT
+parse time (from observed lexical-unit lang attrs, which is
+ambiguous when the file has multiple) and via db.set_vernlang().
+load_lift's "apply langcode" block was checking _pending_vernlang
+(set by _handle_pick) → fell back to peer_pref('vernlang'). The
+auto-load path (_auto_load_last_project) sets _current_langcode
+but NOT _pending_vernlang, so on every cold start the langcode
+came from peer_pref — which is per-peer cached state and drifts
+from the suite-wide last_project (the daemon's authoritative
+key) when peers are switched or first-run.
+
+The fix elevates _current_langcode to the primary signal in
+load_lift and _reload_and_restore. clean_template() is now tied
+ONLY to _pending_vernlang (its real meaning — "new-from-template
+file, also tidy stub forms"), so the auto-load path never
+triggers an unintentional clean_template _save() rewrite.
+
+--- main.py: load_lift ---
+- pending = getattr(self, '_pending_vernlang', '')
+- if pending:
+-     db.set_vernlang(pending)
+-     db.clean_template()
+-     self._pending_vernlang = ''
+-     set_peer_pref('vernlang', pending)
+- else:
+-     saved_vern = peer_pref('vernlang', '') or ''
+-     if saved_vern:
+-         db.set_vernlang(saved_vern)
++ authoritative = getattr(self, '_current_langcode', '')
++ pending = getattr(self, '_pending_vernlang', '')
++ if authoritative:
++     db.set_vernlang(authoritative)
++     set_peer_pref('vernlang', authoritative)
++ elif pending:
++     db.set_vernlang(pending)
++     set_peer_pref('vernlang', pending)
++ else:
++     saved_vern = peer_pref('vernlang', '') or ''
++     if saved_vern:
++         db.set_vernlang(saved_vern)
++ if pending:
++     db.clean_template()
++ self._pending_vernlang = ''
+
+--- main.py: _reload_and_restore ---
+- saved_vern = peer_pref('vernlang', '') or ''
+- if saved_vern:
+-     db.set_vernlang(saved_vern)
++ authoritative = getattr(self, '_current_langcode', '')
++ if authoritative:
++     db.set_vernlang(authoritative)
++ else:
++     saved_vern = peer_pref('vernlang', '') or ''
++     if saved_vern:
++         db.set_vernlang(saved_vern)
+
+================================================================
+1.36.2 — Drop the "Pick a project to continue." modal
+================================================================
+
+Why: User clarification — the layover they wanted gone was the
+ModalView that wraps `pick_project()` while the picker subprocess
+/ Activity spawns. They want start_over to go straight to the
+picker, no intermediate modal. Cancel is already covered by the
+picker itself returning err='cancelled' from _handle_pick, so
+the overlay's Cancel button was redundant.
+
+--- main.py: LIFTRecorderApp.start_over ---
+  def start_over(self):
+      self._auto_commit_sync()
+-     self._pick_cancelled = False
+-     self._show_pick_overlay()
+      from azt_collab_client import pick_project
+      import threading
+      ...
+
+--- main.py: deleted methods ---
+- def _show_pick_overlay(self):
+-     ...ModalView w/ "Pick a project to continue." + Cancel...
+- def _cancel_pick_overlay(self):
+-     self._pick_cancelled = True
+-     self._hide_pick_overlay()
+- def _hide_pick_overlay(self):
+-     ...dismiss self._pick_overlay if present...
+
+--- main.py: _handle_pick ---
+  def _handle_pick(self, result):
+-     self._hide_pick_overlay()
+-     if getattr(self, '_pick_cancelled', False):
+-         return
+      if result.get('ok'):
+          ...
+
+================================================================
+1.36.1 — Walk back cold-start change; move Select Project to bottom
+================================================================
+
+Why: User clarified that they DO want the picker to fire on cold
+start when there's no project — that's the right behaviour, not
+a layover to be removed. The "layover" complaint in the original
+ask was about something else (likely the daemon's own picker UX
+or perhaps the gloss-grid pushing rows off-screen, already fixed
+in 1.35.1). What they want from a Select Project button is a
+rare-use escape hatch *inside Settings*, at the bottom, for the
+case where they want to switch projects from a running session.
+
+So 1.36.1 keeps the Select Project button (replacing the old
+Start over button that used to live in db_nav_box), but:
+  - moves it to the bottom of Settings, after Setup Collaboration
+  - styles it BTN_INACTIVE (grey) instead of ACCENT (blue)
+  - reverts every cold-start path that I rerouted to Settings:
+    _auto_load_last_project, apply_and_go, close_collab all go
+    back to calling start_over() when there's no project.
+
+--- main.py: ConfigScreen KV ---
+- # ── Select Project (always visible) ────────────────────
+- RecBtn:
+-     text: _('Select Project')
+-     normal_color: T.ACCENT
+-     on_release: app.start_over()
+  # ── Share this app ─────────────────────────────────────
+  ...
+  # ── Setup Collaboration (always visible) ──────────────
+  RecBtn:
+      text: _('Setup Collaboration')
+      ...
++ # ── Select Project (rare, kept at bottom) ─────────────
++ RecBtn:
++     text: _('Select Project')
++     normal_color: T.BTN_INACTIVE
++     on_release: app.start_over()
+  Widget:
+      size_hint_y: None
+      height: dp(40)
+
+--- main.py: ConfigScreen.apply_and_go ---
+- if not app.recorder:
+-     return
+- ...settings save + go_recorder()...
++ if app.recorder:
++     ...settings save + go_recorder()...
++ else:
++     app.start_over()
+
+--- main.py: CollabScreen.close_collab ---
+- sm.current = 'config'
++ if app.recorder:
++     sm.current = 'config'
++ else:
++     app.start_over()
+
+--- main.py: LIFTRecorderApp ---
+- def _fallback_to_config(self): ...
+  def _auto_load_last_project(self):
+-     self._fallback_to_config()    # all three failure paths
++     self.start_over()
+
+================================================================
+1.36.0 — No more cold-start picker layover; Select Project btn
+================================================================
+
+Why: User reported that on every launch they get a "Pick a project
+to continue." modal followed by the server-APK picker Activity,
+even though the app is supposed to auto-load the last project. The
+auto-load *did* work when last_project() resolved cleanly, but on
+any failure path it called self.start_over() — which by design
+shows the pick-overlay modal and spawns the picker. The user wants
+auto-load on success, Settings on failure, and a Select Project
+button in Settings for switching.
+
+--- main.py: ConfigScreen KV ---
++ # ── Select Project (always visible) ────────────────────
++ RecBtn:
++     text: _('Select Project')
++     normal_color: T.ACCENT
++     on_release: app.start_over()
+  # ── Share this app ─────────────────────────────────────
+  RecBtn:
+      text: _('Share this app')
+      ...
+
+- # ── Navigation (database-dependent) ───────────────────
+- BoxLayout:
+-     id: db_nav_box
+-     orientation: 'vertical'
+-     size_hint_y: None
+-     height: 0
+-     opacity: 0
+-     spacing: dp(14)
+-     RecBtn:
+-         text: _('Start over')
+-         normal_color: T.BTN_INACTIVE
+-         on_release: app.start_over()
+  Widget:
+      size_hint_y: None
+      height: dp(40)
+
+--- main.py: ConfigScreen.on_enter ---
+- for box_id in ('db_settings_box', 'db_nav_box'):
+-     box = self.ids.get(box_id)
+-     if not box:
+-         continue
+-     if has_db: ...
+-     else: self._hide_box_tree(box)
++ box = self.ids.get('db_settings_box')
++ if box:
++     if has_db: ...
++     else: self._hide_box_tree(box)
+
+--- main.py: ConfigScreen.apply_and_go ---
+  def apply_and_go(self):
+      app = App.get_running_app()
+-     if app.recorder:
+-         ...settings save + go_recorder()...
+-     else:
+-         app.start_over()
++     if not app.recorder:
++         return  # X is a no-op until a project is selected
++     ...settings save + go_recorder()...
+
+--- main.py: CollabScreen.close_collab ---
+- if app.recorder:
+-     sm.current = 'config'
+- else:
+-     app.start_over()
++ sm.current = 'config'   # Select Project lives there now
+
+--- main.py: LIFTRecorderApp._auto_load_last_project ---
+- self.start_over()    # all three failure paths
++ self._fallback_to_config()
++
++ def _fallback_to_config(self):
++     sm = self.root.ids.sm
++     sm.transition = NoTransition()
++     sm.current = 'config'
++     Clock.schedule_once(
++         lambda dt: setattr(sm, 'transition', SlideTransition()), 0.1)
+
+================================================================
+1.35.1 — Gloss-language picker → modal overlay
+================================================================
+
+Why: With > 3 rows of LangToggles in the inline 3-col grid
+(`lang_box`), expanding the panel grew the ScrollView's content
+height. ScrollView keeps `scroll_y` (a proportion) constant across
+height changes, so the visible window shifted and rows above the
+gloss button — including the rec_task selector — fell off the top
+of the viewport. The user asked for either "move things down" or
+"a sensible overlay." Overlay matches the existing
+`_show_rec_overlay` pattern and scales to any number of langs.
+
+--- main.py: KV (in <ConfigScreen>) ---
+- # ── Three blue collapsible buttons ─────────────────────
+- RecBtn:
+-     id: gloss_toggle_btn
+-     text: _('Change gloss languages')
+-     normal_color: T.ACCENT
+-     font_size: sp(14)
+-     on_release: root.toggle_gloss_panel()
+- GridLayout:
+-     id: lang_box
+-     cols: 3
+-     size_hint_y: None
+-     height: 0
+-     opacity: 0
+-     spacing: dp(6)
++ # ── Three blue collapsible buttons ─────────────────────
++ BoxLayout:
++     size_hint_y: None
++     height: dp(44)
++     spacing: dp(8)
++     RecBtn:
++         id: gloss_toggle_btn
++         text: _('Change gloss languages')
++         normal_color: T.ACCENT
++         font_size: sp(14)
++         on_release: root._show_gloss_overlay()
++     Label:
++         id: gloss_summary_label
++         text: ''
++         font_size: sp(12)
++         font_name: FONT
++         color: T.TEXT_DIM
++         halign: 'left'
++         valign: 'middle'
++         text_size: self.size
++         markup: True
+
+--- main.py: ConfigScreen.on_enter ---
+- self.build_lang_toggles()
+  cawl_in = self.ids.get('cawl_input')
+  ...
+- self._collapse_gloss_panel()
++ self._update_gloss_summary()
+
+--- main.py: ConfigScreen methods ---
+- def build_lang_toggles(self):
+-     ...populates self.ids.lang_box...
+-
+  def _toggle_lang(self, lang, active):
+      ...
++     self._update_gloss_summary()
++
++ def _update_gloss_summary(self):
++     """Show selected gloss langs next to the button."""
++     lbl = self.ids.get('gloss_summary_label')
++     if not lbl:
++         return
++     app = App.get_running_app()
++     if not app.recorder:
++         lbl.text = ''
++         return
++     langs = list(app.recorder.active_gloss_langs)
++     lbl.text = ', '.join(langs) if langs else _tr('(none selected)')
+
+  _filter_open = False
+- _gloss_open = False
+  _imgrepo_open = False
+
+- def _collapse_gloss_panel(self): ...
+- def toggle_gloss_panel(self): ...
++ def _show_gloss_overlay(self):
++     """Show a modal overlay with one toggle per available
++     gloss language.  Mirrors _show_rec_overlay."""
++     ...ModalView with internal ScrollView + GridLayout(cols=3)...
++     ...one LangToggle per lang, callback=self._toggle_lang...
++     ...Done button dismisses; tap-outside also dismisses...
+
+Hot-fix during the same edit: removed `self.build_lang_toggles()`
+and `self._collapse_gloss_panel()` calls from `on_enter` after
+deleting those methods; their AttributeError was aborting on_enter
+mid-way, which left `db_nav_box` (Start Over) at height 0 — the
+user reported "gloss language stuff is invisible altogether" and
+"I don't see a start over button" within seconds of each other.
