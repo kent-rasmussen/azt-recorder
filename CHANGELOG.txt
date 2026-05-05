@@ -1,5 +1,89 @@
 CHANGELOG — A-Z+T Recorder
 
+1.37.11
+  Filter Words click handler now actually fires. Logcat from
+  1.37.10 confirmed [gloss] and [imgrepo] but no [filter] — the
+  click was being intercepted before reaching toggle_filter_panel.
+
+  Cause: the two anonymous Labels inside filter_panel ("CAWL
+  number…" and "Gloss search…", height: dp(36) each) were never
+  being zeroed in _collapse_filter_panel — only the TextInputs
+  and filter_bottom_row were. With filter_panel.height = 0 but
+  Labels claiming dp(36), Kivy's vertical BoxLayout layout
+  algorithm stacked them OUTSIDE the panel's nominal 0-tall
+  bounds, putting them in the y-range of the filter button row
+  above. The Labels themselves don't return True from
+  on_touch_down, but their bounding boxes were the first thing
+  Kivy's touch dispatch hit at that y-position (filter_panel
+  precedes filter row in z-order), and the dispatch was eating
+  the touch one way or another.
+
+  Fix: gave both labels IDs (cawl_label, gloss_search_label) and
+  zero their heights in _collapse_filter_panel, restoring to
+  dp(36) in _expand_filter_panel — same pattern as the inputs
+  and the bottom_row.
+
+1.37.10
+  Filter Words click isn't reaching toggle_filter_panel at all
+  per logcat (no `[filter]` line). Two changes to narrow it:
+
+    - Reverted the 1.37.8 KV binding `height: self.minimum_height`
+      on db_settings_box back to the explicit Clock.schedule_once
+      setter from 1.37.7. The binding may have evaluated to 0 and
+      stuck there, leaving the box (and so the filter row) at 0
+      height — which would explain why the click never registers.
+    - Added `[gloss]` and `[imgrepo]` prints to the other two
+      buttons inside the same db_settings_box. If logcat shows
+      `[gloss]` and `[imgrepo]` but no `[filter]`, the issue is
+      specific to the filter row's layout (RecBtn-too-tall-for-
+      its-row overlap is the leading suspect). If none of the
+      three fire, db_settings_box itself is dead. If all three
+      fire including filter, the click was reaching but something
+      AFTER the toggle blanked it.
+
+1.37.9
+  Filter Words still doesn't visibly toggle in 1.37.8. Adding
+  diagnostics + a belt-and-suspenders refresh:
+    - toggle_filter_panel prints _filter_open before the toggle
+      and panel.height / panel.opacity / db_settings_box.height /
+      .minimum_height after, both prefixed `[filter]`. Logcat
+      will tell us whether the click is reaching the method at
+      all (no `[filter]` line ⇒ on_release isn't firing) and
+      whether the panel/box dimensions look right after the
+      toggle (panel.height should be 256, box.height should be
+      ~458 when expanded).
+    - Explicit Clock-scheduled re-set of db_settings_box.height
+      to its minimum_height after every toggle, in case the KV
+      `height: self.minimum_height` binding from 1.37.8 isn't
+      propagating through the BoxLayout-inside-ScrollView
+      relayout ordering on Android.
+
+1.37.8
+  Two bugs in Settings:
+
+  - Filter Words button looked dead. Root cause: db_settings_box's
+    height was being set once via Clock.schedule_once in on_enter,
+    which froze the parent's height at the moment of entry. When
+    the filter panel later expanded from 0 to dp(256), its parent
+    didn't grow with it, so the new content rendered outside the
+    visible frame. Fixed by binding db_settings_box.height to its
+    own minimum_height in KV — same idea as the
+    BoxLayout-with-minimum_height pattern used at the ScrollView
+    level. The on_enter helper that used to reach the height
+    explicitly is gone; opacity is the only thing left to toggle.
+
+  - Select Project crashing. db.clean_template() (called whenever
+    _pending_vernlang is set, which since 1.36.3 is every picker
+    pick) writes the LIFT file via _save(); on Android URI
+    projects that goes through the daemon's ContentProvider and
+    can fail with a stale URI grant or transient daemon state. The
+    failure was propagating up through load_lift on the Kivy main
+    thread. Wrapped in try/except so a clean_template failure logs
+    instead of aborting the load. (The deeper fix is to only call
+    clean_template for genuinely-new-from-template picks; the
+    picker doesn't currently distinguish those from existing-
+    project picks, so this stays defensive for now.)
+
 1.37.7
   Conform to the expanded azt_collab_client/CLAUDE.md hard rule #2
   ("no reading project state from the local filesystem"). The

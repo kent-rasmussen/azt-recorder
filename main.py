@@ -443,6 +443,7 @@ KV_TEMPLATE = '''
                         opacity: 0
                         spacing: dp(8)
                         Label:
+                            id: cawl_label
                             text: _('CAWL number or range (e.g. 1-100, 42, leave blank for all)')
                             font_size: sp(13)
                             font_name: FONT
@@ -464,6 +465,7 @@ KV_TEMPLATE = '''
                             multiline: False
                             on_text_validate: root.apply_cawl(self.text)
                         Label:
+                            id: gloss_search_label
                             text: _('Gloss search (filter by gloss text)')
                             font_size: sp(13)
                             font_name: FONT
@@ -1971,6 +1973,7 @@ class ConfigScreen(Screen):
 
     def _show_gloss_overlay(self):
         """Show a modal overlay with one toggle per available gloss language."""
+        print('[gloss] _show_gloss_overlay')
         from kivy.uix.boxlayout import BoxLayout
         from kivy.uix.button import Button
         from kivy.uix.gridlayout import GridLayout
@@ -2047,6 +2050,7 @@ class ConfigScreen(Screen):
         self._imgrepo_open = False
 
     def toggle_imgrepo_panel(self):
+        print(f'[imgrepo] toggle_imgrepo_panel: _imgrepo_open={self._imgrepo_open}')
         inp = self.ids.get('image_repo_input')
         btn = self.ids.get('imgrepo_toggle_btn')
         if not inp:
@@ -2082,6 +2086,10 @@ class ConfigScreen(Screen):
         if not panel:
             return
         # Restore child heights before expanding
+        for cid in ('cawl_label', 'gloss_search_label'):
+            w = self.ids.get(cid)
+            if w:
+                w.height = dp(36)
         for cid in ('cawl_input', 'gloss_search_input'):
             w = self.ids.get(cid)
             if w:
@@ -2106,7 +2114,17 @@ class ConfigScreen(Screen):
         panel = self.ids.get('filter_panel')
         if not panel:
             return
-        # Zero out TextInput heights so they can't intercept touches
+        # Zero out every child of filter_panel — when panel.height
+        # is 0 but children retain their natural heights, Kivy's
+        # vertical BoxLayout stacks them outside the panel's nominal
+        # bounds. The "CAWL number…" / "Gloss search…" Labels
+        # (height: dp(36)) were ending up inside the filter button
+        # row's y-range and blocking its on_release. Zero everything,
+        # including the Labels.
+        for cid in ('cawl_label', 'gloss_search_label'):
+            w = self.ids.get(cid)
+            if w:
+                w.height = 0
         for cid in ('cawl_input', 'gloss_search_input'):
             w = self.ids.get(cid)
             if w:
@@ -2129,6 +2147,7 @@ class ConfigScreen(Screen):
 
     def toggle_filter_panel(self):
         """Expand or collapse the word filter panel."""
+        print(f'[filter] toggle_filter_panel: _filter_open={self._filter_open}')
         if self._filter_open:
             self._collapse_filter_panel()
             self._update_filter_summary()
@@ -2143,6 +2162,21 @@ class ConfigScreen(Screen):
                     app.recorder.gloss_search = gs.text.strip()
         else:
             self._expand_filter_panel()
+        # Belt-and-suspenders: force db_settings_box to recompute
+        # height after the panel size change. The KV binding
+        # `height: self.minimum_height` should handle this on its
+        # own, but Kivy's BoxLayout-inside-ScrollView relayout
+        # ordering is touchy, so we explicitly Clock.schedule_once
+        # the readback.
+        box = self.ids.get('db_settings_box')
+        if box and box.opacity > 0:
+            Clock.schedule_once(
+                lambda dt: setattr(box, 'height', box.minimum_height), 0)
+        panel = self.ids.get('filter_panel')
+        print(f'[filter] post-toggle: panel.height={panel.height if panel else None} '
+              f'panel.opacity={panel.opacity if panel else None} '
+              f'box.height={box.height if box else None} '
+              f'box.minimum_height={box.minimum_height if box else None}')
 
     def _update_filter_summary(self):
         """Show a one-line summary of active filters next to the button."""
@@ -3431,7 +3465,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.37.7'
+__version__ = '1.37.11'
 
 
 class LIFTRecorderApp(App):
@@ -4155,7 +4189,18 @@ class LIFTRecorderApp(App):
             if saved_vern:
                 db.set_vernlang(saved_vern)
         if pending:
-            db.clean_template()
+            try:
+                db.clean_template()
+            except Exception as ex:
+                # _save() inside clean_template writes the LIFT file
+                # — on Android URI projects that goes through the
+                # daemon's ContentProvider and can fail with a stale
+                # URI grant or transient daemon state. clean_template
+                # is best-effort cleanup of template-stub forms; a
+                # failure here must not abort the load (which would
+                # crash the app on the main thread, since Select
+                # Project's _handle_pick → load_lift runs there).
+                print(f'[load_lift] clean_template failed: {ex}')
         self._pending_vernlang = ''
         self.recorder = RecorderController(db)
         # Apply persisted show-past-work preference (default: hide past work)
