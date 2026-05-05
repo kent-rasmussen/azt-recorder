@@ -3431,7 +3431,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.37.5'
+__version__ = '1.37.6'
 
 
 class LIFTRecorderApp(App):
@@ -4377,19 +4377,20 @@ class LIFTRecorderApp(App):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _sync_status_info(self):
-        """Return (text, last_sync, n_changes, last_commit) for the
-        current project.
+        """Return (text, last_sync) for the current project.
 
         ``text`` is what goes in the sync indicator:
           - ``''`` if no langcode or the server is unreachable
           - ``'not backed up'`` when last_sync is 0 (no successful push
             yet — see ProjectStatus semantics in
             azt_collab_client/projects.py)
-          - ``'HH:MM'`` / ``'yesterday HH:MM'`` / ``'N days ago HH:MM'``
-            otherwise, with a trailing ``'*'`` when last_commit is
-            newer than last_sync (committed-but-not-pushed) and a
-            ``' (+k)'`` suffix when n_changes > 0 (uncommitted edits);
-            ``' (OK)'`` when fully in sync.
+          - ``'HH:MM (+n)'`` / ``'HH:MM (OK)'`` otherwise, where *n*
+            is the number of commits ahead of the remote that haven't
+            been pushed yet (ProjectStatus.commits_ahead). ``(OK)``
+            when commits_ahead is 0.
+
+        Date prefixes (``'yesterday HH:MM'`` / ``'N days ago HH:MM'``)
+        prepend the time when last_sync is older than today.
 
         ``last_sync`` (push timestamp) is returned raw so callers
         like do_sync can branch behaviour without re-querying.
@@ -4397,16 +4398,15 @@ class LIFTRecorderApp(App):
         import datetime
         langcode = getattr(self, '_current_langcode', '')
         if not langcode:
-            return ('', 0.0, 0, 0.0)
+            return ('', 0.0)
         from azt_collab_client import project_status
         status = project_status(langcode)
         if status is None:
-            return ('', 0.0, 0, 0.0)
-        n_changes = int(getattr(status, 'n_changes', 0) or 0)
+            return ('', 0.0)
         last_sync = float(getattr(status, 'last_sync', 0.0) or 0.0)
-        last_commit = float(getattr(status, 'last_commit', 0.0) or 0.0)
+        commits_ahead = int(getattr(status, 'commits_ahead', 0) or 0)
         if not last_sync:
-            return (_tr('not backed up'), 0.0, n_changes, last_commit)
+            return (_tr('not backed up'), 0.0)
         dt_sync = datetime.datetime.fromtimestamp(last_sync)
         now = datetime.datetime.now()
         sync_date = dt_sync.date()
@@ -4418,17 +4418,11 @@ class LIFTRecorderApp(App):
             base = f'yesterday {time_str}'
         else:
             base = f'{days} days ago {time_str}'
-        # last_commit > last_sync ⇒ committed locally since the last
-        # successful push. Flag with a trailing star so the user knows
-        # data is sitting in the local repo waiting to go out next
-        # time the daemon can reach the remote.
-        if last_commit > last_sync:
-            base = f'{base}*'
-        if n_changes:
-            base = f'{base} (+{n_changes})'
+        if commits_ahead > 0:
+            base = f'{base} (+{commits_ahead})'
         else:
             base = f'{base} (OK)'
-        return (base, last_sync, n_changes, last_commit)
+        return (base, last_sync)
 
     def _update_sync_status(self):
         """Push sync status text into the recorder top bar."""
@@ -4634,7 +4628,7 @@ class LIFTRecorderApp(App):
         # indicator reads "not backed up" and the user's tap is really
         # asking to set up backup, not to sync. Route to the server's
         # collab UI directly so they land where Publish lives.
-        _, last_sync, _, _ = self._sync_status_info()
+        _, last_sync = self._sync_status_info()
         if not last_sync:
             self.go_collab()
             return

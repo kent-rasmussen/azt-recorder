@@ -1,5 +1,23 @@
 CHANGELOG — A-Z+T Recorder
 
+1.37.6
+  Sync indicator suffix is now binary "(+n)" / "(OK)" — the
+  trailing "*" marker is gone. The previous mix conflated two
+  different signals (last_commit > last_sync as "*", n_changes as
+  "(+k)") and read as "5 uncommitted edits", which isn't what the
+  user wanted; commits-ahead-of-remote is the right metric.
+    - _sync_status_info now reads ProjectStatus.commits_ahead and
+      renders "(+n)" when > 0, else "(OK)". Tuple shape narrowed
+      from (text, last_sync, n_changes, last_commit) to
+      (text, last_sync); n_changes / last_commit no longer leave
+      the function.
+    - Client-side ProjectStatus dataclass gained
+      commits_ahead: int = 0 (defaulted for forward-compat). The
+      daemon team has been asked in NOTES_TO_DAEMON.md to populate
+      it; until then the field stays 0 and the indicator shows
+      "(OK)" for any pushed project regardless of unpushed commits.
+      That's a known temporary regression — flagged in the note.
+
 1.37.5
   Catch up on the new requirements published by the daemon team in
   azt_collab_client:
