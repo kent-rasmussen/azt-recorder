@@ -1,5 +1,35 @@
 CHANGELOG — A-Z+T Recorder
 
+1.37.5
+  Catch up on the new requirements published by the daemon team in
+  azt_collab_client:
+
+  - ProjectStatus now carries last_commit alongside last_sync.
+    _sync_status_info uses both: when last_commit > last_sync (i.e.
+    committed locally since the last successful push) the indicator
+    appends a trailing '*' so the user can see committed-but-not-
+    pushed without confusing it with fully-synced. The function
+    signature widened from (text, last_sync, n_changes) to (text,
+    last_sync, n_changes, last_commit); do_sync's destructure was
+    updated accordingly.
+
+  - "No reading project state from the local filesystem" rule
+    (azt_collab_client/CLAUDE.md hard rule #2) — both dulwich call
+    sites are gone:
+      * _project_has_remote() now reads remote_url from
+        project_status(langcode) instead of opening
+        dulwich.Repo(self.recorder.db.dir).get_config(). Fixes the
+        long-standing "data isn't being backed up" warning that
+        used to fire on Android even after a successful publish,
+        because the daemon's working_dir lives in the server APK's
+        private filesDir and the peer process can't read it.
+      * CollabScreen._langcode_from_project() (dead code since
+        1.37.0 but still in the tree) re-routed through
+        derive_langcode(), with the cache check up front. CollabScreen
+        as a whole is still pending removal — its only remaining
+        non-dead consumers are _show_collab_warning's _set_log call
+        and the back-button handler's 'collab' state branch.
+
 1.37.4
   Build bump for re-testing on device.
 

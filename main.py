@@ -2508,19 +2508,22 @@ class CollabScreen(Screen):
 
     @staticmethod
     def _langcode_from_project(app):
-        """Extract repo name (langcode) from the current project's git remote."""
+        """Ask the daemon for the current project's langcode rather
+        than opening the local repo (azt_collab_client rule: no
+        reading project state from the local filesystem). Note:
+        CollabScreen itself is unreachable since 1.37.0 — Setup
+        Collaboration delegates to open_server_ui — so this method is
+        currently dead code kept only to satisfy the screen's existing
+        on_enter contract while it lingers in the tree."""
+        if not app.recorder:
+            return ''
+        cached = getattr(app, '_current_langcode', '')
+        if cached:
+            return cached
         try:
-            project_dir = app.recorder.db.dir
-            from dulwich.repo import Repo
-            repo = Repo(project_dir)
-            remote_url = repo.get_config().get(
-                (b'remote', b'origin'), b'url'
-            ).decode('utf-8')
-            # Extract repo name from URL like https://github.com/user/langcode.git
-            name = remote_url.rstrip('/').rsplit('/', 1)[-1]
-            if name.endswith('.git'):
-                name = name[:-4]
-            return name
+            from azt_collab_client import derive_langcode
+            return derive_langcode(
+                app.recorder.db.dir, app.recorder.db.path) or ''
         except Exception:
             return ''
 
@@ -3428,7 +3431,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.37.4'
+__version__ = '1.37.5'
 
 
 class LIFTRecorderApp(App):
@@ -3863,17 +3866,23 @@ class LIFTRecorderApp(App):
         popup.open()
 
     def _project_has_remote(self):
-        """Check if the current project's git repo has a configured remote."""
+        """Check whether the daemon has a remote URL stored for the
+        current project. Goes through project_status(langcode) per the
+        azt_collab_client rule "no reading project state from the local
+        filesystem" — on Android the daemon's working_dir lives in the
+        standalone server APK's private filesDir and peers can't read
+        it, which made the previous dulwich.Repo(working_dir).get_config
+        check falsely return False even after a successful publish."""
         if not self.recorder:
             return False
-        try:
-            from dulwich.repo import Repo
-            repo = Repo(self.recorder.db.dir)
-            url = repo.get_config().get(
-                (b'remote', b'origin'), b'url')
-            return bool(url)
-        except Exception:
+        langcode = getattr(self, '_current_langcode', '')
+        if not langcode:
             return False
+        from azt_collab_client import project_status
+        status = project_status(langcode)
+        if status is None:
+            return False
+        return bool(getattr(status, 'remote_url', '') or '')
 
     def _show_backup_warning(self):
         """Show overlay warning that data isn't being backed up."""
@@ -4368,32 +4377,37 @@ class LIFTRecorderApp(App):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _sync_status_info(self):
-        """Return (text, last_sync, n_changes) for the current project.
+        """Return (text, last_sync, n_changes, last_commit) for the
+        current project.
 
         ``text`` is what goes in the sync indicator:
           - ``''`` if no langcode or the server is unreachable
           - ``'not backed up'`` when last_sync is 0 (no successful push
-            yet — daemon only stamps last_sync on PUSHED / PULLED /
-            COMMITTED_AND_PUSHED, see scheduler.py:301-303)
+            yet — see ProjectStatus semantics in
+            azt_collab_client/projects.py)
           - ``'HH:MM'`` / ``'yesterday HH:MM'`` / ``'N days ago HH:MM'``
-            otherwise, with a ``' (+k)'`` suffix when n_changes > 0.
+            otherwise, with a trailing ``'*'`` when last_commit is
+            newer than last_sync (committed-but-not-pushed) and a
+            ``' (+k)'`` suffix when n_changes > 0 (uncommitted edits);
+            ``' (OK)'`` when fully in sync.
 
-        ``last_sync`` is the raw timestamp, used by callers (do_sync)
-        to branch behaviour without re-querying the server.
+        ``last_sync`` (push timestamp) is returned raw so callers
+        like do_sync can branch behaviour without re-querying.
         """
         import datetime
         langcode = getattr(self, '_current_langcode', '')
         if not langcode:
-            return ('', 0.0, 0)
+            return ('', 0.0, 0, 0.0)
         from azt_collab_client import project_status
         status = project_status(langcode)
         if status is None:
-            return ('', 0.0, 0)
+            return ('', 0.0, 0, 0.0)
         n_changes = int(getattr(status, 'n_changes', 0) or 0)
-        ts = status.last_sync or 0.0
-        if not ts:
-            return (_tr('not backed up'), 0.0, n_changes)
-        dt_sync = datetime.datetime.fromtimestamp(ts)
+        last_sync = float(getattr(status, 'last_sync', 0.0) or 0.0)
+        last_commit = float(getattr(status, 'last_commit', 0.0) or 0.0)
+        if not last_sync:
+            return (_tr('not backed up'), 0.0, n_changes, last_commit)
+        dt_sync = datetime.datetime.fromtimestamp(last_sync)
         now = datetime.datetime.now()
         sync_date = dt_sync.date()
         time_str = dt_sync.strftime('%H:%M')
@@ -4404,11 +4418,17 @@ class LIFTRecorderApp(App):
             base = f'yesterday {time_str}'
         else:
             base = f'{days} days ago {time_str}'
+        # last_commit > last_sync ⇒ committed locally since the last
+        # successful push. Flag with a trailing star so the user knows
+        # data is sitting in the local repo waiting to go out next
+        # time the daemon can reach the remote.
+        if last_commit > last_sync:
+            base = f'{base}*'
         if n_changes:
             base = f'{base} (+{n_changes})'
         else:
             base = f'{base} (OK)'
-        return (base, ts, n_changes)
+        return (base, last_sync, n_changes, last_commit)
 
     def _update_sync_status(self):
         """Push sync status text into the recorder top bar."""
@@ -4614,7 +4634,7 @@ class LIFTRecorderApp(App):
         # indicator reads "not backed up" and the user's tap is really
         # asking to set up backup, not to sync. Route to the server's
         # collab UI directly so they land where Publish lives.
-        _, last_sync, _ = self._sync_status_info()
+        _, last_sync, _, _ = self._sync_status_info()
         if not last_sync:
             self.go_collab()
             return
