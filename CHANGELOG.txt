@@ -1,5 +1,53 @@
 CHANGELOG — A-Z+T Recorder
 
+1.37.3
+  Sync indicator gained two states beyond "show last push time":
+    - "not backed up" when last_sync is 0 (instead of going blank)
+    - "(+k)" suffix when project_status reports k uncommitted /
+      unpushed changes ("13:45 (+5)"), so commits-without-push are
+      visible too.
+  Tapping the sync icon while it reads "not backed up" routes to
+  go_collab (server's collab UI) instead of attempting a sync that
+  would only return COMMITTED_NO_REMOTE — the user's intent in
+  that state is to set up backup, not retry. Existing tap-to-sync
+  behaviour preserved once last_sync > 0. _sync_status_text was
+  refactored into _sync_status_info returning (text, last_sync,
+  n_changes) so the routing decision and the label re-use one RPC
+  result instead of querying twice.
+
+1.37.2
+  Drop the sync toasts added in 1.37.1; user wants the sync
+  indicator (last-sync timestamp) to do the work, not toasts.
+  do_sync still always calls _update_sync_status on every
+  outcome (the only piece worth keeping from 1.37.1) and the
+  app schedules a 30-second Clock interval that re-runs
+  _update_sync_status, so background debounced syncs from
+  request_sync (swipes) become visible without waiting for the
+  next manual sync. The silent-guard early returns are restored
+  to silent (no toast).
+
+1.37.1
+  Sync button now gives visible feedback for every outcome instead
+  of silently swallowing failures. Previously _on_sync_done only
+  acted on PUSHED / COMMITTED_AND_PUSHED / NOT_A_REPO, so SERVER_-
+  UNAVAILABLE, AUTH_REQUIRED, NOTHING_TO_COMMIT, etc. all looked
+  identical to "nothing happened". do_sync now:
+    - shows an immediate "Syncing…" toast so the tap is visible,
+    - always refreshes the sync status indicator (project_status
+      may have a new last_sync from another peer even when our
+      own sync was a no-op),
+    - shows a result toast (translated via translate_result) for
+      every outcome, including transport / auth failures.
+  do_sync also surfaces the previously-silent guards: "No project
+  loaded." and "Project not registered with the server yet." now
+  toast instead of returning silently. The do_sync function was
+  always wired to the server (sync_project RPC); the regression
+  was visibility, not transport. Auto-sync on swipes is unchanged
+  for now — its debounced, fire-and-forget pattern is intentional.
+  If the sync indicator still doesn't refresh after a manual sync,
+  the toast text will say why (server-unreachable, auth missing,
+  etc.), which we can act on in a follow-up.
+
 1.37.0
   Setup Collaboration now delegates to the server's canonical
   settings UI via azt_collab_client.open_server_ui() instead of

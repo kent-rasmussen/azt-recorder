@@ -3428,7 +3428,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.37.0'
+__version__ = '1.37.3'
 
 
 class LIFTRecorderApp(App):
@@ -3607,6 +3607,12 @@ class LIFTRecorderApp(App):
             # One-shot server compatibility / install probe. Defer one
             # frame so the UI is up before any toast.
             Clock.schedule_once(lambda dt: self._check_server_compat(), 0.5)
+            # Periodically refresh the last-sync indicator so background
+            # debounced syncs (request_sync from swipes) become visible
+            # without waiting for the next manual sync. project_status
+            # is a single GET against the daemon — cheap.
+            Clock.schedule_interval(
+                lambda dt: self._update_sync_status(), 30)
         except Exception:
             traceback.print_exc()
             raise
@@ -4361,32 +4367,46 @@ class LIFTRecorderApp(App):
                 print(f'[auto-publish] error: {ex}')
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _sync_status_text(self):
-        """Return human-readable sync age for the current project:
-        '' if never, 'HH:MM' today, 'yesterday HH:MM', else 'N days ago HH:MM'."""
+    def _sync_status_info(self):
+        """Return (text, last_sync, n_changes) for the current project.
+
+        ``text`` is what goes in the sync indicator:
+          - ``''`` if no langcode or the server is unreachable
+          - ``'not backed up'`` when last_sync is 0 (no successful push
+            yet — daemon only stamps last_sync on PUSHED / PULLED /
+            COMMITTED_AND_PUSHED, see scheduler.py:301-303)
+          - ``'HH:MM'`` / ``'yesterday HH:MM'`` / ``'N days ago HH:MM'``
+            otherwise, with a ``' (+k)'`` suffix when n_changes > 0.
+
+        ``last_sync`` is the raw timestamp, used by callers (do_sync)
+        to branch behaviour without re-querying the server.
+        """
         import datetime
         langcode = getattr(self, '_current_langcode', '')
         if not langcode:
-            return ''
+            return ('', 0.0, 0)
         from azt_collab_client import project_status
         status = project_status(langcode)
         if status is None:
-            return ''
-        ts = status.last_sync
+            return ('', 0.0, 0)
+        n_changes = int(getattr(status, 'n_changes', 0) or 0)
+        ts = status.last_sync or 0.0
         if not ts:
-            return ''
+            return (_tr('not backed up'), 0.0, n_changes)
         dt_sync = datetime.datetime.fromtimestamp(ts)
         now = datetime.datetime.now()
-        today = now.date()
         sync_date = dt_sync.date()
         time_str = dt_sync.strftime('%H:%M')
-        days = (today - sync_date).days
+        days = (now.date() - sync_date).days
         if days == 0:
-            return time_str
+            base = time_str
         elif days == 1:
-            return f'yesterday {time_str}'
+            base = f'yesterday {time_str}'
         else:
-            return f'{days} days ago {time_str}'
+            base = f'{days} days ago {time_str}'
+        if n_changes:
+            base = f'{base} (+{n_changes})'
+        return (base, ts, n_changes)
 
     def _update_sync_status(self):
         """Push sync status text into the recorder top bar."""
@@ -4394,7 +4414,7 @@ class LIFTRecorderApp(App):
         rec_screen = sm.get_screen('recorder')
         lbl = rec_screen.ids.get('sync_status_label')
         if lbl:
-            lbl.text = self._sync_status_text()
+            lbl.text = self._sync_status_info()[0]
 
     def _mark_gh_app_installed(self):
         """Record that the GitHub App has been installed after a successful push."""
@@ -4588,17 +4608,29 @@ class LIFTRecorderApp(App):
         langcode = self._current_langcode_or_register()
         if not langcode:
             return
+        # If nothing has ever been pushed (last_sync == 0), the
+        # indicator reads "not backed up" and the user's tap is really
+        # asking to set up backup, not to sync. Route to the server's
+        # collab UI directly so they land where Publish lives.
+        _, last_sync, _ = self._sync_status_info()
+        if not last_sync:
+            self.go_collab()
+            return
         import threading
 
         saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''
 
         def _on_sync_done(result):
-            print(f'Sync: {translate_result(result)}')
+            print(f'[do_sync] {translate_result(result)}')
+            # Refresh the sync indicator regardless of outcome — the
+            # server may have stamped a new last_sync even on partial
+            # success, and a no-op result still benefits from re-reading
+            # project_status in case another peer pushed since we loaded.
+            self._update_sync_status()
             if result.has(S.NOT_A_REPO):
                 Clock.schedule_once(lambda dt: self.go_collab(), 0)
                 return
             if result.has(S.PUSHED) or result.has(S.COMMITTED_AND_PUSHED):
-                self._update_sync_status()
                 self._mark_gh_app_installed()
 
         def _worker():
