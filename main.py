@@ -3428,7 +3428,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.37.3'
+__version__ = '1.37.4'
 
 
 class LIFTRecorderApp(App):
@@ -4406,6 +4406,8 @@ class LIFTRecorderApp(App):
             base = f'{days} days ago {time_str}'
         if n_changes:
             base = f'{base} (+{n_changes})'
+        else:
+            base = f'{base} (OK)'
         return (base, ts, n_changes)
 
     def _update_sync_status(self):

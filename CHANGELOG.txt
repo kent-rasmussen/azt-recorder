@@ -1,5 +1,8 @@
 CHANGELOG — A-Z+T Recorder
 
+1.37.4
+  Build bump for re-testing on device.
+
 1.37.3
   Sync indicator gained two states beyond "show last push time":
     - "not backed up" when last_sync is 0 (instead of going blank)
