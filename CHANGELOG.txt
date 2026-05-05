@@ -1,5 +1,22 @@
 CHANGELOG — A-Z+T Recorder
 
+1.37.7
+  Conform to the expanded azt_collab_client/CLAUDE.md hard rule #2
+  ("no reading project state from the local filesystem"). The
+  client doc grew an explicit fix shape for the canonical anti-
+  pattern (recorder's _project_has_remote) and an explanation of
+  the wider blast radius — peer flows that *gate* on a local-fs
+  state check silently skip their work on Android. Updates:
+    - _project_has_remote rewritten to match the canonical pattern
+      verbatim: try/except around the import + project_status call
+      (defensive against ImportError / SDK-shape drift), and
+      `(ps.remote_url or '').strip()` instead of a plain truthiness
+      test (catches whitespace-only URLs).
+    - Docstring updated to spell out the gates-silently-skip
+      consequence, not just the spurious-warning one, so anyone
+      adding similar checks in the future sees the deeper reason
+      first.
+
 1.37.6
   Sync indicator suffix is now binary "(+n)" / "(OK)" — the
   trailing "*" marker is gone. The previous mix conflated two

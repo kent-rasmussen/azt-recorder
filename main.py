@@ -3431,7 +3431,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.37.6'
+__version__ = '1.37.7'
 
 
 class LIFTRecorderApp(App):
@@ -3867,22 +3867,27 @@ class LIFTRecorderApp(App):
 
     def _project_has_remote(self):
         """Check whether the daemon has a remote URL stored for the
-        current project. Goes through project_status(langcode) per the
-        azt_collab_client rule "no reading project state from the local
-        filesystem" — on Android the daemon's working_dir lives in the
-        standalone server APK's private filesDir and peers can't read
-        it, which made the previous dulwich.Repo(working_dir).get_config
-        check falsely return False even after a successful publish."""
+        current project. Goes through project_status(langcode) per
+        azt_collab_client/CLAUDE.md hard rule #2 ("no reading project
+        state from the local filesystem"). The previous
+        dulwich.Repo(working_dir).get_config() check falsely returned
+        False on Android — the daemon's working_dir lives in the
+        standalone server APK's private filesDir and peer processes
+        have no UID-level read on it — which fired the spurious
+        "data isn't being backed up" warning even after a successful
+        publish, and (more importantly) gates auto-sync flows that
+        check this method silently skipped their work on Android."""
         if not self.recorder:
             return False
         langcode = getattr(self, '_current_langcode', '')
         if not langcode:
             return False
-        from azt_collab_client import project_status
-        status = project_status(langcode)
-        if status is None:
+        try:
+            from azt_collab_client import project_status
+            ps = project_status(langcode)
+        except Exception:
             return False
-        return bool(getattr(status, 'remote_url', '') or '')
+        return bool(ps and (ps.remote_url or '').strip())
 
     def _show_backup_warning(self):
         """Show overlay warning that data isn't being backed up."""
