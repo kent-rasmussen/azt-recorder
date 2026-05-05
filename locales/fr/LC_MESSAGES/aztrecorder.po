@@ -4,10 +4,10 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: azt-recorder 1.20.0\n"
+"Project-Id-Version: azt-recorder 1.37.12\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-12 00:00+0000\n"
-"PO-Revision-Date: 2026-04-12 00:00+0000\n"
+"POT-Creation-Date: 2026-05-05 00:00+0000\n"
+"PO-Revision-Date: 2026-05-05 00:00+0000\n"
 "Last-Translator: \n"
 "Language-Team: French\n"
 "Language: fr\n"
@@ -35,10 +35,7 @@ msgstr "Nouveau projet"
 # ── Recorder screen ──────────────────────────────────────────────────────────
 
 msgid "Recording:"
-msgstr "Enregistrement :"
-
-msgid "Share this app"
-msgstr "Partager cette appli"
+msgstr "Enregistrement :"
 
 msgid "Change gloss languages"
 msgstr "Changer les langues de glose"
@@ -160,7 +157,7 @@ msgstr "Tapez un nom de langue…"
 # ── Dialect / region selection ───────────────────────────────────────────────
 
 msgid "Select region:"
-msgstr "Sélectionnez la région :"
+msgstr "Sélectionnez la région :"
 
 msgid "I'm working on a dialect"
 msgstr "Je travaille sur un dialecte"
@@ -211,7 +208,7 @@ msgid "Open LIFT from URL"
 msgstr "Ouvrir un LIFT depuis une URL"
 
 msgid "Paste the URL to a .lift file:"
-msgstr "Collez l’URL d’un fichier .lift :"
+msgstr "Collez l’URL d’un fichier .lift :"
 
 msgid "Error"
 msgstr "Erreur"
@@ -220,7 +217,7 @@ msgid "Start a new wordlist"
 msgstr "Créer une nouvelle liste de mots"
 
 msgid "Start a new wordlist with this template?"
-msgstr "Créer une nouvelle liste de mots avec ce modèle ?"
+msgstr "Créer une nouvelle liste de mots avec ce modèle ?"
 
 msgid "Go to entry (1-{total})"
 msgstr "Aller à l’entrée (1-{total})"
@@ -229,7 +226,7 @@ msgid "Clone Repository"
 msgstr "Cloner un dépôt"
 
 msgid "Clone a git repository containing a LIFT file:"
-msgstr "Cloner un dépôt git contenant un fichier LIFT :"
+msgstr "Cloner un dépôt git contenant un fichier LIFT :"
 
 msgid "Owner (username)"
 msgstr "Propriétaire (nom d’utilisateur)"
@@ -244,7 +241,7 @@ msgid "Open LIFT file"
 msgstr "Ouvrir un fichier LIFT"
 
 msgid "Type your name as you want it to appear online, then click 'Connect'"
-msgstr "Tapez votre nom tel que vous voulez qu’il apparaisse en ligne, puis cliquez sur « Se connecter »"
+msgstr "Tapez votre nom tel que vous voulez qu’il apparaisse en ligne, puis cliquez sur « Se connecter »"
 
 # ── Loading / status messages ────────────────────────────────────────────────
 
@@ -299,7 +296,7 @@ msgid "Connected as {username} — install app for repo access"
 msgstr "Connecté en tant que {username} — installez l’appli pour accéder aux dépôts"
 
 msgid "Authorization failed: {error}"
-msgstr "Échec de l’autorisation : {error}"
+msgstr "Échec de l’autorisation : {error}"
 
 msgid "No project loaded."
 msgstr "Aucun projet chargé."
@@ -311,16 +308,7 @@ msgid "Enter a language code first."
 msgstr "Saisissez d’abord un code de langue."
 
 msgid "Could not open file:\n{error}"
-msgstr "Impossible d’ouvrir le fichier :\n{error}"
-
-msgid "Share failed: could not create MediaStore entry"
-msgstr "Échec du partage : impossible de créer l’entrée MediaStore"
-
-msgid "Could not share APK:\n{error}"
-msgstr "Impossible de partager l’APK :\n{error}"
-
-msgid "APK sharing is only available on Android."
-msgstr "Le partage de l’APK n’est disponible que sur Android."
+msgstr "Impossible d’ouvrir le fichier :\n{error}"
 
 # ── Collab messages ──────────────────────────────────────────────────────────
 
@@ -477,3 +465,59 @@ msgstr "Sélectionnez « Tous les dépôts »."
 
 msgid "Paste the repository URL here"
 msgstr "Collez l'adresse du dépôt ici"
+
+# ── v1.37.12 additions ─────────────────────────────────────────────────────
+
+msgid "Select Project"
+msgstr "Sélectionner un projet"
+
+msgid "Advanced"
+msgstr "Avancé"
+
+msgid "Open Sync Settings"
+msgstr "Ouvrir les paramètres de synchronisation"
+
+msgid "(none selected)"
+msgstr "(aucune sélectionnée)"
+
+msgid "Done"
+msgstr "Terminé"
+
+msgid "Opened sync settings."
+msgstr "Paramètres de synchronisation ouverts."
+
+msgid "Sync settings UI is desktop-only for now."
+msgstr "L'interface des paramètres de synchronisation n'est disponible que sur ordinateur pour l'instant."
+
+msgid "Sync settings UI failed to start: {detail}"
+msgstr "L'interface des paramètres de synchronisation n'a pas pu démarrer : {detail}"
+
+msgid "Could not open sync settings: {error}"
+msgstr "Impossible d'ouvrir les paramètres de synchronisation : {error}"
+
+msgid "AZT collab service not installed. Opening install page..."
+msgstr "Service de collaboration AZT non installé. Ouverture de la page d'installation…"
+
+msgid "GitHub App install URL not available."
+msgstr "URL d'installation de l'appli GitHub indisponible."
+
+msgid "Please update the AZT collaboration service (installed: {have}, required: {need})."
+msgstr "Veuillez mettre à jour le service de collaboration AZT (installé : {have}, requis : {need})."
+
+msgid "Please update the recorder (client {have}, server requires at least {need})."
+msgstr "Veuillez mettre à jour l'enregistreur (client {have}, le serveur requiert au moins {need})."
+
+msgid "AZT collaboration service is not running or not installed."
+msgstr "Le service de collaboration AZT n'est pas en cours d'exécution ou n'est pas installé."
+
+msgid "not backed up"
+msgstr "non sauvegardé"
+
+msgid "Sync service unavailable: {error}"
+msgstr "Service de synchronisation indisponible : {error}"
+
+msgid "AZT collab service not installed."
+msgstr "Service de collaboration AZT non installé."
+
+msgid "Could not open project picker: {error}"
+msgstr "Impossible d'ouvrir le sélecteur de projet : {error}"

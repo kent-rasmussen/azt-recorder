@@ -3465,7 +3465,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.37.11'
+__version__ = '1.37.14'
 
 
 class LIFTRecorderApp(App):
@@ -4615,55 +4615,11 @@ class LIFTRecorderApp(App):
         threading.Thread(target=_worker, daemon=True).start()
 
     def share_apk(self):
-        """Share the running APK via Android's share sheet using MediaStore content:// URI."""
-        if platform == 'android':
-            try:
-                from jnius import autoclass, cast
-                PythonActivity = autoclass('org.kivy.android.PythonActivity')
-                Intent = autoclass('android.content.Intent')
-                ContentValues = autoclass('android.content.ContentValues')
-                MediaStoreDownloads = autoclass(
-                    'android.provider.MediaStore$Downloads')
-                activity = PythonActivity.mActivity
-                context = cast('android.content.Context', activity)
-                pm = context.getPackageManager()
-                app_info = pm.getApplicationInfo(
-                    context.getPackageName(), 0)
-                apk_path = app_info.sourceDir
-                # Insert into MediaStore Downloads to get a content:// URI
-                values = ContentValues()
-                values.put('_display_name', 'azt_recorder.apk')
-                values.put('mime_type',
-                           'application/vnd.android.package-archive')
-                resolver = context.getContentResolver()
-                uri = resolver.insert(
-                    MediaStoreDownloads.EXTERNAL_CONTENT_URI, values)
-                if not uri:
-                    self._show_error(_tr('Share failed: could not create MediaStore entry'))
-                    return
-                # Copy APK bytes into the MediaStore entry
-                fos = resolver.openOutputStream(uri)
-                with open(apk_path, 'rb') as f:
-                    while True:
-                        chunk = f.read(65536)
-                        if not chunk:
-                            break
-                        fos.write(chunk)
-                fos.close()
-                intent = Intent(Intent.ACTION_SEND)
-                intent.setType('application/vnd.android.package-archive')
-                intent.putExtra(Intent.EXTRA_STREAM,
-                                cast('android.os.Parcelable', uri))
-                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                chooser = Intent.createChooser(
-                    intent,
-                    autoclass('java.lang.String')('Share app'))
-                activity.startActivity(chooser)
-            except Exception as ex:
-                print(f'Share APK error: {ex}')
-                self._show_error(_tr('Could not share APK:\n{error}').format(error=ex))
-        else:
-            self._show_error(_tr('APK sharing is only available on Android.'))
+        from azt_collab_client.ui import share_running_apk
+        share_running_apk(
+            filename='azt_recorder.apk',
+            on_error=self._show_error,
+        )
 
     def do_sync(self):
         if not self.recorder:

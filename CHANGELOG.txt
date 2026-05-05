@@ -1,5 +1,41 @@
 CHANGELOG — A-Z+T Recorder
 
+1.37.14
+  i18n.py now calls azt_collab_client.i18n.ensure_mo before
+  gettext.translation, so editing aztrecorder.po in place
+  auto-compiles to aztrecorder.mo on next set_language /
+  app launch. Same lazy-compile path the client has used for
+  its own catalog — drops the manual msgfmt step previously
+  noted in the 1.37.12 entry. No external msgfmt tooling
+  required for translation work in this repo any more.
+
+1.37.13
+  Moved the "Share this app" Android share-sheet helper out of
+  the recorder and into azt_collab_client.ui.share_running_apk —
+  every peer in the suite (recorder, viewer, future apps) now
+  gets the same MediaStore-Downloads-based APK share with a
+  single import. The recorder's share_apk method is now a
+  three-line wrapper that passes 'azt_recorder.apk' as the
+  display name and self._show_error as the error sink. The four
+  associated strings ("Share this app", "Share app", "Share
+  failed: could not create MediaStore entry", "Could not share
+  APK:\n{error}", "APK sharing is only available on Android.")
+  moved from aztrecorder.po to azt_collab_client.po; the
+  recorder's translator chain (aztrecorder → client fallback)
+  resolves them transparently so no peer-side string changes
+  are needed.
+
+1.37.12
+  Filled in 18 untranslated strings in the French catalog
+  (locales/fr/LC_MESSAGES/aztrecorder.po) — KV-side "Select
+  Project", "Advanced", "Open Sync Settings"; the gloss-overlay
+  "(none selected)" / "Done"; and the collab/sync status
+  messages added when open_server_ui, the version-compat banner,
+  and the project-picker/auto-sync error paths landed without
+  matching .po updates. Bumped POT-Creation-Date / PO-Revision-
+  Date and Project-Id-Version. Run msgfmt to regenerate
+  aztrecorder.mo before testing on a non-English UI.
+
 1.37.11
   Filter Words click handler now actually fires. Logcat from
   1.37.10 confirmed [gloss] and [imgrepo] but no [filter] — the

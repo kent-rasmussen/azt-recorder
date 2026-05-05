@@ -51,10 +51,16 @@ def _load_recorder_catalog(lang: str):
     """Build the recorder gettext.translation for ``lang``, chained to
     the client catalog as a fallback. Returns a NullTranslations for
     English or when the recorder has no catalog for the language —
-    in either case the client catalog still answers via fallback."""
+    in either case the client catalog still answers via fallback.
+
+    Auto-compiles ``aztrecorder.po`` → ``.mo`` via the client's
+    ``ensure_mo`` helper before the lookup, so editing
+    ``locales/<lang>/LC_MESSAGES/aztrecorder.po`` in place takes
+    effect on next launch with no external ``msgfmt`` step."""
     if lang == 'en':
         cat = gettext.NullTranslations()
     else:
+        _client_i18n.ensure_mo(_LOCALE_DIR, _DOMAIN, lang)
         try:
             cat = gettext.translation(
                 _DOMAIN, localedir=_LOCALE_DIR, languages=[lang])
