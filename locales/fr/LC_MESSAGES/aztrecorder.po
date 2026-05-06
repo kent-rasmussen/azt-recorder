@@ -501,15 +501,6 @@ msgstr "Service de collaboration AZT non installé. Ouverture de la page d'insta
 msgid "GitHub App install URL not available."
 msgstr "URL d'installation de l'appli GitHub indisponible."
 
-msgid "Please update the AZT collaboration service (installed: {have}, required: {need})."
-msgstr "Veuillez mettre à jour le service de collaboration AZT (installé : {have}, requis : {need})."
-
-msgid "Please update the recorder (client {have}, server requires at least {need})."
-msgstr "Veuillez mettre à jour l'enregistreur (client {have}, le serveur requiert au moins {need})."
-
-msgid "AZT collaboration service is not running or not installed."
-msgstr "Le service de collaboration AZT n'est pas en cours d'exécution ou n'est pas installé."
-
 msgid "not backed up"
 msgstr "non sauvegardé"
 

@@ -1,5 +1,28 @@
 CHANGELOG — A-Z+T Recorder
 
+1.37.15
+  Replaced the recorder's hand-rolled _check_server_compat /
+  _show_collab_warning startup probe with one
+  azt_collab_client.ui.bootstrap() call. The helper now drives
+  the server-APK install/update prompts AND the recorder's own
+  self-update probe (against kent-rasmussen/azt-recorder) in a
+  single canonical flow shared with the rest of the suite.
+  Status strings still land in the collab-screen log via
+  _log_bootstrap_status (replaces _show_collab_warning) so the
+  user can see "Checking installation…" / "Downloading 45%…" /
+  etc. through the existing channel.
+
+  Added REQUEST_INSTALL_PACKAGES to buildozer.spec's
+  android.permissions so the install intent dispatched by
+  check_for_update isn't silently no-op'd; without it Android 8+
+  refuses ACTION_VIEW for application/vnd.android.package-archive.
+
+  Removed three now-unused msgids from aztrecorder.po (the
+  bespoke "Please update the AZT collaboration service",
+  "Please update the recorder", and "AZT collaboration service
+  is not running or not installed." messages); bootstrap()'s own
+  prompt strings live in the client catalog.
+
 1.37.14
   i18n.py now calls azt_collab_client.i18n.ensure_mo before
   gettext.translation, so editing aztrecorder.po in place

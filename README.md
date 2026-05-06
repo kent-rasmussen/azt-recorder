@@ -1,4 +1,4 @@
-# A-Z+T Recorder
+# A-Z+T Recorder -- Record My Wordlist
 
 A mobile field recorder for LIFT XML lexicon databases. Part of the A-Z+T suite of linguistic tools. Works on **Android** (primary) and **iOS** / desktop (secondary).
 

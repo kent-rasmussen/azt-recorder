@@ -16,7 +16,7 @@ requirements = python3,kivy==2.3.1,pillow,sounddevice,soundfile,numpy,certifi,fi
 orientation = portrait
 fullscreen = 0
 
-android.permissions = INTERNET,RECORD_AUDIO,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE,CAMERA,org.atoznback.AZT_COLLAB_ACCESS
+android.permissions = INTERNET,RECORD_AUDIO,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE,CAMERA,REQUEST_INSTALL_PACKAGES,org.atoznback.AZT_COLLAB_ACCESS
 
 # AZT collab ContentProvider lives in the standalone server APK
 # (org.atoznback.aztcollab). The recorder is a pure peer: it

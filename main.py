@@ -3465,7 +3465,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.37.14'
+__version__ = '1.37.15'
 
 
 class LIFTRecorderApp(App):
@@ -3641,9 +3641,12 @@ class LIFTRecorderApp(App):
             # the current path/URI for that langcode (the daemon may
             # have moved/republished it since last launch).
             Clock.schedule_once(lambda dt: self._auto_load_last_project(), 0.3)
-            # One-shot server compatibility / install probe. Defer one
-            # frame so the UI is up before any toast.
-            Clock.schedule_once(lambda dt: self._check_server_compat(), 0.5)
+            # One-shot install/update workflow. bootstrap() runs the
+            # server-APK install/update prompts and the recorder's own
+            # self-update probe in sequence; on Android only, no-op
+            # everywhere else. Defer one frame so the UI is up before
+            # any popup. See azt_collab_client/ui/bootstrap.py.
+            Clock.schedule_once(lambda dt: self._run_bootstrap(), 0.5)
             # Periodically refresh the last-sync indicator so background
             # debounced syncs (request_sync from swipes) become visible
             # without waiting for the next manual sync. project_status
@@ -3732,46 +3735,33 @@ class LIFTRecorderApp(App):
         self._current_langcode = langcode
         self.load_lift(project.lift_path)
 
-    def _check_server_compat(self):
-        """Probe the AZT collab server's version. If it's missing or too
-        old, surface a warning to the user; otherwise stay silent."""
-        try:
-            from azt_collab_client import (
-                check_server_compat, SERVER_APK_INSTALL_URL)
-        except Exception:
-            return
-        result = check_server_compat()
-        if result.get('ok'):
-            return
-        err = result.get('error', '')
-        if err == 'server_too_old':
-            msg = _tr(
-                'Please update the AZT collaboration service '
-                '(installed: {have}, required: {need}).').format(
-                    have=result.get('server_version', '?'),
-                    need=result.get('min_required', '?'))
-            self._show_collab_warning(msg, SERVER_APK_INSTALL_URL)
-        elif err == 'client_too_old':
-            msg = _tr(
-                'Please update the recorder (client {have}, '
-                'server requires at least {need}).').format(
-                    have=result.get('client_version', '?'),
-                    need=result.get('min_required', '?'))
-            self._show_collab_warning(msg)
-        elif err == 'server_unreachable':
-            # Don't nag on every launch — only mention if the user has
-            # already configured collab (i.e. has a langcode set).
-            if peer_pref('collab_langcode'):
-                msg = _tr(
-                    'AZT collaboration service is not running '
-                    'or not installed.')
-                self._show_collab_warning(msg, SERVER_APK_INSTALL_URL)
+    def _run_bootstrap(self):
+        """Drive the suite-wide install/update workflow.
 
-    def _show_collab_warning(self, message, install_url=''):
-        """Surface a non-blocking warning about the AZT collab service.
-        Logs to the collab screen's status bar if it's available, and
-        prints to stderr so desktop devs see it too."""
-        print(f'[collab-warning] {message}', file=sys.stderr)
+        Delegates to ``azt_collab_client.ui.bootstrap`` so the
+        server-APK install/update prompts and the recorder's own
+        self-update probe share one canonical implementation across
+        every peer. Status strings land in the collab-screen log so
+        the user can see "Checking installation…", "Downloading
+        45%…", etc.; popups marshal to the UI thread inside the
+        helper. Non-Android hosts no-op."""
+        from azt_collab_client.ui import bootstrap
+        from appinfo import APP_NAME
+        bootstrap(
+            peer_repo='kent-rasmussen/azt-recorder',
+            peer_version=__version__,
+            peer_asset_filename='azt_recorder.apk',
+            peer_display_name=APP_NAME,
+            on_status=self._log_bootstrap_status,
+            on_error=self._log_bootstrap_status,
+            font_name=_FONT_NAME,
+        )
+
+    def _log_bootstrap_status(self, message):
+        """Surface bootstrap progress / errors. Logs to the collab
+        screen's status bar if it's available, and prints to stderr
+        so desktop devs and Android logcat see it too."""
+        print(f'[bootstrap] {message}', file=sys.stderr)
         try:
             sm = self.root.ids.sm
             collab = sm.get_screen('collab')
