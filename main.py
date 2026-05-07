@@ -2676,8 +2676,6 @@ class CollabScreen(Screen):
         err = result.get('error', 'unknown')
         if err == 'desktop_only':
             self._set_log(_tr('Sync settings UI is desktop-only for now.'))
-        elif err == 'server_apk_not_installed':
-            self._prompt_install_server_apk()
         elif err == 'spawn_exited':
             detail = (result.get('detail')
                       or f"rc={result.get('returncode', '?')}")
@@ -2685,18 +2683,10 @@ class CollabScreen(Screen):
                 'Sync settings UI failed to start: {detail}')
                           .format(detail=detail))
         else:
+            # 'server_apk_not_installed' falls through here; bootstrap()
+            # owns the install prompt at startup, so we don't compete.
             self._set_log(_tr('Could not open sync settings: {error}')
                           .format(error=err))
-
-    def _prompt_install_server_apk(self):
-        """The AZT collab server APK isn't installed. Tell the user and
-        open the install URL in a browser."""
-        from azt_collab_client import SERVER_APK_INSTALL_URL
-        self._set_log(_tr(
-            'AZT collab service not installed. '
-            'Opening install page...'))
-        import webbrowser
-        webbrowser.open(SERVER_APK_INSTALL_URL)
 
     def open_install_page(self):
         """Open the GitHub App installation page."""
@@ -3465,7 +3455,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.37.16'
+__version__ = '1.37.19'
 
 
 class LIFTRecorderApp(App):
@@ -3631,22 +3621,20 @@ class LIFTRecorderApp(App):
             # azt_collab_client transport instead.
             # Handle Android back button / ESC key
             Window.bind(on_keyboard=self._on_back_button)
-            # Auto-load last used LIFT file if it still exists; else
-            # spawn the picker subprocess so the user can choose one.
-            # The recorder no longer hosts an in-process picker — see
-            # azt_collab_picker_migration.xml step 7.
-            # Last-opened project is suite-wide state owned by
-            # azt_collab_client.recent — the langcode the user picked
-            # in any peer app is what we land on. open_project resolves
-            # the current path/URI for that langcode (the daemon may
-            # have moved/republished it since last launch).
-            Clock.schedule_once(lambda dt: self._auto_load_last_project(), 0.3)
             # One-shot install/update workflow. bootstrap() runs the
             # server-APK install/update prompts and the recorder's own
             # self-update probe in sequence; on Android only, no-op
-            # everywhere else. Defer one frame so the UI is up before
-            # any popup. See azt_collab_client/ui/bootstrap.py.
-            Clock.schedule_once(lambda dt: self._run_bootstrap(), 0.5)
+            # everywhere else. Schedule for next frame per
+            # CLIENT_INTEGRATION.md § 3 so the UI is up before any
+            # popup. See azt_collab_client/ui/bootstrap.py.
+            #
+            # Auto-load runs as bootstrap's on_done — client 0.28.5+
+            # only fires on_done when the daemon is reachable, so
+            # the first RPC (last_project) needs no defensive
+            # try/except; if on_done didn't fire, bootstrap is still
+            # parked on its own popup and the user hasn't yet given
+            # us a daemon to talk to.
+            Clock.schedule_once(lambda dt: self._run_bootstrap(), 0)
             # Periodically refresh the last-sync indicator so background
             # debounced syncs (request_sync from swipes) become visible
             # without waiting for the next manual sync. project_status
@@ -3715,13 +3703,15 @@ class LIFTRecorderApp(App):
     def _auto_load_last_project(self):
         """Resolve the suite-wide last-opened project's current
         path/URI via the daemon and load it. Falls through to the
-        picker (start_over) if no project is recorded, the daemon
-        doesn't know it, or the resolution otherwise fails."""
-        try:
-            from azt_collab_client import last_project, open_project
-        except Exception:
-            self.start_over()
-            return
+        picker (start_over) if no project is recorded or the daemon
+        doesn't know it.
+
+        Wired as bootstrap()'s on_done. Client 0.28.5+ guarantees
+        on_done only fires when the daemon is reachable, so the
+        daemon RPCs below (last_project, open_project) need no
+        defensive try/except — if the daemon weren't there,
+        on_done wouldn't have fired and we wouldn't be here."""
+        from azt_collab_client import last_project, open_project
         langcode = last_project()
         if not langcode:
             self.start_over()
@@ -3744,7 +3734,14 @@ class LIFTRecorderApp(App):
         every peer. Status strings land in the collab-screen log so
         the user can see "Checking installation…", "Downloading
         45%…", etc.; popups marshal to the UI thread inside the
-        helper. Non-Android hosts no-op."""
+        helper. Non-Android hosts no-op (on_done fires immediately).
+
+        on_done is wired to ``_auto_load_last_project`` so the
+        recorder's first daemon-touching RPC only fires once
+        bootstrap has confirmed the daemon is reachable (client
+        0.28.5+ contract). No defensive try/except needed around
+        that RPC — if the daemon weren't there, on_done wouldn't
+        have fired."""
         from azt_collab_client.ui import bootstrap
         from appinfo import APP_NAME
         bootstrap(
@@ -3753,6 +3750,7 @@ class LIFTRecorderApp(App):
             peer_asset_filename='azt_recorder.apk',
             peer_display_name=APP_NAME,
             on_status=self._log_bootstrap_status,
+            on_done=self._auto_load_last_project,
             on_error=self._log_bootstrap_status,
             font_name=_FONT_NAME,
         )
@@ -4555,14 +4553,9 @@ class LIFTRecorderApp(App):
             # recorder window with no LIFT; cancel during Start over
             # leaves the previous project loaded. Either way: silent.
             return
-        if err == 'server_apk_not_installed':
-            from azt_collab_client import SERVER_APK_INSTALL_URL
-            import webbrowser
-            self._show_error(_tr(
-                'AZT collab service not installed. '
-                'Opening install page...'))
-            webbrowser.open(SERVER_APK_INSTALL_URL)
-            return
+        # 'server_apk_not_installed' falls through to the generic
+        # error below; bootstrap() owns the install prompt at startup
+        # and we don't compete with it.
         self._show_error(_tr(
             'Could not open project picker: {error}')
                 .format(error=err))
@@ -4595,9 +4588,9 @@ class LIFTRecorderApp(App):
             err = result.get('error', 'unknown')
             if err == 'desktop_only':
                 msg = _tr('Sync settings UI is desktop-only for now.')
-            elif err == 'server_apk_not_installed':
-                msg = _tr('AZT collab service not installed.')
             else:
+                # 'server_apk_not_installed' falls through; bootstrap()
+                # owns the install prompt at startup.
                 msg = _tr(
                     'Could not open sync settings: {error}'
                 ).format(error=err)

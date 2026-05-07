@@ -495,9 +495,6 @@ msgstr "L'interface des paramètres de synchronisation n'a pas pu démarrer : {d
 msgid "Could not open sync settings: {error}"
 msgstr "Impossible d'ouvrir les paramètres de synchronisation : {error}"
 
-msgid "AZT collab service not installed. Opening install page..."
-msgstr "Service de collaboration AZT non installé. Ouverture de la page d'installation…"
-
 msgid "GitHub App install URL not available."
 msgstr "URL d'installation de l'appli GitHub indisponible."
 
@@ -506,9 +503,6 @@ msgstr "non sauvegardé"
 
 msgid "Sync service unavailable: {error}"
 msgstr "Service de synchronisation indisponible : {error}"
-
-msgid "AZT collab service not installed."
-msgstr "Service de collaboration AZT non installé."
 
 msgid "Could not open project picker: {error}"
 msgstr "Impossible d'ouvrir le sélecteur de projet : {error}"

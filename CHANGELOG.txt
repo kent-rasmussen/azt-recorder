@@ -1,5 +1,63 @@
 CHANGELOG — A-Z+T Recorder
 
+1.37.19
+  Adopt the client 0.28.5+ on_done contract: on_done only fires
+  when the daemon is reachable, so peers can drop the defensive
+  "first RPC might race the install popup" wiring.
+
+  - on_start no longer schedules _auto_load_last_project
+    independently. It's now wired as bootstrap()'s on_done
+    callback (main.py:_run_bootstrap), so the very first
+    daemon-touching RPC (last_project) only fires after
+    bootstrap has confirmed reachability.
+  - _auto_load_last_project: dropped the import-failure
+    try/except that fell through to start_over. The function
+    is reached only via bootstrap's successful path, so the
+    azt_collab_client package is already loaded; the import
+    can't fail at this point.
+
+  Net effect on a fresh install: bootstrap's "Install AZT
+  Collaboration?" popup is the only thing on screen until the
+  user installs (or quits) the server APK; no racing
+  ServerUnavailable from a 0.3-second-delayed last_project()
+  call landing alongside the popup.
+
+1.37.18
+  Aligned bootstrap() scheduling with CLIENT_INTEGRATION.md § 3:
+  Clock.schedule_once delay 0.5 → 0 (next frame, not half a second).
+  The user sees the install prompt as soon as the first paint
+  lands instead of after a noticeable beat. Confirmed the three
+  pre-bootstrap install_server_apk_popup callsites flagged in §
+  4 (main.py:2696, :4562, :4599) are already gone — only
+  fall-through comments remain at those regions explaining that
+  bootstrap() owns the install prompt. App.title is set to
+  APP_NAME at main.py:3462 so the bootstrap "Quit AZT Recorder"
+  button label fills in correctly per § 6.
+
+1.37.17
+  Removed three pre-bootstrap "server APK not installed" handling
+  sites that were competing with bootstrap()'s install prompt and
+  producing overlapping popups + a no-progress-visible window:
+
+    - open_server_ui at main.py:2676 — dropped the
+      'server_apk_not_installed' branch and the
+      _prompt_install_server_apk method it called.
+    - _handle_pick at main.py:4552 — dropped the matching
+      branch + browser open.
+    - go_collab at main.py:4595 — dropped the matching toast.
+
+  All three now fall through to their generic catch-all error
+  message; bootstrap()'s startup prompt is the only install path,
+  and its progress (via check_for_update with
+  install_target_package=SERVER_PACKAGE_NAME) flows through the
+  recorder's on_status sink uncontested. Polling fires
+  "Installed." / "Install pending." as the system installer
+  finishes.
+
+  Removed the now-unused msgids "AZT collab service not installed.
+  Opening install page..." and "AZT collab service not installed."
+  from aztrecorder.po.
+
 1.37.16
   Updated CLAUDE.md (this repo) and the umbrella ~/bin/AZT/CLAUDE.md
   to drop the patch_p4a.sh step from the documented build commands.
