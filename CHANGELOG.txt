@@ -1,5 +1,13 @@
 CHANGELOG — A-Z+T Recorder
 
+1.37.16
+  Updated CLAUDE.md (this repo) and the umbrella ~/bin/AZT/CLAUDE.md
+  to drop the patch_p4a.sh step from the documented build commands.
+  The pkg-config leak fix now lives in the local kivy recipe override
+  at ~/bin/raspy/buildozer_tweaks/recipes/kivy/__init__.py, so the
+  per-clean fix-up step is no longer needed; patch_p4a.sh stays as a
+  no-op tombstone for older build scripts.
+
 1.37.15
   Replaced the recorder's hand-rolled _check_server_compat /
   _show_collab_warning startup probe with one

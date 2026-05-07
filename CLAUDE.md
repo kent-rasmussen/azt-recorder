@@ -79,17 +79,19 @@ plus `buildozer`; see `README.md` "Setup" section.
 ### Android build
 
 ```bash
-bash build.sh                  # buildozer android clean → patch_p4a.sh → debug build
+bash build.sh                  # buildozer android clean → debug build
 # or step by step:
 buildozer android clean
-./patch_p4a.sh                 # MUST re-run after every clean (suppresses host pkg-config)
 PKG_CONFIG_PATH="" PKG_CONFIG_LIBDIR="" PKG_CONFIG=false buildozer android debug
 buildozer android deploy run logcat
 ```
 
-`patch_p4a.sh` patches the p4a Kivy recipe to stop host pkg-config
-from leaking x86_64 system headers into the cross-compilation. Without
-it, the build picks up `/usr/include/x86_64-linux-gnu` and fails.
+The pkg-config leak (host x86_64 headers bleeding into the cross-
+compile) is now patched in the local kivy recipe override at
+`~/bin/raspy/buildozer_tweaks/recipes/kivy/__init__.py`
+(`PatchedKivyRecipe.get_recipe_env`), so no per-clean fix-up step is
+needed. `patch_p4a.sh` is kept as a no-op tombstone so older build
+scripts that still call it don't break.
 
 `buildozer.spec` reads the version from `main.py`'s `__version__`
 string via regex; bump there, not in the spec.
