@@ -1,5 +1,55 @@
 CHANGELOG — A-Z+T Recorder
 
+1.38.0
+  Minor bump for a predistribution check. Rolls up the 1.37.x
+  patch series since 1.37.0:
+    - bootstrap() install/update workflow wired into App.on_start
+      with on_done as the seam for the first daemon-touching RPC.
+    - Three pre-bootstrap "server APK not installed" sites and the
+      _check_server_compat / _show_collab_warning startup probe
+      removed so bootstrap's modal popup is the single install
+      surface.
+    - Share-this-app moved into azt_collab_client.ui.share_running_apk.
+    - Recorder i18n.py now calls azt_collab_client.i18n.ensure_mo
+      so editing aztrecorder.po auto-compiles the .mo on next
+      launch (no msgfmt step).
+    - Filter Words click handler regression fix (zeroed
+      unrecorded_toggle and filter_ok_btn heights on collapse).
+    - openclipart / FreeSVG / Wikimedia auto-fetch disabled;
+      manual buttons still work.
+    - Translation catalog updated; obsolete msgids removed.
+
+1.37.24
+  Disabled auto-fetch from openclipart, FreeSVG, and Wikimedia.
+  _auto_web_images now returns immediately; the manual
+  fetch_openclipart / fetch_freesvg / fetch_wikimedia buttons in
+  the image picker still call those services on demand. Restore
+  the auto-fetch loop when the upstream APIs stabilise.
+
+1.37.23
+  Filter Words click handler regression: same shape as the 1.37.11
+  bug, two more children. After 1.37.11 zeroed cawl_label /
+  gloss_search_label heights on collapse, the filter panel still
+  had two dp(56)-tall children that ignored the zeroed parent row:
+
+    - unrecorded_toggle (UnrecordedToggle root rule pins
+      size_hint_y: None, height: dp(56))
+    - filter_ok_btn (RecBtn@Button root rule pins
+      size_hint_y: None, height: dp(52))
+
+  filter_bottom_row.height = 0 didn't shrink them because Kivy's
+  BoxLayout doesn't override an explicit child height to fit a
+  zero-height parent. Their bounding boxes ended up in the y-range
+  of the Filter Words button row above; UnrecordedToggle's custom
+  on_touch_down (line 1129) returns True for any touch in
+  collide_point, so the toggle silently swallowed the click before
+  it reached toggle_filter_panel.
+
+  Fix: extend _collapse_filter_panel and _expand_filter_panel to
+  zero / restore unrecorded_toggle.height and filter_ok_btn.height
+  alongside the existing label/input zeroing. Same canonical
+  pattern as the rest of the panel, just two more child IDs.
+
 1.37.22
   Pointed the on_start bootstrap comment at the canonical client
   contract (azt_collab_client/CLAUDE.md § Bootstrap) instead of

@@ -1513,16 +1513,15 @@ class ImagePickerScreen(Screen):
             target=self._do_openclipart, args=(cell_h,), daemon=True).start()
 
     def _auto_web_images(self, cell_h):
-        """Background auto-fetch from web sources if internet available."""
-        try:
-            from azt_collab_client import is_online
-            if not is_online():
-                return
-        except Exception:
-            return
-        self._do_openclipart(cell_h)
-        self._do_wikimedia(cell_h)
-        self._do_freesvg(cell_h)
+        """Background auto-fetch from web sources — disabled for now.
+
+        openclipart / FreeSVG / Wikimedia auto-fetch is off because the
+        upstream APIs have been flaky / abusive lately (rate limits,
+        empty responses, slow first-byte). The manual
+        ``fetch_openclipart`` / ``fetch_freesvg`` / ``fetch_wikimedia``
+        buttons in the image picker still work; restore the auto-fetch
+        loop here when the upstream story stabilises."""
+        return
 
     # ── openclipart ───────────────────────────────────────────────────────
 
@@ -2099,8 +2098,12 @@ class ConfigScreen(Screen):
         if bottom_row:
             bottom_row.height = dp(56)
             bottom_row.opacity = 1
+        toggle = self.ids.get('unrecorded_toggle')
+        if toggle:
+            toggle.height = dp(56)
         ok_btn = self.ids.get('filter_ok_btn')
         if ok_btn:
+            ok_btn.height = dp(56)
             ok_btn.disabled = False
         # dp(36)*2 labels + dp(48)*2 inputs + dp(56) bottom row + dp(8)*4 spacing
         panel.height = dp(256)
@@ -2120,7 +2123,11 @@ class ConfigScreen(Screen):
         # bounds. The "CAWL number…" / "Gloss search…" Labels
         # (height: dp(36)) were ending up inside the filter button
         # row's y-range and blocking its on_release. Zero everything,
-        # including the Labels.
+        # including the Labels — and the dp(56)-tall UnrecordedToggle
+        # / OK button inside filter_bottom_row, whose
+        # `<UnrecordedToggle>:` / `<RecBtn@Button>:` root rules pin
+        # `size_hint_y: None` + an explicit height so they don't
+        # shrink with their (zeroed) parent row.
         for cid in ('cawl_label', 'gloss_search_label'):
             w = self.ids.get(cid)
             if w:
@@ -2135,8 +2142,12 @@ class ConfigScreen(Screen):
         if bottom_row:
             bottom_row.height = 0
             bottom_row.opacity = 0
+        toggle = self.ids.get('unrecorded_toggle')
+        if toggle:
+            toggle.height = 0
         ok_btn = self.ids.get('filter_ok_btn')
         if ok_btn:
+            ok_btn.height = 0
             ok_btn.disabled = True
         panel.height = 0
         panel.opacity = 0
@@ -3455,7 +3466,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.37.22'
+__version__ = '1.38.0'
 
 
 class LIFTRecorderApp(App):
