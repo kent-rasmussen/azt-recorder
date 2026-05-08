@@ -3455,7 +3455,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.37.19'
+__version__ = '1.37.22'
 
 
 class LIFTRecorderApp(App):
@@ -3624,9 +3624,9 @@ class LIFTRecorderApp(App):
             # One-shot install/update workflow. bootstrap() runs the
             # server-APK install/update prompts and the recorder's own
             # self-update probe in sequence; on Android only, no-op
-            # everywhere else. Schedule for next frame per
-            # CLIENT_INTEGRATION.md § 3 so the UI is up before any
-            # popup. See azt_collab_client/ui/bootstrap.py.
+            # everywhere else. Schedule for next frame so the UI is
+            # up before any popup. See azt_collab_client/CLAUDE.md
+            # § Bootstrap and azt_collab_client/ui/bootstrap.py.
             #
             # Auto-load runs as bootstrap's on_done — client 0.28.5+
             # only fires on_done when the daemon is reachable, so

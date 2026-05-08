@@ -1,5 +1,23 @@
 CHANGELOG — A-Z+T Recorder
 
+1.37.22
+  Pointed the on_start bootstrap comment at the canonical client
+  contract (azt_collab_client/CLAUDE.md § Bootstrap) instead of
+  azt-collab/docs/CLIENT_INTEGRATION.md. The package-internal
+  CLAUDE.md is the contract reachable through the symlink, so
+  peer-side comments should cite that. No behaviour change.
+
+  Also updated azt_collab_client/CLAUDE.md's bootstrap example to
+  delay 0 (next frame) and to wire on_done to the first
+  daemon-touching RPC, matching the 0.28.5+ on_done-only-fires-
+  when-reachable contract.
+
+1.37.21
+  Debug bump for a fresh build.
+
+1.37.20
+  Debug bump for a fresh build.
+
 1.37.19
   Adopt the client 0.28.5+ on_done contract: on_done only fires
   when the daemon is reachable, so peers can drop the defensive
