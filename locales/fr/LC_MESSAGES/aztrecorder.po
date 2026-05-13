@@ -4,10 +4,10 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: azt-recorder 1.37.12\n"
+"Project-Id-Version: azt-recorder 1.41.11\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-05 00:00+0000\n"
-"PO-Revision-Date: 2026-05-05 00:00+0000\n"
+"POT-Creation-Date: 2026-05-13 00:00+0000\n"
+"PO-Revision-Date: 2026-05-13 00:00+0000\n"
 "Last-Translator: \n"
 "Language-Team: French\n"
 "Language: fr\n"
@@ -54,9 +54,6 @@ msgstr "Recherche de glose (filtrer par texte de glose)"
 
 msgid "search gloss text…"
 msgstr "rechercher une glose…"
-
-msgid "Change image repository"
-msgstr "Changer le dépôt d’images"
 
 msgid "Setup Collaboration"
 msgstr "Configurer la collaboration"
@@ -113,15 +110,6 @@ msgstr "Nom d’utilisateur GitLab"
 
 msgid "Save GitLab credentials"
 msgstr "Enregistrer les identifiants GitLab"
-
-msgid "Publish this project"
-msgstr "Publier ce projet"
-
-msgid "Language code (repo name)"
-msgstr "Code de langue (nom du dépôt)"
-
-msgid "Publish"
-msgstr "Publier"
 
 msgid "Last operation"
 msgstr "Dernière opération"
@@ -301,12 +289,6 @@ msgstr "Échec de l’autorisation : {error}"
 msgid "No project loaded."
 msgstr "Aucun projet chargé."
 
-msgid "Connect to {host} first."
-msgstr "Connectez-vous d’abord à {host}."
-
-msgid "Enter a language code first."
-msgstr "Saisissez d’abord un code de langue."
-
 msgid "Could not open file:\n{error}"
 msgstr "Impossible d’ouvrir le fichier :\n{error}"
 
@@ -471,9 +453,6 @@ msgstr "Collez l'adresse du dépôt ici"
 msgid "Select Project"
 msgstr "Sélectionner un projet"
 
-msgid "Advanced"
-msgstr "Avancé"
-
 msgid "Open Sync Settings"
 msgstr "Ouvrir les paramètres de synchronisation"
 
@@ -506,3 +485,22 @@ msgstr "Service de synchronisation indisponible : {error}"
 
 msgid "Could not open project picker: {error}"
 msgstr "Impossible d'ouvrir le sélecteur de projet : {error}"
+
+# ── v1.41.x additions ──────────────────────────────────────────────────────
+
+msgid "This project"
+msgstr "Ce projet"
+
+# "Caching images: {cached} / {total} (network in use — please stay online)"
+# lives in azt_collab_client/locales/<lang>/azt_collab_client.po — shared
+# with the daemon settings UI's cache indicator. The recorder's _tr()
+# falls through to the client catalog for this msgid; no peer-side copy.
+
+msgid "Sync interrupted, please try again."
+msgstr "Synchronisation interrompue, veuillez réessayer."
+
+msgid "Go to {label} number ({lo}-{hi})"
+msgstr "Aller au numéro de {label} ({lo}-{hi})"
+
+msgid "list"
+msgstr "liste"

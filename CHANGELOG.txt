@@ -1,5 +1,828 @@
 CHANGELOG — A-Z+T Recorder
 
+1.41.13
+  Cache-progress indicator string switched to the shared msgid
+  already in azt_collab_client/locales (the daemon settings UI
+  uses the same indicator). Recorder's _tr() falls through to
+  the client catalog, so the French translation comes for free
+  from azt_collab_client.po — no peer-side duplicate. Wording
+  is also slightly stronger than what I had:
+
+      "Caching images: {cached} / {total}
+       (network in use — please stay online)"
+
+  Removed the duplicate entry from aztrecorder.po; left a
+  pointer comment in its place.
+
+1.41.12
+  Translations refresh (locales/fr/LC_MESSAGES/aztrecorder.po):
+
+  - Bumped header version + PO-Revision-Date.
+  - Removed obsolete strings whose call-sites are gone:
+    "Publish this project", "Language code (repo name)",
+    "Publish", "Change image repository", "Collaborators",
+    "Grant collaborator access", "Connect to {host} first.",
+    "Enter a language code first.", "Advanced".
+  - Added new strings used in 1.41.x:
+      "This project"                                  → "Ce projet"
+      "Caching images: {cached} / {total} (network in use)"
+          → "Mise en cache des images : … (réseau en cours d’utilisation)"
+      "Sync interrupted, please try again."
+          → "Synchronisation interrompue, veuillez réessayer."
+      "Go to {label} number ({lo}-{hi})"
+          → "Aller au numéro de {label} ({lo}-{hi})"
+      "list"                                          → "liste"
+
+  The .mo gets rebuilt automatically on next launch via the
+  client's ensure_mo (mtime check: .po now newer than .mo).
+
+1.41.11
+  Cache-progress poll interval dropped from 5s to 1s. Until
+  daemon-side memoization lands (NOTES_TO_DAEMON.md filing),
+  the cost is one extra os.walk-per-second on the server APK;
+  ~30ms of daemon CPU per second on a fast device, ~100ms on a
+  slow tablet. Acceptable during an active prefetch where the
+  daemon is doing real network work; will become free once the
+  daemon TTL-caches the result.
+
+1.41.10
+  Diagnostic logging for the cache-progress indicator (user
+  reported "I don't see it" on 1.41.9). Added [cache-status]
+  prints at four decision points so logcat shows which branch
+  is hiding the indicator:
+
+  - [image-prefetch] started; langcode=… — prefetch fired
+    (with the langcode the cache poll will use).
+  - [cache-status] poll starting for langcode=… — poll
+    actually kicked off.
+  - [cache-status] daemon reports cached=… total=… image_repo=…
+    — every poll tick, what the daemon returned.
+  - [cache-status] total=0 → hiding indicator (…) — the most
+    common "indicator doesn't appear" branch, with hints on
+    the candidate causes (endpoint missing on this server APK,
+    no image_repo configured, index transport still broken).
+
+  No behavior change beyond logging; the indicator decisions
+  themselves are unchanged from 1.41.9.
+
+1.41.9
+  Cache-progress indicator (CLIENT_INTEGRATION.md § 10.5).
+  When a project loads and the recorder kicks off the CAWL
+  prefetch, a label between the top bar and the entry image
+  shows "Caching images: {M} / {N} (network in use)" — sourced
+  from cawl_cache_status(langcode) polled every 5s on a worker
+  thread. The label auto-hides when caching catches up
+  (cached >= total) or when the daemon reports no
+  configured image_repo. The polling Clock event is cancelled
+  on app stop / project switch so it doesn't leak.
+
+  Downloading 1700 images at a few hundred KB each can take
+  many minutes on a field link; without this indicator the
+  user has no way to tell the daemon is using network in the
+  background and can naturally disconnect Wi-Fi between
+  recording gestures.
+
+1.41.8
+  ConfigScreen top bar now shows two version numbers instead
+  of one:
+
+      v{__version__} · client {azt_collab_client.__version__}
+
+  Both values are baked into the recorder APK at build time —
+  the first from main.py, the second from the symlinked
+  azt_collab_client/__init__.py at build time. No RPC; no
+  round-trip; no consolidation across the daemon's own
+  settings UI (which shows its own APK's equivalents in its
+  own top bar). Each settings surface is the canonical
+  display for its own APK.
+
+1.41.7
+  Circuit-breaker in _CAWLImageResolver._pull: after 10
+  consecutive failures (FileNotFoundError, ValueError, or any
+  other exception), subsequent pulls short-circuit to '' for
+  the life of the LIFTDatabase instance. Prevents the prefetch
+  worker from grinding through ~1700 wasted Binder round-trips
+  when CAWL is systemically broken (transport too large,
+  basenames don't round-trip, server APK doesn't serve the
+  endpoint, etc.). Breaker resets on project switch or app
+  restart. Logs once when tripped.
+
+1.41.6
+  Diagnostic logging for the post-Phase-3 CAWL regression
+  (no images, no [cawl] lines in `logcat -s python`).
+  lift.py:_CAWLImageResolver now prints a one-shot summary in
+  _load (langcode, files-from-daemon, basenames-kept, sample
+  entries) and a first-of-each-kind error log in _pull
+  (FileNotFoundError vs. ValueError vs. other). main.py's
+  prefetch worker logs even when nothing got warmed. Filed the
+  observed regression in NOTES_TO_DAEMON.md with the candidate
+  failure modes the daemon team should look at; the same NOTES
+  entry covers the picker's "Scan QR" button being inert on
+  this release.
+
+  No behavior change beyond logging.
+
+1.41.5
+  Two contract-driven changes, both contingent on azt_collabd
+  0.41.0+ for the server APK:
+
+  § 12 (Commit identity, daemon 0.40.0+): contributor name is
+  daemon-owned end-to-end; peers no longer pass `contributor=`
+  on the wire. Dropped the arg from every RPC call site —
+  init_project, sync_project (and its retry path), request_sync.
+  Removed the get_contributor() call in do_sync and the
+  auto-commit-sync path. _try_auto_publish keeps the slug/credit
+  pre-checks but its init_project call now omits the contributor
+  arg too.
+
+  Also added S.CONTRIBUTOR_UNSET routing in do_sync's
+  _on_sync_done — treats it like AUTH_REQUIRED: toast the
+  translated message and open_server_ui() so the user can set
+  their name on the daemon settings UI (where set_contributor
+  is wired). Auto-sync silently silences this code the same way
+  it silences other config-class failures per the daemon-client
+  contract.
+
+  § 13 Phase 3 strip (daemon 0.41.0 ships the replacements):
+  removed CollabScreen's per-project surfaces — Publish section
+  + Collaborators section + their handlers. Project-bound work
+  now delegates to the daemon settings UI via the existing
+  "Open Sync Settings" button (now under a "This project"
+  section label, was "Advanced").
+
+  Deleted from CollabScreen:
+  - KV: publish_section (langcode_input, publish_url_label,
+    Publish button) + collaborators_section ("Grant collaborator
+    access" button) + their SectionLabels.
+  - Python: do_publish, update_publish_url,
+    _credentials_configured_for_host, grant_collaborator. The
+    update_publish_url calls from set_host /
+    save_gitlab_credentials / on_enter dropped too.
+  - on_enter: stopped reading project.repo_slug + open_project
+    for textbox seed; stopped the publish_section /
+    collaborators_section visibility branches.
+  - _save_settings: stopped writing set_repo_slug (daemon UI
+    handles slug edits now).
+
+  Kept on CollabScreen: committer name input (peer-side first-
+  run convenience per § 12 closing paragraph), GitHub / GitLab
+  credentials sections (separable strip-out for a later release),
+  Open Sync Settings button (the delegation entry point), the
+  log surface. _show_backup_warning still routes to go_collab
+  (which routes the user toward Open Sync Settings).
+
+  Sequencing note (per NOTES_TO_DAEMON.md "For the peer team"):
+  this release should not ship until server APK 0.41.0 is
+  reasonably deployed — a 1.41.5 peer paired with a pre-0.41.0
+  server APK loses publish + collaborator-invite entirely. The
+  recorder code is now Phase-3-ready; release timing is a
+  field-coordination call, not a build call.
+
+1.41.4
+  CAWL Stage 2 migration: image *binaries* via daemon, not direct
+  raw.githubusercontent.com fetches.
+
+  - lift.py:_CAWLImageResolver now pulls each binary through
+    CAWLHandle(langcode, basename).open_read() into a per-
+    LIFTDatabase tmp dir. Public API returns *local paths*
+    instead of URLs:
+      get_url       → get_path
+      get_all_urls  → get_all_paths
+      all_cawl_urls → all_cawl_basenames
+      all_image_urls→ all_image_paths
+    Resolver's internal map is now cawl→basename (was cawl→URL);
+    URLs from cawl_index().files[].url are ignored entirely per
+    the contract's "informational only from Stage 2 onward."
+  - main.py: dropped _download_remote_image (no peer-side HTTP
+    fetch of CAWL bytes left). _save_remote_image simplified —
+    img_path is always a local file now (project's images/, an
+    Android URI pull-through, or a CAWL pull-through tmpfile);
+    the texture-fallback branch handles the race where the
+    pull-through file vanished. Image picker's _download_and_set
+    branches on http vs. local path so web-source URLs
+    (openclipart/freesvg/wikimedia) still work via urlopen.
+  - main.py: _get_image_cache_dir now returns a per-session
+    tempfile.mkdtemp(). Created in on_start, rmtree'd in
+    on_stop. The legacy durable cache at
+    <user_data_dir>/image_cache/ is rmtree'd on startup as a
+    one-shot cleanup of pre-1.41.4 installs (Stage 2 anti-
+    pattern; daemon now owns the canonical CAWL cache under
+    $AZT_HOME/cawl/<owner>/<repo>/images/, shared across peers).
+  - Image-prefetch worker rewritten: instead of N urlopens to
+    raw.githubusercontent and N writes to a peer-private cache,
+    it triggers CAWLHandle.open_read() per basename so the
+    daemon warms its own cache (lock-coalesced across peers).
+  - Verification per azt_collab_client/CLAUDE.md:
+    `grep raw.githubusercontent.com` returns zero hits in CAWL
+    code paths; the only remaining mentions are doc comments
+    and CHANGELOG history. The peer's user_data_dir/image_cache/
+    directory doesn't get created on fresh installs.
+  - NOTES_TO_DAEMON.md "Stage 2 still pending" section updated
+    to "completed in 1.41.4"; the daemon-side ask (confirm
+    kent-rasmussen/images_CAWL on main is the suite default)
+    stands.
+
+  Also wired the per-project repo_slug field per
+  CLIENT_INTEGRATION.md § 11 (daemon 0.39.0+ ships
+  Project.repo_slug). CollabScreen's publish textbox now seeds
+  from project.repo_slug or _current_langcode (was: just
+  langcode), and _save_settings persists user edits via
+  set_repo_slug(langcode, slug). _try_auto_publish prefers the
+  slug over the langcode when composing the publish URL. The
+  override now survives relaunch instead of being session-only
+  (the regression flagged in the 1.41.3 NOTES item is closed —
+  daemon-side per-project field replaced the dropped
+  peer_pref).
+
+  Fixed: CollabScreen's "Grant collaborator access" button
+  (CLIENT_INTEGRATION.md § 12) was invisible due to the exact
+  Kivy hide/show bug documented in the global CLAUDE.md —
+  setting height = minimum_height synchronously from a
+  height: 0 starting state reads 0 (layout hasn't computed
+  yet). Replaced with explicit computed height
+  (dp(32) + dp(52) + dp(8) = dp(92)).
+
+1.41.3
+  Drop peer-side caches of daemon-owned data, and persist two UX
+  prefs that workflows depend on:
+
+  - peer_pref('vernlang') removed entirely. The langcode for the
+    loaded project is the server-authoritative _current_langcode
+    (set by _handle_pick / _auto_load_last_project before
+    reaching load_lift); the local cache was an unreachable
+    third-tier fallback that wrote-only, and persisting
+    daemon-owned identity locally violates the
+    no-daemon-owned-caches rule. _reload_and_restore loses the
+    same fallback.
+  - peer_pref('collab_langcode') removed. Was a suite-wide scalar
+    holding the publish-textbox value, which is per-project data
+    of the wrong shape. CollabScreen.on_enter seeds the textbox
+    from _current_langcode; _try_auto_publish reads
+    _current_langcode directly; _save_settings no longer writes
+    the textbox. Override-the-slug feature (user wants a repo
+    name different from the LIFT vernlang) is now session-only
+    until the daemon adds a per-project repo_slug field — see
+    azt_collab_client/NOTES_TO_DAEMON.md.
+  - _migrate_prefs_to_suite_store drops both keys explicitly from
+    the legacy peer-private prefs.json on next launch, and also
+    clears any pre-existing values in the suite store
+    (config.json::peer_prefs) that earlier releases wrote.
+
+  Added persistence for two UX prefs that workflows pin and
+  shouldn't reset:
+
+  - peer_pref('cawl_filter') — RecorderController seeds
+    self.cawl_filter from the suite store on load. Every
+    user-driven set point (filter panel close, apply_cawl,
+    ConfigScreen apply_and_go, goto-dialog "Clear filters")
+    writes through. The transient clear during
+    _reload_and_restore is left as a per-session UI affordance —
+    not persisted.
+  - peer_pref('gloss_langs') — RecorderController seeds
+    self.active_gloss_langs from the saved selection intersected
+    with the project's available gloss_langs (LIFT-determined).
+    Falls back to top-3 of all_gloss_langs when the intersection
+    is empty (saved langs don't exist in this project). The
+    gloss-overlay toggle writes through.
+
+  Removed dead App.list_projects — scanned self.user_data_dir/
+  projects/ (peer-private sandbox) for LIFT files; zero callers
+  anywhere in the recorder, and the daemon's list_projects RPC
+  has been the authoritative source since the peer-of-daemon
+  migration. Same anti-pattern as the prefs cleanup above.
+
+  Migrated the CAWL image-URL resolver to the daemon (Stage 1):
+  lift.py's _CAWLImageResolver no longer hits api.github.com
+  directly. It now calls azt_collab_client.cawl_index(langcode);
+  the daemon owns the index cache and the image_repo resolution
+  (Project.cawl_image_repo with daemon-global fallback). The
+  hard-coded _DEFAULT_IMAGE_REPO = 'kent-rasmussen/images_CAWL'
+  and _GITHUB_BRANCH = 'main' constants are gone, along with the
+  per-peer .cawl_image_urls.json disk cache, the urllib/ssl/
+  certifi imports, the ConfigScreen "Change image repository"
+  TextInput + summary label + toggle, the _imgrepo_open class
+  var, the _collapse_imgrepo_panel / toggle_imgrepo_panel
+  handlers, the _image_repo() method, and the image_repo= arg
+  to LIFTDatabase. peer_pref('image_repo') is migration-dropped
+  the same way the other daemon-owned keys are. Stage 2 (image
+  *binaries* via CAWLHandle.open_read() instead of direct
+  raw.githubusercontent fetches) is a separate follow-up
+  flagged in NOTES_TO_DAEMON.md.
+
+  Filed three NOTES_TO_DAEMON.md items: (1) a standing notice
+  enumerating the fields the peer now treats as daemon-sole-
+  source (project langcode, last_project, contributor name, UI
+  language, credentials, registry) with the specific failure
+  modes if the daemon returns wrong/empty; (2) the per-project
+  repo_slug field needed to restore the override-the-publish-
+  slug feature; (3) the recorder's pre-migration CAWL defaults
+  (kent-rasmussen/images_CAWL on main) for the daemon team to
+  confirm/bake in as the AZT-suite-wide default, with Stage 2
+  binary-fetch migration tracked as recorder-side outstanding.
+
+  The rule itself ("peer never caches daemon-owned data") lives
+  in memory (feedback_no_daemon_owned_caches.md).
+
+1.41.2
+  Switch _save_image_for_entry's URI write to
+  MediaHandle.atomic_open_write — symmetric with 1.41.1's LIFT save
+  change. The contract's "atomic_open_write — when peers need
+  cross-process atomicity" section (new) explicitly calls out that
+  plain open_write is now the older same-process-lock-only contract
+  and "peers should prefer atomic_open_write for any URI write that
+  could race." Image writes race with the daemon's merge-output
+  on binary-conflict resolution (non-lift-modify-modify), so this
+  closes that window the same way 1.41.1 closed it for LIFT saves.
+
+  Memory cost is ~1.33× the image size during base64 encode + send
+  per the contract — trivial after the existing 1284px PIL cap.
+
+1.41.1
+  Switch lift.py:_save to LiftHandle.atomic_open_write (new in the
+  client contract). Fully closes the peer-side truncation bug we
+  filed (the "1-entry post-merge LIFT" symptom) on BOTH transports:
+
+  - Filesystem paths: every save is now tempfile + fsync +
+    os.replace via the client's helper. Random-suffixed tempfile
+    (no collision when two saves overlap in process), atomic
+    rename. Replaces the old manual tmp+fsync+rename which used a
+    fixed '.tmp' suffix that *could* collide.
+  - URI projects: atomic_open_write on URI now POSTs the bytes
+    to /v1/projects/<lang>/atomic_commit (shipped daemon-side in
+    0.36.0+, client wrapper atomic_commit_bytes wired up in
+    lift_io.py). Daemon writes the bytes atomically into its own
+    filesDir + commits. Cross-process race with daemon's own merge
+    output is closed: whichever side commits last wins, neither
+    sees a torn read.
+
+  Background: the old _save did manual tmp+fsync+rename on
+  filesystem (atomic but collision-prone if two saves raced) and
+  a plain open_write on URI (no protection against same-process
+  FD races — the documented signature for the truncation symptom
+  was two FDs writing concurrently from offset 0, with one
+  entry's serialisation mid-embedded in another). The client's
+  atomic_open_write + the new atomic_commit RPC together close
+  both windows.
+
+  MIN_SERVER_VERSION in the symlinked client is now 0.36.0,
+  enforcing the daemon-side endpoint. Older daemons get
+  server_too_old from check_server_compat — no quiet fallback to
+  a destructive write path.
+
+1.41.0
+  Image writes now work on Android URI projects, AND swipes no
+  longer fire a sync RPC when nothing changed. Two behaviour shifts
+  in one cut — the image-write reactivation per the 0.35.2 client
+  contract, plus a dirty-flag gate on the swipe-commit so pure
+  browse swipes are free.
+
+  Backstory: 0.18.0 → 0.35.1 client contracts gated peer-side image
+  writes behind a `MediaHandle.open_write` PermissionError for
+  kind='image' under a "daemon owns image additions" rule. That
+  contract changed in 0.35.2 — daemon's AZTCollabProvider now
+  auto-creates images/ on first write the same way audio/ does, and
+  the client PermissionError was removed. The recorder still had
+  its four `is_uri: return` gates and silently no-op'd image
+  selection on Android. This release removes those.
+
+  - New App._save_image_for_entry(pil_img, entry) helper handles
+    both URI projects (MediaHandle('content://…/images/<basename>',
+    'image').open_write() + prime the local URI-image cache for
+    immediate display) and desktop (direct images_dir write). Calls
+    set_illustration to update the LIFT, mirrors path/href onto the
+    entry dict, and marks the recorder dirty.
+  - _download_and_set (image picker URL source) and _copy_and_set
+    (image picker local-file source) collapse to "prepare PIL image
+    → call helper". The `is_uri: return` + `[image] skipping local
+    save` print path is gone.
+  - _save_remote_image (swipe-time auto-bake) routes through the
+    same helper on URI projects. Idempotency check now keys on
+    entry['illustration_href'] == db.imagename(entry) rather than
+    a filesystem-path check (which never matched on URI).
+  - The three workers under _save_remote_image
+    (_copy_cached_to_images, _save_texture_to_file,
+    _download_remote_image) now just prepare a PIL image and call
+    the helper — no more direct filesystem writes inside the
+    workers, no per-worker set_illustration / entry-dict-update
+    duplication.
+
+  Dirty-flag commit gating:
+  - RecorderController._dirty (new, default False): flipped True
+    by stop_recording's set_audio path and by
+    _save_image_for_entry's success path. Cleared by nav_prev /
+    nav_next after they fire _auto_commit_sync.
+  - nav_prev / nav_next: skip _save_remote_image AND
+    _auto_commit_sync when _dirty is False. Pure browse swipes
+    cost nothing now.
+  - Matches the user's mental model: record → re-record → swipe
+    commits the bundle. Browse → nothing happens.
+
+  Other:
+  - lift.py: updated image_target docstring (no longer claims
+    image writes raise PermissionError) and the _uri_image_cache
+    comment (covers writes too now).
+  - MIN_SERVER_VERSION is already 0.35.4 in the client; nothing to
+    bump.
+
+1.40.0
+  Bring do_sync._on_sync_done into full conformance with the
+  azt_collab_client/CLAUDE.md "Peer contract: routing on sync
+  results" do_sync example (lines 387-430). Previously the
+  recorder only handled NOT_A_REPO (route), PULLED (reload),
+  PUSHED (mark installed); the remaining contract branches
+  fell through silently, leaving the user to wonder why nothing
+  happened.
+
+  - NO_REMOTE now routes to go_collab (the server's settings UI
+    hosts publish), matching the contract's "publish settings"
+    intent. Was: silently ignored.
+  - AUTH_REQUIRED now routes to go_collab (which hosts GitHub
+    Connect). Was: silently ignored.
+  - APP_NOT_INSTALLED / APP_SUSPENDED / REPO_NOT_AUTHORIZED now
+    open the actionable URL from params['url']
+    (webbrowser.open), falling back to go_collab if the param is
+    missing. Was: silently ignored.
+  - JOB_INTERRUPTED now does one silent retry on a fresh worker
+    thread; if the retry also returns JOB_INTERRUPTED, surface a
+    "Sync interrupted, please try again" toast. Was: silently
+    ignored.
+  - Restructured the handler to match the contract's elif-chain
+    shape: AUTH_REFRESH_STALE toast first (no return), then
+    routing branches (each returns), then the success-path
+    follow-ups (refresh indicator, PULLED reload, PUSHED mark).
+
+  This is a meaningful behavior change for user-initiated sync;
+  bumping the minor version (1.40.0). The auto-sync side is
+  unchanged — it uses request_sync (fire-and-forget) and doesn't
+  consume Result codes.
+
+1.39.9
+  Re-read the just-updated azt_collab_client/CLAUDE.md. Two
+  refinements to do_sync._on_sync_done to match the new
+  do_sync example structure (lines 387-430 of the contract):
+
+  - AUTH_REFRESH_STALE check moved to FIRST in _on_sync_done.
+    Per contract: it piggybacks on the primary code (PUSHED+STALE,
+    NOT_A_REPO+STALE, etc.), so the deadline warning must surface
+    before any routing branch consumes the result. Toast only —
+    DO NOT route to settings (the toast text already names
+    GitHub Connect as the next step).
+  - SERVER_UNAVAILABLE / SERVER_ERROR toast now uses
+    translate_result(result) (per the contract example), not a
+    hardcoded English string.
+
+  Defensive try/except around sync_project in the worker thread:
+  considered, skipped. The contract states wrappers translate
+  every transport failure into a typed Result, so sync_project
+  doesn't raise ServerUnavailable to the caller per the contract.
+  The example code at line 390 reflects this (no try/except).
+
+  Not addressed in this release (pre-existing gaps relative to the
+  full contract example; not new from this session):
+  - NO_REMOTE → publish settings routing
+  - AUTH_REQUIRED → GitHub Connect routing
+  - APP_NOT_INSTALLED / APP_SUSPENDED / REPO_NOT_AUTHORIZED →
+    open params['url']
+  - JOB_INTERRUPTED → retry path
+  File these as a backlog item if a peer release wants full
+  contract conformance in do_sync.
+
+1.39.8
+  Re-checked the updated client contract (line 296 of
+  azt_collab_client/CLAUDE.md now lists SERVER_UNAVAILABLE /
+  SERVER_ERROR explicitly): auto-sync is **Silent. Log; daemon
+  will be reachable again next time.** User-initiated is **Surface
+  a transient-error toast. DO NOT route to settings — there's no
+  user-fixable config here, just a daemon that's currently down.**
+  1.39.7 over-surfaced auto-sync by updating the sync-status
+  label; that's still UI, still derails. This release brings the
+  two paths into line with the contract.
+
+  - _auto_commit_sync: drop the _set_sync_status_text call on
+    ServerUnavailable. stderr log only — completely silent to
+    the user.
+  - _set_sync_status_text helper removed (was the over-surface
+    surface from 1.39.7; nothing else used it).
+  - do_sync._on_sync_done: handle SERVER_UNAVAILABLE / SERVER_ERROR
+    by showing a translated transient-error toast and returning
+    early. Skips _update_sync_status (would re-hit the unreachable
+    daemon) and the result-code follow-ups (none apply when the
+    daemon is unreachable). Does NOT route to settings —
+    contract-mandated, since the user can't fix a daemon-down
+    state from any settings screen.
+
+  Not in scope: AUTH_REFRESH_STALE handling. The contract now
+  names this code too; the recorder doesn't surface it yet. File
+  it on the recorder backlog separately when you want it.
+
+1.39.7
+  Bring _auto_commit_sync into line with the auto-sync contract in
+  azt_collab_client/CLAUDE.md ("Peer contract: routing on sync
+  results"). The contract names SERVER_UNAVAILABLE explicitly
+  (lines 217-220: wrappers translate transport failure into
+  Status('SERVER_UNAVAILABLE', ...)) and the table's "Everything
+  else" row routes it to a status line in both auto and
+  user-initiated contexts — never a popup. A modal during a screen
+  transition is the documented pre-0.34.1 anti-pattern that surfaces
+  as "I picked project B, ended up on project A".
+
+  - _auto_commit_sync: on ServerUnavailable, drop the
+    Clock.schedule_once(_show_error(...)) popup; log to stderr +
+    update the sync-status label via a new helper.
+  - New _set_sync_status_text(text) sets sync_status_label without
+    polling the daemon — _update_sync_status would re-fire the
+    failure or overwrite our intentional message.
+  - do_sync (user-initiated) is untouched: the user gestured for
+    sync, so a popup on transport failure is in-contract there.
+
+1.39.6
+  Rip out the W1–W6 diagnostic prints added in 1.39.4 / 1.39.5.
+  Cause of the apparent "swipe skips entries" behaviour is now
+  understood: the LIFT on disk was alphabetical-by-guid (not
+  CAWL-ordered), due to a daemon-side merge driver that rebuilds
+  entries through a guid-keyed dict — filed in
+  azt_collab_client/NOTES_TO_DAEMON.md. sw-US-x-kent.lift was
+  reordered to integer-SILCAWL order in a separate explicit
+  commit; the recorder itself does NOT sort entries (filed
+  feedback memory: peer must never reorder <entry>, on disk or in
+  the in-memory queue — propagating the same bug to a new layer).
+  No logic changes here — pure diagnostic cleanup.
+
+1.39.5
+  Diagnostic-only. W1–W4 on sw-US-x-kent came back clean (full
+  queue, all 4-digit numeric CAWLs, no real duplicates, no multi-
+  SILCAWL conflicts), yet the user observes swipe sequences like
+  622→841→870→926 even with filters cleared. Two remaining
+  candidates: the LIFT genuinely has CAWL gaps in that range
+  (queue is in order but sparse), or self.index is being perturbed
+  between swipes.
+
+  - [diag-W5] at the end of RecorderController.rebuild_queue:
+    scans queue for adjacent CAWL pairs differing by more than 1,
+    logs gap count and the first 20 (queue_index_a, cawl_a) →
+    (queue_index_b, cawl_b). One-shot per rebuild.
+  - [diag-W6] inside go_next / go_prev: one line per swipe,
+    "[from_idx]=cawl_from → [to_idx]=cawl_to". If swipe transitions
+    over a known W5 gap, queue-sparse is confirmed. If indices
+    jump non-sequentially, an external mutator of self.index is
+    in play.
+
+1.39.4
+  Diagnostic-only build for the still-open weird-numbering / swipe-
+  skip behavior on sw-US-x-kent. F-class freeze/loop hypotheses are
+  resolved by 1.39.2/1.39.3; this round instruments the four W-class
+  hypotheses for the "swipe skips entries that should be sequential"
+  symptom. Pure print() — no logic changes; rip out once the cause
+  is identified.
+
+  - [diag-W1] in RecorderController.rebuild_queue: log cawl_filter,
+    gloss_search, only_unrecorded, the starting db.entries count,
+    and survivors after each filter step. Catches a filter silently
+    in effect (stale gloss search, unrecorded-only flag from a
+    previous session, etc.).
+  - [diag-W2] at the end of LIFTDatabase._parse: entries, unique
+    guids, unique ids, and sample duplicates if any. Catches a
+    LIFT with paste-twice / bad-merge duplicates.
+  - [diag-W3] same point: Counter of cawl widths plus first few
+    non-digit cawl values. Catches format outliers that would miss
+    the zero-padded 4-digit filter set.
+  - [diag-W4] inside LIFTDatabase._parse_entry: when an entry has
+    more than one distinct SILCAWL across its senses (we keep only
+    the first), log guid and the full list. Catches split-sense
+    entries whose discarded SILCAWLs explain "missing" CAWL numbers.
+
+1.39.3
+  Two regressions on project switch, both visible in the 1.39.1 trace
+  even with image-resolution deferred:
+
+  1. _parse ran twice on every existing-project open because
+     _handle_pick was unconditionally setting self._pending_vernlang
+     to the picked langcode. That flag is the "new-from-template,
+     run clean_template" signal — set by langpicker.py before the
+     genuine template flow reaches the picker. Overwriting it on
+     every pick made load_lift run a full clean_template + save +
+     re-parse on every existing-project open.
+
+     Fix: drop the _pending_vernlang overwrite from _handle_pick.
+     _current_langcode still gets cached (that's what
+     _register_current_project needs). The langpicker setter is now
+     the only entry point for _pending_vernlang, which is what its
+     docstring (and load_lift's comment) always claimed.
+
+  2. _update_sync_status → _reload_and_restore → refresh_recorder_ui
+     → _update_sync_status formed an infinite loop. The outer call
+     bumped _last_commit_seen only AFTER _reload_and_restore returned,
+     so the nested call still saw the stale baseline, detected
+     last_commit > seen again, and reloaded. The chain pegged the
+     UI thread with back-to-back LIFTDatabase reconstructions
+     forever, looking like a frozen settings page.
+
+     Fix: pin _last_commit_seen = last_commit BEFORE the reload, so
+     the nested poll sees the new baseline and short-circuits.
+     Also reset _last_commit_seen = None inside load_lift so a stale
+     value from the previous project can't fire a one-shot spurious
+     reload right after a fresh load.
+
+1.39.2
+  Defer per-entry image-path resolution out of the LIFT parse so
+  loading a project doesn't freeze the UI for ~17s on a 1,700-entry
+  URI lexicon.
+
+  Diagnosis from the 1.39.1 [diag-F2] trace: _parse ran to completion
+  and the screen transition fired, but the parse itself took 17.4s
+  on the main thread (~10ms × 1,701 entries). The hot path was
+  _resolve_image_path → _resolve_uri_image, which does an IPC
+  ContentProvider read + cache-file write per entry. Every entry has
+  an illustration, so every entry paid the cost. Pre-fix the parser's
+  first-non-empty-field bug masked this for many entries by giving
+  them non-image-resolving "cawl" values; the SILCAWL-pinned parser
+  hands every entry a valid CAWL, exposing the latent slowness.
+
+  - lift.py _parse_entry no longer calls _resolve_image_path. Entries
+    are returned with image_path=''.
+  - main.py RecorderController.image_path lazily calls
+    db._resolve_image_path on first access and caches the result back
+    onto the entry dict. has_image now goes through the property so
+    it triggers the same lazy fill.
+  - main.py _save_remote_image reads through self.recorder.image_path
+    instead of entry.get('image_path', '') for the same reason.
+
+  The +1s _start_image_prefetch already handles bulk caching in the
+  background, so deferring per-entry resolution doesn't lose
+  functionality — it just stops doing the same work twice on the
+  UI thread.
+
+  Diagnostic prints from 1.39.1 removed.
+
+1.39.1
+  Diagnostic-only build. After upgrading to the SILCAWL-pinned
+  parser, "Select project" lands back on the settings page with a
+  frozen-looking UI and no traceback in logcat. To pin down whether
+  load_lift even runs, where it dies, and whether this LIFT actually
+  uses 'SILCAWL' as its field type:
+
+  - main.py load_lift now prints [diag-F2] markers at start, around
+    LIFTDatabase construction (with full traceback on failure), at
+    RecorderController build, around rebuild_queue, and at the
+    screen transition.
+  - lift.py LIFTDatabase.__init__ and _parse print [diag-F2] start
+    markers and an end marker with entry count + cawl-bearing count.
+  - lift.py _parse also prints a [diag-F1] Counter of every
+    <sense><field type="..."> spelling seen in the file, plus the
+    list_type we're matching against. If 'SILCAWL' isn't in that
+    histogram exactly, the regression is just an exact-match miss.
+
+  Pure print() instrumentation — no logic changes. Will be ripped
+  out once the cause is identified.
+
+1.39.0
+  Fix lift.py CAWL parsing so per-entry XML field ordering can't
+  silently drop entries out of CAWL filters / queue navigation.
+
+  Background: _parse_entry was capturing the FIRST non-empty
+  <field type="..."> in each sense, regardless of its type, despite
+  a comment claiming the opposite. For an entry whose XML happens
+  to place <field type="Plural"> before <field type="SILCAWL">,
+  the parsed "cawl" became the Plural text. Such entries then
+  failed `e.get('cawl') in cawl_set` (zero-padded numeric keys)
+  and never showed up under a numeric filter, even though they sat
+  in the LIFT in proper CAWL order. Swiping appeared to skip
+  unpredictably; the goto popup's queue-index → entry mapping
+  looked random.
+
+  - LIFTDatabase.list_type now defaults to 'SILCAWL' (the only
+    wordlist field in use today; future templates / project config
+    can override). It is project-pinned, never auto-detected, and
+    never varied per-entry.
+  - _parse_entry only reads <field type="{self.list_type}"> for
+    the line number — every other typed field is ignored regardless
+    of XML order. Removes the previous first-non-empty-wins behavior
+    that the old comment claimed not to do.
+  - Factored image-path resolution out into _resolve_image_path
+    (no behavior change — just keeps _parse_entry readable now
+    that the field-pick is simpler).
+
+1.38.6
+  Progress label denominator now reflects the active CAWL filter
+  instead of the (smaller-than-the-number-on-the-left) queue length.
+  With the goto dialog already keyed to absolute list numbers, a
+  display like "841 / 501" was incoherent — the right side is now
+  "501-1000" (the filter itself) when a filter is set, and the total
+  queue length when it isn't.
+
+1.38.5
+  Fix the "go to entry" popup so the number you type matches the
+  number displayed in the progress label (the list number, e.g. the
+  SILCAWL — future-proofed via db.list_type rather than hardcoded).
+  Previously the dialog set self.recorder.index = n - 1, treating
+  the input as a 1-based queue position; with the queue in document
+  order that didn't reliably line up with the CAWL number the user
+  was reading on screen.
+
+  - show_goto_dialog now builds a {list_number → queue_index} map
+    from the current queue and snaps to the matching entry (or the
+    closest available list number if the exact one isn't in the
+    filtered queue).
+  - Title shows the actual range of available list numbers, and the
+    field is prefilled with the current entry's list number.
+  - Wordlists without any list-numbered entries fall back to the
+    previous 1-based queue-position behavior.
+
+1.38.4
+  Catch up on CLIENT_INTEGRATION.md § 3's new "Optional: pre-warm
+  in App.build()" subsection (and § 13's boot-trace note).
+
+  - LIFTRecorderApp.build() now calls
+    azt_collab_client.ui.bootstrap.prewarm() at the top, before
+    _migrate_prefs_to_suite_store / theme.set_theme / Builder.load_string.
+    The helper fires a single check_server_compat on a background
+    thread so the daemon's Android lazy-spawn overlaps with the
+    recorder's Kivy boot instead of serializing after it. Idempotent;
+    no-op on non-Android. Wrapped in try/except + stderr log so a
+    prewarm failure can't block normal startup.
+  - Recorder is a clean fit for prewarm: build() doesn't touch
+    Android Java surfaces (those land in on_start via
+    _warm_jnius_classes / activity.bind), so the overlap window is
+    a free win on slow ARM tablets without shifting cost.
+  - Toggleable for measurement runs without a rebuild: drop a
+    $AZT_HOME/_no_prewarm sentinel or set AZT_BOOT_PREWARM=0
+    (the helper honors both).
+
+  Boot-trace logcat lines from azt_collab_client/ui/bootstrap.py
+  ([boot-trace-peer] phase=… t=…) and the daemon are intentionally
+  unfiltered — the measurement harness in azt-collab/tests/integration/
+  reads them. No recorder-side change needed; just don't add a
+  logcat filter that strips them.
+
+1.38.3
+  Catch up on the revised CLIENT_INTEGRATION.md § 11.
+
+  - _reload_and_restore now suspends client-side filters when the
+    saved guid would be hidden by them post-refresh (the contract's
+    explicit recorder example: someone else recorded the entry the
+    user was mid-edit on, the only_unrecorded filter would drop it,
+    so the recorder clears cawl_filter / gloss_search /
+    only_unrecorded for this view to keep the anchor visible). If
+    the entry is genuinely gone from the new model, no toast — per
+    the revised § 11 the natural propagation IS the visible signal.
+  - Removed the "Entry removed upstream." string and toast added in
+    1.38.2 (revised § 11 says don't paper over real deletions).
+
+1.38.2
+  Catch up on CLIENT_INTEGRATION.md § 11 ("Smooth UI across
+  reloads"). Synchronization now refreshes in place when on-disk
+  bytes change, and skips the wasteful re-parse when they don't.
+
+  - do_sync: gated _reload_and_restore on result.has(S.PULLED).
+    Local-only push (PUSHED / COMMITTED_AND_PUSHED without
+    PULLED) no longer triggers a LIFT re-parse — the bytes
+    didn't change underneath us. Pull → reparse → re-render at
+    the same entry guid.
+
+  - _update_sync_status: tracks project_status.last_commit
+    across the existing 30 s poll. When last_commit advances
+    between polls (another peer's push, a daemon-driven
+    debounced sync, an Android picker re-entry that pulled),
+    fires _reload_and_restore against the current entry guid so
+    the user's view picks up external changes without leaving
+    their anchor.
+
+  - _sync_status_info: now returns (text, last_sync,
+    last_commit). Existing callers updated.
+
+  - _reload_and_restore: when the saved guid is missing in the
+    reloaded queue (entry deleted upstream), surfaces a toast
+    "Entry removed upstream." Old in-memory copy is not yet
+    preserved on this branch — that's a deeper refactor for a
+    future bump and a known partial gap with § 11's "past work
+    stays visible" guidance.
+
+  Translations (fr): "Entry removed upstream." added.
+
+1.38.1
+  Catch-up on CLIENT_INTEGRATION.md sections.
+
+  § 10 Granting collaborator access — added a "Collaborators"
+  section + "Grant collaborator access" button to CollabScreen
+  (between Publish and Advanced). Visible whenever a project
+  is loaded; per the contract, the popup itself surfaces
+  NO_REMOTE / NOT_GITHUB_REMOTE / AUTH_REQUIRED states, so we
+  don't pre-gate on has_remote. CollabScreen.grant_collaborator
+  hands the popup the current langcode (via
+  app._current_langcode_or_register) and the recorder's
+  _FONT_NAME; the daemon does the project lookup so peers
+  can't hand it the wrong owner/repo.
+
+  § 5 Picker cancel on first setup — _handle_pick used to be
+  silent on 'cancelled' regardless of state. Per the contract,
+  picker emits 'cancelled' only when last_project() is empty
+  (otherwise it auto-resumes), so receiving 'cancelled' means
+  first-setup-and-user-backed-out. Now App.stop()s in that case
+  rather than parking the user on an empty window.
+
+  Translations (fr): "Collaborators", "Grant collaborator
+  access" added to aztrecorder.po.
+
 1.38.0
   Minor bump for a predistribution check. Rolls up the 1.37.x
   patch series since 1.37.0:
