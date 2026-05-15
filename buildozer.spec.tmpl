@@ -37,7 +37,16 @@ source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,lift,ttf,gz,mo,po
 # azt_images/ is 320 MB — too large to bundle in the APK (causes OOM on device).
 # Images are accessed from external storage via lift.py's bundled_images_dir logic.
-source.exclude_dirs = azt_images,env,.venv,venv,__pycache__
+# examples/ is the sister-app symlink to ../azt-collab/examples/ (kill_recovery.py,
+# non_kivy_pick.py, sister_app.py) — developer smoke-test scripts, not runtime code,
+# don't ship in user APKs.
+source.exclude_dirs = azt_images,env,.venv,venv,__pycache__,presplash_variants,examples
+# Build-time / dev scripts at the source root. Not imported by main.py at runtime
+# (generate_presplash.py builds the multi-density splash; populate_images.py copies
+# CAWL images into a LIFT project before publish; strip_langtags.py rebuilds the
+# gzipped langtags lookup). Excluded to keep the APK lean and reduce
+# "what's this doing in the bundle?" surface for anyone unpacking it.
+source.exclude_patterns = generate_presplash.py,populate_images.py,strip_langtags.py,compile_translations.py
 #version = 1.3.1
 version.regex = __version__ = ['"](.*)['"]
 version.filename = %(source.dir)s/main.py
@@ -47,7 +56,7 @@ requirements = python3,kivy==2.3.1,pillow,sounddevice,soundfile,numpy,certifi,fi
 orientation = portrait
 fullscreen = 0
 
-android.permissions = INTERNET,RECORD_AUDIO,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE,CAMERA,REQUEST_INSTALL_PACKAGES,org.atoznback.AZT_COLLAB_ACCESS
+android.permissions = INTERNET,ACCESS_NETWORK_STATE,RECORD_AUDIO,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,MANAGE_EXTERNAL_STORAGE,CAMERA,REQUEST_INSTALL_PACKAGES,org.atoznback.AZT_COLLAB_ACCESS
 
 # AZT collab ContentProvider lives in the standalone server APK
 # (org.atoznback.aztcollab). The recorder is a pure peer: it
@@ -107,6 +116,29 @@ icon.adaptive_background.filename = %(source.dir)s/icons/icon_bg.png
 
 presplash.filename = %(source.dir)s/presplash.png
 android.presplash_color = #1a1612
+
+# Multi-density presplash variants. generate_presplash.py writes
+# six bucket variants (ldpi/mdpi/hdpi/xhdpi/xxhdpi/xxxhdpi) into
+# `presplash_variants/drawable-<bucket>/presplash.png`. buildozer
+# forwards them to p4a via `--add-resource`; p4a's build.py
+# `shutil.copytree`s the contents into the dist's `src/main/res/`
+# (with dirs_exist_ok), so each `drawable-<bucket>/presplash.png`
+# lands at the canonical Android resource path and the install-
+# time DPI bucket selector picks the matching variant.
+#
+# Coexists with `presplash.filename` above — that creates
+# `res/drawable/presplash.jpg` as the universal fallback for
+# DPI buckets none of the variants cover (Android falls back
+# to plain `drawable/` when no `drawable-<bucket>/` matches).
+# The resource id `R.drawable.presplash` resolves across the
+# .jpg / .png boundary by base name; aapt2 builds one resource
+# entry with the six bucket configs + the .jpg fallback.
+#
+# Path is per-peer (the recorder's own source.dir) so the
+# shared `../azt-collab/android/` tree stays untouched. Other
+# peers wanting the same get their own `presplash_variants/`
+# directory + the same add_resources line.
+android.add_resources = %(source.dir)s/presplash_variants:.
 
 [buildozer]
 log_level = 2

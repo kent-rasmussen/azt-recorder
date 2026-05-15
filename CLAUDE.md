@@ -32,7 +32,7 @@ back into the LIFT XML.
   (`org.atoznback.aztcollab`). Both APKs must be signed with
   `/home/kentr/bin/azt-suite.keystore`. No Android fallback to loopback.
 - Status-code business logic uses `result.has(S.CODE)` — never parse
-  translated strings (see `AZT_COLLAB_README.md` for the full code list).
+  translated strings (full code list: `azt_collab_client/status.py`).
 
 ### Picker / theme migration is complete
 

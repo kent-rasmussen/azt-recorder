@@ -98,9 +98,10 @@ in the sibling `../azt-collab/` repo. Set it up once with:
 ln -s ../azt-collab/azt_collab_client azt_collab_client
 ```
 
-For the daemon's status codes, sync flow, `$AZT_HOME` layout, and
-runtime knobs see [`AZT_COLLAB_README.md`](AZT_COLLAB_README.md). For
-wiring a new sister app as a peer (manifest, signing, install
+For the peer conformity contract (bootstrap, LIFT/audio/CAWL handles,
+picker-cancel handling, etc.) see
+[`azt_collab_client/CLIENT_INTEGRATION.md`](azt_collab_client/CLIENT_INTEGRATION.md).
+For wiring a new sister app as a peer (manifest, signing, install
 prompts), see [`README_NewClient.txt`](README_NewClient.txt).
 
 ## Build for Android

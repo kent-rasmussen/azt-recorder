@@ -47,25 +47,56 @@ warnings.filterwarnings('ignore', message='.*olefile.*')
 # On Android: p4a sets $ANDROID_PRIVATE to the app's private files dir (always writable).
 #             Also tries /sdcard/ (may need MANAGE_EXTERNAL_STORAGE on API 30+).
 # On desktop: ~/azt_recorder.log
+_LOG_PATH = ''  # resolved by _setup_logging; read by App.share_log
+
+
 def _setup_logging():
+    global _LOG_PATH
     _on_android = os.path.exists('/system/build.prop')
     candidates = []
     if _on_android:
         # ANDROID_PRIVATE is set by p4a bootstrap, e.g. /data/user/0/org.x.y/files
+        # This is the app's private filesDir — exists on every
+        # Android install regardless of SD card presence.
         android_private = os.environ.get('ANDROID_PRIVATE', '')
         if android_private:
             candidates.append(os.path.join(android_private, 'azt_recorder.log'))
-        # Fallback using known package name pattern
-        candidates += [
-            '/data/user/0/org.atoznback.azt_recorder/files/azt_recorder.log',
-            '/sdcard/azt_recorder.log',
-        ]
+        # Defensive fallback when ANDROID_PRIVATE somehow isn't set:
+        # query Context.getFilesDir() via jnius directly. Always works
+        # on Android, doesn't depend on env-var plumbing.
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            if activity is not None:
+                files_dir = str(activity.getFilesDir().getAbsolutePath())
+                if files_dir:
+                    candidates.append(
+                        os.path.join(files_dir, 'azt_recorder.log'))
+        except Exception:
+            pass
+        # /sdcard fallback. Unreliable on API 30+ (scoped storage)
+        # but cheap to try; the env-var path above is the normal one.
+        candidates.append('/sdcard/azt_recorder.log')
     else:
         candidates += [os.path.join(os.path.expanduser('~'), 'azt_recorder.log')]
     fh = None
     for path in candidates:
         try:
+            # Rotate the previous session's log out of the way before
+            # truncating — `<path>.prev` keeps the prior session
+            # available after a crash + relaunch, so the user can still
+            # share the log that captures the original failure.
+            if os.path.exists(path):
+                prev = path + '.prev'
+                try:
+                    if os.path.exists(prev):
+                        os.remove(prev)
+                    os.replace(path, prev)
+                except OSError:
+                    pass
             fh = open(path, 'w', buffering=1, encoding='utf-8')
+            _LOG_PATH = path
             break
         except OSError:
             continue
@@ -101,6 +132,87 @@ def _setup_logging():
     print(f'[LOG] azt_recorder starting — log: {path}', flush=True)
 
 _setup_logging()
+
+# ── Server-crash mirroring into the peer log ───────────────────────────────
+# When the recorder observes a SERVER_UNAVAILABLE / SERVER_ERROR (or
+# catches ServerUnavailable directly), it queries /v1/health and tees
+# the daemon's `last_crash` into azt_recorder.log under a
+# [server-crash] prefix — verbatim lines get a `| ` continuation so
+# they're visually distinct from the recorder's own [CRASH] traceback.
+# Without this, the recorder log shows a "server unavailable" line and
+# the user would have to also grab $AZT_HOME/state/crash.log to see
+# why. Rate-limited by (server started_at, hash(text)) so the same
+# crash isn't re-dumped on every retry.
+
+_LAST_SERVER_CRASH_FINGERPRINT = None
+
+
+def _log_server_crash_if_any(context):
+    """Pull /v1/health on a worker thread and dump the daemon's
+    `last_crash` (if any) into the recorder log, clearly marked as
+    coming from the SERVER's crash record — not the recorder's own.
+
+    Best-effort: if /v1/health is itself unreachable (daemon fully
+    down, or just-exited 'spawn_exited' case), we log that fact and
+    return — the on-disk $AZT_HOME/state/crash.log is daemon-owned
+    territory the peer doesn't reach into.
+
+    ``context`` is a short string naming the peer-side call site
+    (``auto_sync``, ``do_sync``, ``go_collab``, ``open_server_ui``)
+    so the log can be grep-filtered by failure path."""
+
+    def _worker():
+        global _LAST_SERVER_CRASH_FINGERPRINT
+        try:
+            from azt_collab_client.rpc import (
+                health as _health, ServerUnavailable)
+        except ImportError:
+            return
+        try:
+            h = _health()
+        except ServerUnavailable as ex:
+            print(f'[server-crash] context={context}: /v1/health '
+                  f'unreachable — daemon is fully down ({ex}); '
+                  f'recorder log cannot mirror the daemon crash '
+                  f'log because the daemon process is gone. Pull '
+                  f'$AZT_HOME/state/crash.log directly for the '
+                  f'postmortem.', flush=True)
+            return
+        except Exception as ex:
+            print(f'[server-crash] context={context}: /v1/health '
+                  f'raised: {ex}', flush=True)
+            return
+        if not isinstance(h, dict):
+            return
+        last_crash = h.get('last_crash')
+        started_at = h.get('started_at')
+        if not last_crash:
+            print(f'[server-crash] context={context}: no last_crash '
+                  f'on /v1/health (server started_at={started_at}); '
+                  f'failure was not a daemon-side crash',
+                  flush=True)
+            return
+        text = str(last_crash)
+        fingerprint = (started_at, hash(text))
+        if fingerprint == _LAST_SERVER_CRASH_FINGERPRINT:
+            print(f'[server-crash] context={context}: same daemon '
+                  f'crash as previously logged; skipping replay',
+                  flush=True)
+            return
+        _LAST_SERVER_CRASH_FINGERPRINT = fingerprint
+        print(f'[server-crash] context={context}: server '
+              f'started_at={started_at}; verbatim daemon crash '
+              f'follows (from /v1/health.last_crash) — lines '
+              f'prefixed with "| " are the SERVER log, not the '
+              f'recorder log:', flush=True)
+        for line in text.splitlines():
+            print(f'[server-crash] | {line}', flush=True)
+        print('[server-crash] (end of daemon crash log)',
+              flush=True)
+
+    import threading
+    threading.Thread(target=_worker, daemon=True).start()
+
 
 # On Android the default KIVY_HOME lands inside the read-only app bundle.
 # Point it to a writable location before Kivy is imported.
@@ -234,6 +346,11 @@ KV_TEMPLATE = '''
                         font_size: sp(13)
                         font_name: FONT
                         color: T.TEXT_MID
+                        # markup=True so _sync_status_info can wrap
+                        # the uncommitted-files count in [color=ff4444]
+                        # — surfaces the "commits aren't happening"
+                        # state (daemon-unreachable accumulation).
+                        markup: True
                         halign: 'left'
                         valign: 'middle'
                         text_size: self.size
@@ -250,6 +367,31 @@ KV_TEMPLATE = '''
                     center: self.parent.center
                     allow_stretch: True
                     keep_ratio: True
+        # ── Severe-alert banner (CLIENT_INTEGRATION.md § 17,
+        # never-silenced row: DATA_LOSS_RISK + COMMIT_REPEATEDLY_
+        # FAILED). Sticky — stays up until the user taps to
+        # dismiss, because the message tells them to share the
+        # daemon log and a 1.5s toast wouldn't survive long
+        # enough to read. Button rather than Label so the tap-
+        # to-dismiss is native; on_release fires _dismiss_severe_
+        # alert. Visually distinct red background. Starts
+        # collapsed (height: 0 / opacity: 0).
+        Button:
+            id: severe_alert_banner
+            text: ''
+            font_size: sp(12)
+            font_name: FONT
+            color: 1, 1, 1, 1
+            background_color: 0.55, 0.18, 0.18, 1
+            background_normal: ''
+            size_hint_y: None
+            height: 0
+            opacity: 0
+            halign: 'center'
+            valign: 'middle'
+            text_size: self.width - dp(16), None
+            markup: True
+            on_release: app._dismiss_severe_alert()
         # ── Cache-progress indicator (CLIENT_INTEGRATION.md § 10.5 —
         # required whenever a CAWL prefetch is in flight; conveys "network
         # in use" so the user doesn't disconnect Wi-Fi mid-warm). Starts
@@ -529,16 +671,88 @@ KV_TEMPLATE = '''
                     size_hint_y: None
                     height: dp(44)
                     spacing: dp(8)
-                # ── Setup Collaboration (always visible) ──────────────
+                # ── Project ───────────────────────────────────────────
+                # Setup Collaboration + Select Project both act on the
+                # project, so they share a header instead of floating
+                # loose under the UI-language row.
+                SectionLabel:
+                    text: _('Project')
                 RecBtn:
                     text: _('Setup Collaboration')
                     normal_color: T.SURFACE
                     on_release: app.go_collab()
-                # ── Select Project (rare, kept at bottom) ─────────────
                 RecBtn:
                     text: _('Select Project')
                     normal_color: T.BTN_INACTIVE
                     on_release: app.start_over()
+                # ── Conserve power ──────────────────────────────────
+                # Audio quality and auto-sync cadence are both power
+                # / network trade-offs. Always visible (these are
+                # peer-pref-backed suite-wide settings, not
+                # project-bound), and grouped under one header so
+                # the user knows where to look when battery / data
+                # is the constraint. Audio quality additionally has
+                # a hidden auto-degradation ceiling (audio_quality_
+                # ceiling, set on repeated record failures) that
+                # clamps the picker — see _start_android_recording.
+                SectionLabel:
+                    text: _('Conserve power')
+                # ── Audio quality selector ─────────────────────────────
+                BoxLayout:
+                    id: audio_quality_row
+                    size_hint_y: None
+                    height: 0
+                    opacity: 0
+                    spacing: dp(8)
+                    Label:
+                        text: _('Audio quality:')
+                        font_size: sp(15)
+                        font_name: FONT
+                        color: T.TEXT_DIM
+                        size_hint_x: None
+                        size: self.texture_size
+                        valign: 'middle'
+                    RecBtn:
+                        id: audio_quality_btn
+                        text: ''
+                        font_size: sp(15)
+                        normal_color: T.SURFACE
+                        on_release: root._show_audio_quality_overlay()
+                # ── Debug ────────────────────────────────────────────
+                # Diagnostic affordances live at the bottom — most
+                # users will never tap these, but when something is
+                # wrong the support flow is "scroll all the way down,
+                # share the log".
+                SectionLabel:
+                    text: _('Debug')
+                RecBtn:
+                    # Double-brace escapes are mandatory below: the
+                    # whole KV template gets passed through
+                    # KV_TEMPLATE.format(font_name=_FONT_NAME) before
+                    # Kivy ever sees it, so any single-brace placeholder
+                    # in KV is interpreted by the outer format() as a
+                    # substitution target (and crashes with KeyError if
+                    # the key isn't in the kwargs). Double braces survive
+                    # the outer pass as a single brace pair, then the
+                    # inner .format(app=...) on the gettext-translated
+                    # string substitutes correctly at rule-eval time.
+                    # NB: this comment lives inside the KV string too,
+                    # so avoid putting any single-brace patterns here.
+                    # If APP_NAME in appinfo.py ever changes, update
+                    # the literal string below to match.
+                    text: _('Share {{app}} log').format(app='A-Z+T Recorder')
+                    halign: 'left'
+                    padding: [dp(52), 0]
+                    text_size: self.size
+                    valign: 'middle'
+                    normal_color: T.SURFACE
+                    on_release: app.share_log()
+                    Image:
+                        source: 'icons/share_dark.png'
+                        size_hint: None, None
+                        size: dp(24), dp(24)
+                        x: self.parent.x + dp(16)
+                        center_y: self.parent.center_y
                 Widget:
                     size_hint_y: None
                     height: dp(40)
@@ -1778,6 +1992,12 @@ class ConfigScreen(Screen):
     def on_enter(self):
         app = App.get_running_app()
         self._build_lang_selector()
+        # Conserve-power selectors are peer-pref-backed (suite-wide),
+        # so they populate regardless of project state — they used to
+        # live inside db_settings_box and only filled in when a
+        # project was loaded; that was a layout accident, not a real
+        # gate.
+        self._build_audio_quality_row()
         has_db = app.recorder is not None
         # Show/hide database-dependent sections.
         # When hiding: zero height on every descendant so nothing has a
@@ -2212,6 +2432,92 @@ class ConfigScreen(Screen):
         btn.text = saved_label
         row.height = dp(44)
         row.opacity = 1
+        # Audio quality selector is always populated alongside the
+        # recording-task row, regardless of how many rec tasks are
+        # available.
+        self._build_audio_quality_row()
+
+    _AUDIO_QUALITY_LABELS = (
+        ('high',         'High'),
+        ('high_aac',     'High AAC'),
+        ('medium',       'Medium'),
+        ('medium_aac',   'Medium AAC'),
+        ('low',          'Low'),
+        ('low_aac',      'Low AAC'),
+        ('very_low',     'Very Low'),
+        ('very_low_aac', 'Very Low AAC'),
+    )
+
+    def _build_audio_quality_row(self):
+        """Populate audio-quality row + button text from peer_pref."""
+        row = self.ids.get('audio_quality_row')
+        btn = self.ids.get('audio_quality_btn')
+        if not row or not btn:
+            return
+        default = RecorderController._DEFAULT_AUDIO_PROFILE
+        saved = peer_pref('audio_quality', default) or default
+        # Defensive: if a stored value isn't one of the recognised
+        # profiles (e.g. a stale legacy key), fall back to the
+        # default and re-pin the pref.
+        if saved not in dict(self._AUDIO_QUALITY_LABELS):
+            saved = default
+            set_peer_pref('audio_quality', saved)
+        label = next(
+            (l for k, l in self._AUDIO_QUALITY_LABELS if k == saved),
+            saved)
+        btn.text = _tr(label)
+        row.height = dp(44)
+        row.opacity = 1
+
+    def _show_audio_quality_overlay(self):
+        """Modal picker for the audio-quality profile."""
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.button import Button
+        from kivy.uix.modalview import ModalView
+        default = RecorderController._DEFAULT_AUDIO_PROFILE
+        current = peer_pref('audio_quality', default) or default
+        options = self._AUDIO_QUALITY_LABELS
+        # If auto-degradation has pinned a ceiling, hide profiles
+        # above it — they've already failed on this device and
+        # offering them again would just re-trigger the same toast.
+        ladder = RecorderController._PROFILE_LADDER
+        ceiling = peer_pref('audio_quality_ceiling')
+        if ceiling and ceiling in ladder:
+            allowed = set(ladder[ladder.index(ceiling):])
+            options = tuple((k, l) for k, l in options if k in allowed)
+        view = ModalView(
+            size_hint=(0.85, None),
+            height=dp(52 * len(options) + 20),
+            background_color=theme.OVERLAY_DARK,
+            auto_dismiss=True,
+        )
+        box = BoxLayout(
+            orientation='vertical', spacing=dp(4),
+            padding=(dp(10), dp(10)),
+        )
+        for key, label in options:
+            is_selected = key == current
+            opt = Button(
+                text=_tr(label),
+                font_name=_FONT_NAME,
+                font_size=sp(16),
+                size_hint_y=None, height=dp(44),
+                background_color=theme.GREEN if is_selected
+                else theme.SURFACE,
+                color=theme.TEXT,
+            )
+
+            def _select(k=key, l=label, v=view):
+                set_peer_pref('audio_quality', k)
+                aq_btn = self.ids.get('audio_quality_btn')
+                if aq_btn:
+                    aq_btn.text = _tr(l)
+                v.dismiss()
+
+            opt.bind(on_release=lambda inst, cb=_select: cb())
+            box.add_widget(opt)
+        view.add_widget(box)
+        view.open()
 
     def _show_rec_overlay(self):
         """Show a modal overlay with recording task options."""
@@ -2555,6 +2861,10 @@ class CollabScreen(Screen):
             # owns the install prompt at startup, so we don't compete.
             self._set_log(_tr('Could not open sync settings: {error}')
                           .format(error=err))
+        # Mirror the daemon's last_crash on non-benign failures —
+        # 'spawn_exited' is the prime case.
+        if err not in ('desktop_only', 'server_apk_not_installed'):
+            _log_server_crash_if_any('open_server_ui')
 
     def open_install_page(self):
         """Open the GitHub App installation page."""
@@ -2769,11 +3079,35 @@ class RecorderController:
         self._audio_path = None
         self._recorder = None
         self._record_pfd = None
+        # Set in _start_android_recording before the JNI chain runs so
+        # the start/stop/validation failure paths know which profile
+        # to degrade. None on non-Android, where there's no ladder.
+        self._record_profile_key = None
         # Cleared on every start; flipped to True only when the
         # platform start path returns clean. stop_recording gates the
         # LIFT basename write on this so a failed start cannot leave
         # a bogus filename in <citation><form>.
         self._record_ok = False
+        # Wall-clock monotonic timestamp stamped when mr.start() has
+        # actually returned (in _publish_start_success, not in
+        # start_recording). Read by stop_recording's min-hold-gate
+        # so the gate measures real recorded-audio duration, not
+        # wall-clock since touch-down. Reset to None after a clean
+        # stop or a cancelled start.
+        self._record_started_at = None
+        # Async-start state machine (CLIENT_INTEGRATION-style ref:
+        # main.py H2 plan, 1.41.27+):
+        # - _start_pending is True while a worker thread is running
+        #   _start_native_recording (the blocking JNI chain
+        #   openFD/prepare/start which can take 150-400ms on slow
+        #   MTK chips). Gates re-entrant start_recording calls.
+        # - _start_cancel_requested is set by stop_recording when a
+        #   touch_up lands DURING that window. The worker checks it
+        #   after mr.start() returns; if set, the just-started
+        #   MediaRecorder is torn down without writing the LIFT
+        #   reference (same end-state as the min-hold-gate path).
+        self._start_pending = False
+        self._start_cancel_requested = False
 
         # Has the user changed anything on the current entry (audio
         # recorded, image picked, etc.) since the last sync? Set by
@@ -2852,14 +3186,14 @@ class RecorderController:
     def go_next(self):
         if self.index < len(self.queue) - 1:
             self._pending_rerecord = False
-            self._playing = False
+            self._stop_active_player()
             self.index += 1
             self._notify_ui()
 
     def go_prev(self):
         if self.index > 0:
             self._pending_rerecord = False
-            self._playing = False
+            self._stop_active_player()
             self.index -= 1
             self._notify_ui()
 
@@ -2949,30 +3283,284 @@ class RecorderController:
 
     # ── Recording ──────────────────────────────────────────────────────────────
 
+    # Minimum hold time, in seconds. Stops fired before this much
+    # has elapsed since start_recording are treated as accidental
+    # taps: the in-flight MediaRecorder is torn down without
+    # advertising the basename into the LIFT, and the user gets a
+    # "hold to record" toast. Tuned for slow MediaTek chips where
+    # MediaRecorder.prepare() can take 150-400ms by itself; the gate
+    # has to be longer than that or a slow start path looks like a
+    # short hold.
+    _MIN_HOLD_SEC = 0.4
+
+    # Android AAC quality profiles, selected via the
+    # peer_pref('audio_quality') key. Only applies to Android (iOS
+    # uses FLAC, desktop uses PCM WAV — both inherently lossless and
+    # not affected by these parameters).
+    #
+    # Eight profiles: full cross of four quality tiers × two
+    # containers (MPEG_4/.m4a vs AAC_ADTS/.aac). The temporarily-
+    # wide table is for A/B isolation in the field: when a device
+    # is rescued by switching to e.g. 'low_aac' we want to know
+    # whether the rescue came from the lower bitrate, the alternate
+    # container, or both. Expect to prune to ~3 once the data is in.
+    #
+    # Quality tiers:
+    #   high      — 256k / 48kHz   (historical 1.41.20 default)
+    #   medium    — 128k / 44.1kHz (1.41.21 default; safe everywhere)
+    #   low       —  64k / 22.05kHz (telephone-quality voice)
+    #   very_low  —  32k / 16kHz   (deep rescue, ~4KB/sec on disk)
+    #
+    # Containers:
+    #   MPEG_4   → .m4a (broadest playback support)
+    #   AAC_ADTS → .aac (bypasses MPEG_4-specific HAL bugs reported
+    #              on some mid-tier MediaTek encoders)
+    #
+    # MediaPlayer sniffs format from content (not extension), so
+    # .m4a and .aac coexist fine in the same LIFT's audio dir.
+    _AUDIO_PROFILES = {
+        'high':         {'bitrate': 256_000, 'sample_rate': 48_000,
+                         'output_format': 'MPEG_4',   'ext': '.m4a'},
+        'high_aac':     {'bitrate': 256_000, 'sample_rate': 48_000,
+                         'output_format': 'AAC_ADTS', 'ext': '.aac'},
+        'medium':       {'bitrate': 128_000, 'sample_rate': 44_100,
+                         'output_format': 'MPEG_4',   'ext': '.m4a'},
+        'medium_aac':   {'bitrate': 128_000, 'sample_rate': 44_100,
+                         'output_format': 'AAC_ADTS', 'ext': '.aac'},
+        'low':          {'bitrate':  64_000, 'sample_rate': 22_050,
+                         'output_format': 'MPEG_4',   'ext': '.m4a'},
+        'low_aac':      {'bitrate':  64_000, 'sample_rate': 22_050,
+                         'output_format': 'AAC_ADTS', 'ext': '.aac'},
+        'very_low':     {'bitrate':  32_000, 'sample_rate': 16_000,
+                         'output_format': 'MPEG_4',   'ext': '.m4a'},
+        'very_low_aac': {'bitrate':  32_000, 'sample_rate': 16_000,
+                         'output_format': 'AAC_ADTS', 'ext': '.aac'},
+    }
+    _DEFAULT_AUDIO_PROFILE = 'high'
+
+    # Order in which auto-degradation walks the profile table on
+    # repeated start/stop/validation failures. Container swap before
+    # bitrate drop: dropping bitrate is permanent fidelity loss, but
+    # MPEG_4 → AAC_ADTS dodges the MTK MPEG_4 HAL wedges noted in the
+    # _AUDIO_PROFILES comment without giving up any bits.
+    _PROFILE_LADDER = (
+        'high', 'high_aac',
+        'medium', 'medium_aac',
+        'low', 'low_aac',
+        'very_low', 'very_low_aac',
+    )
+
+    # Minimum fraction of (held_seconds * bitrate / 8) bytes we expect
+    # the on-disk encoded file to have. Real AAC/M4A overhead pushes
+    # the ratio close to 1.0 once headers are written, so a result
+    # well below 0.25 means the encoder produced essentially nothing
+    # — a silent failure mode observed on flaky MediaTek HAL builds.
+    _POST_STOP_MIN_RATIO = 0.25
+
+    def _degrade_profile(self, failed_key):
+        """Drop the audio-quality ceiling one rung below `failed_key`
+        and clamp the user-facing pref to it. Persisted via peer_pref
+        so the device-level adaptation survives crashes and reboots,
+        matching the recorder's policy of making resource decisions
+        transparently rather than as a user-tunable setting."""
+        if not failed_key:
+            return None
+        try:
+            idx = self._PROFILE_LADDER.index(failed_key)
+        except ValueError:
+            return None
+        if idx >= len(self._PROFILE_LADDER) - 1:
+            # Already at the lowest rung — nothing to drop to. The
+            # user still needs to know the take didn't make it.
+            self._toast_record_failed(at_floor=True)
+            return None
+        new_key = self._PROFILE_LADDER[idx + 1]
+        set_peer_pref('audio_quality_ceiling', new_key)
+        set_peer_pref('audio_quality', new_key)
+        print(f'[record] degraded {failed_key} → {new_key} '
+              f'(ceiling pinned)')
+        self._toast_record_failed(at_floor=False)
+        return new_key
+
+    def _toast_record_failed(self, at_floor):
+        from kivy.app import App as _App
+        app = _App.get_running_app()
+        if app is None:
+            return
+        msg = (_tr('Recording failed at the lowest quality. '
+                   'Please try again.')
+               if at_floor
+               else _tr('Recording failed; quality lowered. '
+                        'Please try again.'))
+        Clock.schedule_once(
+            lambda dt: app._show_toast(msg), 0)
+
     def start_recording(self):
-        if self._recording or not self.current:
+        """Spawn a worker thread to do the blocking JNI setup, return
+        to the Kivy touch dispatcher immediately. The MediaRecorder
+        prepare/start chain can take 150-400ms on slow MediaTek
+        devices; running it inline blocked the touch loop and let
+        touch_up race the setup. See the H2 plan in CHANGELOG 1.41.27
+        for the full state machine."""
+        if self._recording or self._start_pending or not self.current:
             return
         path = self._make_audio_path()
         # Clear before the attempt so a previous successful flag
         # cannot survive into a now-failing start.
         self._record_ok = False
+        self._start_pending = True
+        self._start_cancel_requested = False
+        self._record_started_at = None
+        # Defer the "preparing" UI rebuild to the next frame so the
+        # Kivy touch dispatch that triggered us can return cleanly
+        # before refresh_recorder_ui touches widgets.
+        Clock.schedule_once(lambda dt: self._notify_ui(), 0)
+        import threading
+        threading.Thread(
+            target=self._start_worker,
+            args=(path,),
+            daemon=True,
+        ).start()
+
+    def _start_worker(self, path):
+        """Run the blocking JNI setup on a worker thread. Marshals
+        the outcome back to the main thread via Clock.schedule_once
+        — never mutates publish-relevant state (`_recording`,
+        `_record_started_at`) directly; that's the main thread's
+        job in `_publish_start_*`."""
         try:
             actual_path = self._start_native_recording(path)
         except Exception as ex:
-            print(f'Recording start failed: {ex}')
-            self._notify_ui()
+            Clock.schedule_once(
+                lambda dt, e=ex: self._publish_start_failure(e), 0)
             return
-        self._audio_path = actual_path or path
+        Clock.schedule_once(
+            lambda dt, p=actual_path: self._publish_start_success(p), 0)
+
+    def _publish_start_success(self, actual_path):
+        """Main-thread callback after the worker's start succeeded.
+        Stamps _record_started_at NOW (real recording duration
+        reference) and flips _recording True. If the user already
+        released the button while the worker was running, tears
+        down without writing the LIFT reference — same end-state
+        as the min-hold-gate tap path."""
+        self._start_pending = False
+        if self._start_cancel_requested:
+            print('[record] start completed but user already '
+                  'released; tearing down')
+            self._record_ok = False
+            # Clear before teardown: an immediate stop-after-start
+            # nearly always throws (no moov atom yet), and we don't
+            # want a user-cancel to count as device evidence for
+            # degrading the profile.
+            self._record_profile_key = None
+            self._stop_native_recording()
+            self._record_started_at = None
+            Clock.schedule_once(lambda dt: self._notify_ui(), 0)
+            # Coaching toast — same shape as the min-hold-gate one.
+            from kivy.app import App as _App
+            app = _App.get_running_app()
+            if app is not None:
+                Clock.schedule_once(
+                    lambda dt: app._show_toast(
+                        _tr('Hold the button to record')), 0)
+            return
+        if actual_path:
+            self._audio_path = actual_path
         self._recording = True
         self._record_ok = True
-        self._notify_ui()
+        import time as _time
+        self._record_started_at = _time.monotonic()
+        Clock.schedule_once(lambda dt: self._notify_ui(), 0)
+
+    def _publish_start_failure(self, ex):
+        """Main-thread callback after the worker's start raised."""
+        print(f'Recording start failed: {ex}')
+        self._start_pending = False
+        self._record_ok = False
+        self._record_started_at = None
+        # Drop the cancel flag too so a later well-timed start
+        # doesn't inherit a stale one.
+        self._start_cancel_requested = False
+        # Auto-degrade so the next attempt has a chance. No-op on
+        # non-Android (profile key stays None).
+        self._degrade_profile(self._record_profile_key)
+        Clock.schedule_once(lambda dt: self._notify_ui(), 0)
 
     def stop_recording(self):
+        if self._start_pending:
+            # User released the button while the worker was still
+            # setting up. Flag the cancel; the publish callback
+            # will tear down the MediaRecorder once start returns.
+            # Don't proceed to the regular stop flow — there's
+            # nothing to stop yet, and the post-publish teardown
+            # handles the audio-path / LIFT bookkeeping uniformly.
+            self._start_cancel_requested = True
+            return
         if not self._recording:
+            return
+        import time as _time
+        held = _time.monotonic() - (self._record_started_at or 0)
+        if held < self._MIN_HOLD_SEC:
+            # Tap, not hold. Tear down the in-flight MediaRecorder
+            # without writing the LIFT reference — a sub-_MIN_HOLD_SEC
+            # M4A is missing the moov atom and isn't playable anyway,
+            # and the platform-specific stop path is exactly where
+            # IllegalStateException-style wedges originate.
+            print(f'[record] tap-not-hold ({held:.3f}s < '
+                  f'{self._MIN_HOLD_SEC}s); ignoring')
+            self._recording = False
+            self._record_ok = False
+            self._pending_rerecord = False
+            # Tap-not-hold is a UX signal, not device evidence — clear
+            # the profile key so the stop-exception path can't degrade
+            # off an immediate-stop wedge.
+            self._record_profile_key = None
+            self._stop_native_recording()
+            self._record_started_at = None
+            Clock.schedule_once(lambda dt: self._notify_ui(), 0)
+            # Coaching toast on the main thread.
+            from kivy.app import App as _App
+            app = _App.get_running_app()
+            if app is not None:
+                Clock.schedule_once(
+                    lambda dt: app._show_toast(
+                        _tr('Hold the button to record')), 0)
             return
         self._recording = False
         self._pending_rerecord = False
         self._stop_native_recording()
+        self._record_started_at = None
+        # Post-stop file-size validation. A successful stop() can
+        # still leave behind a zero-byte or near-empty file on flaky
+        # MTK HAL builds — the encoder discarded everything and we'd
+        # otherwise advertise the basename into the LIFT. Only runs
+        # on Android filesystem paths; SAF content URIs would need a
+        # ContentResolver stat and are skipped (scoped storage is on
+        # newer Android where MediaRecorder is more reliable anyway).
+        if (platform == 'android'
+                and self._record_ok
+                and self._audio_path
+                and not self.db.is_uri
+                and self._record_profile_key):
+            try:
+                size = os.path.getsize(self._audio_path)
+            except OSError as ex:
+                print(f'[record] post-stop stat failed: {ex}')
+                size = 0
+            profile = self._AUDIO_PROFILES.get(self._record_profile_key)
+            if profile:
+                expected = held * profile['bitrate'] / 8
+                if size < expected * self._POST_STOP_MIN_RATIO:
+                    print(f'[record] post-stop validation failed: '
+                          f'{size} bytes for {held:.2f}s '
+                          f'(expected ~{int(expected)})')
+                    self._record_ok = False
+                    try:
+                        os.remove(self._audio_path)
+                    except OSError:
+                        pass
+                    self._degrade_profile(self._record_profile_key)
         # Write filename into LIFT XML only if both start and stop
         # ran clean. _record_ok flips False on a stop exception so a
         # half-finalised M4A (no moov atom, etc.) does not get
@@ -2982,13 +3570,19 @@ class RecorderController:
             self.db.set_audio(self.current['guid'], filename)
             self.current['audio_filename'] = filename
             self._dirty = True
-        self._notify_ui()
+        Clock.schedule_once(lambda dt: self._notify_ui(), 0)
         if self._record_ok:
             Clock.schedule_once(lambda dt: self.play_audio(), 0.5)
 
     def play_audio(self):
-        if self._playing:
-            return
+        # Defensive: tear down any stale player from a previous tap
+        # before starting a new one. The duration-based _playing reset
+        # timer is best-effort; an unfired timer (or a timer whose
+        # MediaPlayer never advanced past prepare) can leave the flag
+        # stuck and silently swallow subsequent taps. Stopping here
+        # ensures every fresh tap gets a clean MediaPlayer regardless
+        # of what state the prior one was in.
+        self._stop_active_player()
         e = self.current
         if not e or not e.get('audio_filename'):
             return
@@ -3094,6 +3688,40 @@ class RecorderController:
         self._pending_rerecord = True
         self._notify_ui()
 
+    def _stop_active_player(self):
+        """Release any in-flight MediaPlayer / AVAudioPlayer / SDL2
+        Sound so a fresh play_audio call starts from a known state.
+        Idempotent; safe to call when nothing is playing."""
+        player = getattr(self, '_player', None)
+        if player is not None:
+            try:
+                # Android MediaPlayer + iOS AVAudioPlayer both have
+                # stop()/release()-or-equivalent; either ignore
+                # exceptions (stale handles, already-released).
+                if hasattr(player, 'release'):
+                    try:
+                        player.stop()
+                    except Exception:
+                        pass
+                    player.release()
+                elif hasattr(player, 'stop'):
+                    player.stop()
+            except Exception:
+                pass
+            self._player = None
+        sound = getattr(self, '_sound', None)
+        if sound is not None:
+            try:
+                sound.stop()
+            except Exception:
+                pass
+            try:
+                sound.unload()
+            except Exception:
+                pass
+            self._sound = None
+        self._playing = False
+
     def _make_audio_path(self):
         e = self.current
         # Filename: {cawl}_{guid}_{en_gloss}.wav (extension is replaced
@@ -3134,15 +3762,44 @@ class RecorderController:
         OutputFormat = autoclass('android.media.MediaRecorder$OutputFormat')
         AudioEncoder = autoclass('android.media.MediaRecorder$AudioEncoder')
 
-        # Replace .wav with .m4a in either a path or a content:// URI —
-        # basename sits at the end of both, so str.replace works.
-        aac_path = path.replace('.wav', '.m4a')
+        # Resolve the audio-quality profile up front — both the
+        # container (MPEG_4 → .m4a, AAC_ADTS → .aac) and the
+        # bitrate/sample-rate flow from here. See _AUDIO_PROFILES
+        # for the full table.
+        prof_key = (peer_pref('audio_quality')
+                    or self._DEFAULT_AUDIO_PROFILE)
+        # Clamp to the auto-degradation ceiling if one has been pinned
+        # by a past failure on this device. The user can still pick a
+        # higher value in the picker, but the ceiling wins here — that
+        # request was for a profile this device already proved it
+        # can't handle.
+        ceiling = peer_pref('audio_quality_ceiling')
+        if ceiling and ceiling in self._PROFILE_LADDER \
+                and prof_key in self._PROFILE_LADDER:
+            if (self._PROFILE_LADDER.index(prof_key)
+                    < self._PROFILE_LADDER.index(ceiling)):
+                print(f'[record] ceiling clamp: {prof_key} → {ceiling}')
+                prof_key = ceiling
+        # Stash for the failure handlers so they know what to degrade.
+        self._record_profile_key = prof_key
+        profile = self._AUDIO_PROFILES.get(
+            prof_key,
+            self._AUDIO_PROFILES[self._DEFAULT_AUDIO_PROFILE])
+        print(f'[record] audio profile: {prof_key} '
+              f'(bitrate={profile["bitrate"]} '
+              f'sample_rate={profile["sample_rate"]} '
+              f'container={profile["output_format"]})')
+        # Path-extension swap follows the profile: .m4a for MPEG_4,
+        # .aac for AAC_ADTS. Basename sits at the end of both a
+        # filesystem path and a content:// URI, so str.replace works.
+        ext = profile['ext']
+        aac_path = path.replace('.wav', ext)
         mr = MediaRecorder()
         pfd = None
         try:
             mr.setAudioSource(AudioSource.MIC)
-            # MPEG_4/AAC gives broadest compatibility and highest quality on Android
-            mr.setOutputFormat(OutputFormat.MPEG_4)
+            mr.setOutputFormat(
+                getattr(OutputFormat, profile['output_format']))
             if self.db.is_uri:
                 # ContentResolver-acquired ParcelFileDescriptor: hand
                 # the underlying Java FileDescriptor straight to
@@ -3161,11 +3818,52 @@ class RecorderController:
             else:
                 mr.setOutputFile(aac_path)
             mr.setAudioEncoder(AudioEncoder.AAC)
-            mr.setAudioEncodingBitRate(256000)   # 256 kbps
-            mr.setAudioSamplingRate(48000)        # 48 kHz
-            mr.setAudioChannels(1)                # mono for voice
+            mr.setAudioEncodingBitRate(profile['bitrate'])
+            mr.setAudioSamplingRate(profile['sample_rate'])
+            mr.setAudioChannels(1)
+            # 60-second ceiling per recording. Bounds the worst-case
+            # encoder memory footprint and gives the user a natural
+            # "max duration" stopping point on a held button.
+            mr.setMaxDuration(60_000)
             mr.prepare()
             mr.start()
+            # Keep the screen on while recording — a long hold with
+            # no other touch events looks like idle to aggressive
+            # OEM power-management (HiOS, MIUI, etc.); the
+            # WindowManager flag pins the activity foreground so the
+            # MediaRecorder surface doesn't get frozen mid-capture.
+            #
+            # window.addFlags mutates the view hierarchy, which
+            # Android only permits from the UI thread. We're on a
+            # worker right now (start_recording spawned us so the
+            # MediaRecorder.prepare/start chain wouldn't block the
+            # touch dispatcher), so marshal the flag-flip via Clock
+            # to the main thread. Pre-resolving the LayoutParams /
+            # Activity / Window references here means the main-
+            # thread lambda is just two getters + one call — cheap
+            # and can't ImportError mid-tick.
+            try:
+                _WMLP = autoclass(
+                    'android.view.WindowManager$LayoutParams')
+                PythonActivity = autoclass(
+                    'org.kivy.android.PythonActivity')
+                _window = PythonActivity.mActivity.getWindow()
+                # FLAG_KEEP_SCREEN_ON = 0x80; using the constant via
+                # autoclass instead of the magic number so future
+                # API renames don't silently no-op.
+                _flag = _WMLP.FLAG_KEEP_SCREEN_ON
+
+                def _add_keep_screen_on(_dt, w=_window, f=_flag):
+                    try:
+                        w.addFlags(f)
+                    except Exception as ex:
+                        print(f'[record] KEEP_SCREEN_ON add (main '
+                              f'thread) failed: {ex}')
+                Clock.schedule_once(_add_keep_screen_on, 0)
+            except Exception as ex:
+                # Best-effort; never fail a record because the
+                # power-management hint didn't take.
+                print(f'[record] KEEP_SCREEN_ON setup failed: {ex}')
         except Exception:
             try:
                 mr.release()
@@ -3185,14 +3883,30 @@ class RecorderController:
         if self._recorder:
             try:
                 self._recorder.stop()
-                self._recorder.release()
             except Exception as ex:
                 # IllegalStateException here typically means the M4A
-                # has no moov atom — file is unplayable. Don't let
+                # has no moov atom — file is unplayable (tap-not-hold,
+                # immediate stop after start, etc.). Don't let
                 # stop_recording advertise the basename.
-                print(f'Android stop error: {ex}')
+                print(f'Android stop() error: {ex}')
                 self._record_ok = False
+                # Stop-time wedges are exactly the MTK HAL failure
+                # mode the ladder exists for. Degrade so the next
+                # attempt avoids the same profile.
+                self._degrade_profile(self._record_profile_key)
             finally:
+                # release() is the cleanup pair to start() — it must
+                # run regardless of whether stop() threw. A wedged
+                # MediaRecorder left un-released holds the mic + a
+                # native buffer until GC; on slow MTK chips this has
+                # been observed to wedge subsequent record attempts.
+                # release() can itself throw on a sufficiently bad
+                # state — defend so the exception doesn't propagate
+                # up and mask whatever stop() raised.
+                try:
+                    self._recorder.release()
+                except Exception as ex:
+                    print(f'Android release() error: {ex}')
                 self._recorder = None
         pfd = self._record_pfd
         if pfd is not None:
@@ -3201,6 +3915,16 @@ class RecorderController:
             except Exception:
                 pass
             self._record_pfd = None
+        # Release the KEEP_SCREEN_ON flag set in _start_android_recording.
+        # No-op if start failed before the addFlags ran.
+        try:
+            from jnius import autoclass
+            _WMLP = autoclass('android.view.WindowManager$LayoutParams')
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            window = PythonActivity.mActivity.getWindow()
+            window.clearFlags(_WMLP.FLAG_KEEP_SCREEN_ON)
+        except Exception as ex:
+            print(f'[record] KEEP_SCREEN_ON clear failed: {ex}')
 
     # iOS: use AVAudioRecorder via pyobjus for maximum quality
     def _start_ios_recording(self, path):
@@ -3299,7 +4023,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.41.13'
+__version__ = '1.44.0'
 
 
 class LIFTRecorderApp(App):
@@ -3425,18 +4149,44 @@ class LIFTRecorderApp(App):
 
     def build(self):
         try:
-            # Pre-warm the daemon so its lazy-spawn overlaps with the
-            # rest of our Kivy boot. Single check_server_compat probe
-            # on a background thread; idempotent; no-op on non-Android.
-            # Recorder hits Android Java surfaces first in on_start
-            # (_warm_jnius_classes, activity.bind), so build()-time
-            # prewarm is a free overlap window. Per
-            # CLIENT_INTEGRATION.md § 3 / § 13. Toggleable for
-            # measurement runs via $AZT_HOME/_no_prewarm sentinel or
-            # AZT_BOOT_PREWARM=0.
+            # Detect device RAM tier once at startup. Used to gate
+            # prewarm and to size the Kivy image cache (#3 + #5 of
+            # the "be eager when you have room to" policy). Float
+            # MB; 0 on non-Android (treated as "plenty"). Cached on
+            # the app so other heuristics can read it.
+            self._total_ram_mb = self._sample_total_ram_mb()
+            # #3 Kivy image cache size — pick a limit proportional
+            # to device memory. Defaults are Kivy's (large); on tight
+            # devices we cap to ~10 decoded images, which is plenty
+            # for one-at-a-time entry display without keeping a
+            # large LRU of textures alive.
             try:
-                from azt_collab_client.ui.bootstrap import prewarm
-                prewarm()
+                from kivy.cache import Cache
+                if 0 < self._total_ram_mb <= 3072:
+                    Cache.register(
+                        'kv.loader', limit=10, timeout=60)
+                    print(f'[low-power] image cache limit=10 '
+                          f'(total RAM {self._total_ram_mb} MB)')
+                elif 0 < self._total_ram_mb <= 6144:
+                    Cache.register(
+                        'kv.loader', limit=25, timeout=120)
+            except Exception as ex:
+                print(f'[low-power] image cache size set failed: {ex}')
+            # #5 Boot prewarm — auto-skip on tight-RAM devices.
+            # Prewarm overlaps daemon spawn with Kivy init but burns
+            # ~30MB of native memory during the splash; on a 4GB
+            # device under zram pressure that's the worst possible
+            # window. Threshold: skip if total RAM ≤ 3GB.
+            # Toggleable for measurement runs via
+            # $AZT_HOME/_no_prewarm sentinel or AZT_BOOT_PREWARM=0
+            # (handled inside prewarm() itself).
+            try:
+                if 0 < self._total_ram_mb <= 3072:
+                    print(f'[prewarm] skipped — low-RAM device '
+                          f'({self._total_ram_mb} MB)')
+                else:
+                    from azt_collab_client.ui.bootstrap import prewarm
+                    prewarm()
             except Exception as ex:
                 print(f'[prewarm] {ex}', file=sys.stderr)
             # Drain the legacy peer-private prefs.json into the
@@ -3485,12 +4235,30 @@ class LIFTRecorderApp(App):
                 # thread before any worker thread can race them. See
                 # _warm_jnius_classes.
                 self._warm_jnius_classes()
+                # Diagnostic: log which presplash variant Android
+                # picked. Useful for confirming the multi-density
+                # add_resources wiring landed in the APK and that
+                # the device's DPI bucket maps to a real variant
+                # rather than the .jpg fallback. Shared helper per
+                # CLIENT_INTEGRATION.md § "Diagnostic logging —
+                # verify which bucket landed".
+                from azt_collab_client.lowpower import (
+                    log_presplash_variant)
+                log_presplash_variant(tag='presplash')
             # The AZTCollabProvider lives in the standalone server APK
             # (org.atoznback.aztcollab). Peers do NOT install provider
             # callbacks here — they reach the provider through the
             # azt_collab_client transport instead.
             # Handle Android back button / ESC key
             Window.bind(on_keyboard=self._on_back_button)
+            # #6 Touch-time tracking for prefetch-poll throttling.
+            # While the user is actively swiping/tapping, the
+            # cache-status poll (1Hz during prefetch) is wasted —
+            # the user wouldn't see indicator changes mid-gesture
+            # anyway. _tick_cache_status reads _last_touch_time and
+            # skips a tick if it's < 1s old.
+            self._last_touch_time = 0.0
+            Window.bind(on_touch_down=self._on_touch_record)
             # One-shot install/update workflow. bootstrap() runs the
             # server-APK install/update prompts and the recorder's own
             # self-update probe in sequence; on Android only, no-op
@@ -3506,10 +4274,13 @@ class LIFTRecorderApp(App):
             # us a daemon to talk to.
             Clock.schedule_once(lambda dt: self._run_bootstrap(), 0)
             # Periodically refresh the last-sync indicator so background
-            # debounced syncs (request_sync from swipes) become visible
+            # debounced commits (commit_project from swipes) and the
+            # daemon's scheduler-drain pushes become visible
             # without waiting for the next manual sync. project_status
-            # is a single GET against the daemon — cheap.
-            Clock.schedule_interval(
+            # is a single GET against the daemon — cheap. Retained so
+            # on_pause / on_resume can suspend the polling while the
+            # app is backgrounded (#4 of the low-power policy).
+            self._sync_status_event = Clock.schedule_interval(
                 lambda dt: self._update_sync_status(), 30)
         except Exception:
             traceback.print_exc()
@@ -3525,9 +4296,58 @@ class LIFTRecorderApp(App):
 
     def on_pause(self):
         self._finalise_active_recording('on_pause')
+        # #4: suspend the sync-status poll while backgrounded.
+        # No reason to round-trip the daemon every 30s when the
+        # user can't see the result. Resumed in on_resume.
+        ev = getattr(self, '_sync_status_event', None)
+        if ev:
+            try:
+                ev.cancel()
+            except Exception:
+                pass
+            self._sync_status_event = None
         return True
 
     def on_resume(self):
+        # Project-switch reconciliation per CLIENT_INTEGRATION.md
+        # § 14a. While we were paused the user may have switched
+        # projects via the daemon settings UI's "Switch project"
+        # button (or any other path landing in
+        # daemon.set_last_langcode). last_project() is the daemon-
+        # owned source of truth; if it differs from our in-memory
+        # _current_langcode, reload before re-arming any polls so
+        # the sync-status indicator that fires next tick reflects
+        # the new project, not the old one.
+        try:
+            from azt_collab_client import last_project
+            server_langcode = (last_project() or '').strip()
+        except Exception as ex:
+            # Transport failure — leave current view alone per
+            # contract. Daemon could be down or a URI grant stale.
+            print(f'[on_resume] last_project() failed: {ex}')
+            server_langcode = ''
+        if server_langcode:
+            peer_langcode = (
+                getattr(self, '_current_langcode', '') or '').strip()
+            if server_langcode != peer_langcode:
+                print(f'[on_resume] project switched externally: '
+                      f'peer={peer_langcode!r} → '
+                      f'server={server_langcode!r}; reloading')
+                # _auto_load_last_project pulls last_project() itself
+                # and runs the full open_project → load_lift path —
+                # the same code path the initial load uses, which is
+                # what the contract requires ("reuse that path").
+                self._auto_load_last_project()
+        # Re-arm the sync-status poll suspended in on_pause.
+        # Idempotent — if we were never paused, the event will
+        # have stayed alive and we skip.
+        if not getattr(self, '_sync_status_event', None):
+            self._sync_status_event = Clock.schedule_interval(
+                lambda dt: self._update_sync_status(), 30)
+            # Immediate refresh so the user sees a fresh state on
+            # foreground rather than waiting up to 30s.
+            Clock.schedule_once(
+                lambda dt: self._update_sync_status(), 0)
         return True
 
     def on_stop(self):
@@ -3572,14 +4392,19 @@ class LIFTRecorderApp(App):
         except Exception:
             return
         for cls in (
+                'android.app.ActivityManager',
+                'android.app.ActivityManager$MemoryInfo',
+                'android.content.Context',
+                'android.content.Intent',
+                'android.media.MediaPlayer',
                 'android.media.MediaRecorder',
+                'android.media.MediaRecorder$AudioEncoder',
                 'android.media.MediaRecorder$AudioSource',
                 'android.media.MediaRecorder$OutputFormat',
-                'android.media.MediaRecorder$AudioEncoder',
-                'android.media.MediaPlayer',
+                'android.net.ConnectivityManager',
                 'android.net.Uri',
-                'android.content.Intent',
                 'android.os.ParcelFileDescriptor',
+                'android.view.WindowManager$LayoutParams',
                 'java.io.ByteArrayOutputStream',
                 'java.io.FileOutputStream',
                 'org.kivy.android.PythonActivity',
@@ -3657,6 +4482,15 @@ class LIFTRecorderApp(App):
             collab._set_log(message)
         except Exception:
             pass
+
+    def _on_touch_record(self, window, touch):
+        """Stamp _last_touch_time on every touch_down. Cheap;
+        only used by _tick_cache_status to throttle during user
+        interaction (#6). Returns False so the touch event
+        continues to its real handler."""
+        import time as _time
+        self._last_touch_time = _time.monotonic()
+        return False
 
     def _on_back_button(self, window, key, *args):
         """Handle Android back button (keycode 27) to navigate back."""
@@ -3752,19 +4586,39 @@ class LIFTRecorderApp(App):
             self._loading_overlay = None
             self._loading_detail = None
 
-    def _show_toast(self, msg, duration=1.5):
-        """Show a brief overlay message that auto-dismisses."""
+    def _show_toast(self, msg, duration=None):
+        """Show a brief overlay message that auto-dismisses.
+
+        Width is capped at min(85% of window, dp(320)); the label
+        wraps and the box grows vertically to fit. Duration scales
+        with message length (~25 chars/sec read speed, 1.5s floor,
+        8s cap) so longer status messages (e.g. AUTH_REFRESH_STALE's
+        "...current access expires in N minute(s). Open GitHub
+        Connect and tap Re-authenticate.") get enough time to read.
+        Pass an explicit ``duration`` to override.
+        """
         from kivy.uix.label import Label
         from kivy.uix.modalview import ModalView
+        if duration is None:
+            duration = max(1.5, min(8.0, len(msg) / 25.0))
+        pad = dp(20)
+        box_w = min(Window.width * 0.85, dp(320))
+        lbl = Label(
+            text=msg, font_size=sp(14), font_name=_FONT_NAME,
+            color=theme.TEXT,
+            halign='center', valign='middle',
+            text_size=(box_w - pad, None),
+            size_hint=(None, None),
+        )
+        lbl.texture_update()
+        lbl.size = (box_w, lbl.texture_size[1] + pad)
         view = ModalView(
-            size_hint=(None, None), size=(dp(250), dp(50)),
+            size_hint=(None, None),
+            size=(box_w, max(dp(50), lbl.height)),
             background_color=theme.OVERLAY,
             auto_dismiss=True,
         )
-        view.add_widget(Label(
-            text=msg, font_size=sp(14), font_name=_FONT_NAME,
-            color=theme.TEXT,
-        ))
+        view.add_widget(lbl)
         view.open()
         Clock.schedule_once(lambda dt: view.dismiss(), duration)
 
@@ -4007,37 +4861,209 @@ class LIFTRecorderApp(App):
             print(f'[cawl] legacy cache purge skipped: {ex}')
 
     def _start_image_prefetch(self):
-        """Warm the daemon's CAWL cache for entries in this project.
+        """Hand the daemon this project's CAWL working-set and start
+        the cache-progress poll.
 
-        Triggers CAWLHandle.open_read() for each basename on a worker
-        thread; the daemon coalesces concurrent calls and lazily
-        fetches missing binaries from raw.githubusercontent.com on its
-        own. Once warmed, in-session display reads hit the daemon's
-        cache directly (zero-copy FD on Android, loopback HTTP on
-        desktop) — no per-peer disk cache involved.
+        Per CLIENT_INTEGRATION.md § 10's daemon-driven prefetch
+        update: the peer no longer iterates CAWLHandle on its own.
+        It computes the working-set (one variant per CAWL id), hands
+        the list to ``cawl_prefetch`` once, and the daemon iterates
+        in its own background thread. That lets the daemon know the
+        actual work size so ``cawl_cache_status`` returns a
+        meaningful denominator (otherwise progress plateaus far short
+        of "100%" because the index counts every variant per CAWL
+        id but the peer only ever fetches the preferred one).
 
-        Per CLIENT_INTEGRATION.md § 10.5 (Cache-progress indicator),
-        also starts a 5-second poll of ``cawl_cache_status`` that
-        drives the ``cache_status_label`` so the user sees
-        "Caching images: M / N (network in use)" while the daemon
-        is downloading from upstream. Auto-hides when caching
-        catches up."""
+        On-demand fetches (CAWLHandle.open_read for the current swipe
+        target, etc.) still work — they hit the same daemon cache the
+        bulk warm populates."""
         if not self.recorder:
             print('[image-prefetch] no recorder; skipping')
             return
-        import threading
-        db = self.recorder.db
-        threading.Thread(
-            target=self._prefetch_images_worker,
-            args=(db,), daemon=True).start()
         langcode = getattr(self, '_current_langcode', '') or ''
-        print(f'[image-prefetch] started; langcode={langcode!r} for '
-              f'cache-progress poll')
-        if langcode:
-            self._start_cache_status_poll(langcode)
-        else:
+        if not langcode:
             print('[image-prefetch] no langcode; cache-progress '
                   'indicator will not poll')
+            return
+        try:
+            paths = self.recorder.db.all_cawl_paths()
+        except Exception as ex:
+            print(f'[image-prefetch] all_cawl_paths failed: {ex}')
+            return
+        if not paths:
+            print('[image-prefetch] no paths to warm '
+                  '(resolver returned empty)')
+            return
+        # "Be eager when you have room to" — sample the OS-level
+        # memory and network signals once before kicking the
+        # daemon-side warm. If the device is tight, skip bulk
+        # prefetch entirely; on-demand CAWLHandle.open_read still
+        # fetches the displayed image (just no progress indicator,
+        # no daemon-side bulk fill). Project switch re-samples
+        # naturally via the load_lift → _start_image_prefetch path.
+        ok, reason = self._have_room_for_prefetch()
+        if not ok:
+            print(f'[image-prefetch] skipped — {reason}; '
+                  f'on-demand only this session')
+            return
+        from azt_collab_client import cawl_prefetch
+        try:
+            resp = cawl_prefetch(langcode, paths)
+        except Exception as ex:
+            print(f'[image-prefetch] cawl_prefetch failed: {ex}')
+            return
+        print(f'[image-prefetch] daemon warm started: '
+              f'requested={resp.get("requested")} '
+              f'completed={resp.get("completed")} '
+              f'finished={resp.get("finished")}')
+        self._start_cache_status_poll(langcode)
+
+    def _sample_total_ram_mb(self):
+        """One-shot total-RAM read at startup, in MB. Used for
+        device-class decisions (image cache size, prewarm gate).
+        Returns 0 on non-Android — treated as "plenty" by gates."""
+        if platform != 'android':
+            return 0
+        try:
+            from jnius import autoclass
+            Context = autoclass('android.content.Context')
+            ActivityManager = autoclass('android.app.ActivityManager')
+            MemoryInfo = autoclass(
+                'android.app.ActivityManager$MemoryInfo')
+            PythonActivity = autoclass(
+                'org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            am = activity.getSystemService(Context.ACTIVITY_SERVICE)
+            mi = MemoryInfo()
+            am.getMemoryInfo(mi)
+            return int(mi.totalMem / (1024 * 1024))
+        except Exception as ex:
+            print(f'[low-power] totalMem sample failed: {ex}')
+            return 0
+
+    def _sample_memory_state(self):
+        """Live memory snapshot. Returns
+        ``(low_memory_flag, avail_ratio, avail_mb)`` or
+        ``(False, 1.0, 0)`` on non-Android / JNI failure (treated
+        as "plenty of headroom" by the kill-switches that read it)."""
+        if platform != 'android':
+            return False, 1.0, 0
+        try:
+            from jnius import autoclass
+            Context = autoclass('android.content.Context')
+            ActivityManager = autoclass('android.app.ActivityManager')
+            MemoryInfo = autoclass(
+                'android.app.ActivityManager$MemoryInfo')
+            PythonActivity = autoclass(
+                'org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            am = activity.getSystemService(Context.ACTIVITY_SERVICE)
+            mi = MemoryInfo()
+            am.getMemoryInfo(mi)
+            total = max(mi.totalMem, 1)
+            return (bool(mi.lowMemory),
+                    mi.availMem / total,
+                    int(mi.availMem / (1024 * 1024)))
+        except Exception as ex:
+            print(f'[low-power] memory sample failed: {ex}')
+            return False, 1.0, 0
+
+    def _is_low_memory(self):
+        """True iff the OS reports memory pressure right now, or
+        free-RAM ratio is below 15%. Single source of truth for
+        the runtime "is this a moment to back off?" question."""
+        low, ratio, _ = self._sample_memory_state()
+        return low or ratio < 0.15
+
+    def _downsample_for_display(self, src_path):
+        """If the device reports memory pressure, return a path to a
+        downsampled (max 720px) copy of ``src_path`` in a session-
+        local side cache. Otherwise return ``src_path`` unchanged.
+
+        Lazy: only downsamples when actually called (on display)
+        and only if the side cache doesn't already have an entry.
+        The side cache lives under ``<session tmp>/_lowres/`` and
+        is GC'd with the rest of the per-session image cache on
+        app close.
+
+        Returns ``src_path`` on any failure — the original is
+        always a valid fallback."""
+        if not src_path or not os.path.exists(src_path):
+            return src_path
+        if not self._is_low_memory():
+            return src_path
+        try:
+            tmp_root = self._get_image_cache_dir()
+            if not tmp_root:
+                return src_path
+            lowres_dir = os.path.join(tmp_root, '_lowres')
+            os.makedirs(lowres_dir, exist_ok=True)
+            base = os.path.basename(src_path)
+            dest = os.path.join(lowres_dir, base)
+            if (os.path.exists(dest)
+                    and os.path.getmtime(dest)
+                    >= os.path.getmtime(src_path)):
+                return dest
+            from PIL import Image as PILImage
+            with PILImage.open(src_path) as im:
+                w, h = im.size
+                max_dim = 720
+                if max(w, h) <= max_dim:
+                    # Already small enough — just point at the
+                    # original; no need to copy.
+                    return src_path
+                ratio = max_dim / max(w, h)
+                resized = im.resize(
+                    (int(w * ratio), int(h * ratio)),
+                    PILImage.LANCZOS)
+                # Preserve the source's format; fall back to PNG.
+                fmt = im.format or 'PNG'
+                resized.save(dest, fmt)
+            return dest
+        except Exception as ex:
+            print(f'[low-power] downsample {src_path!r}: {ex}')
+            return src_path
+
+    def _have_room_for_prefetch(self):
+        """Return ``(ok, reason)``. ``ok=True`` iff the device has
+        headroom to bulk-warm the CAWL cache.
+
+        Three OR'd kill-switches, all peer-side OS signals:
+
+        - ``ActivityManager.MemoryInfo.lowMemory`` — the OS's own
+          "I'm under memory pressure" boolean.
+        - ``availMem / totalMem < 15%`` — secondary memory check
+          (catches just before lowMemory fires).
+        - Active network is metered (cellular, typically) — don't
+          burn the user's data plan on a background warm.
+
+        Desktop / iOS always return ``(True, '')``."""
+        if platform != 'android':
+            return True, ''
+        low, ratio, _ = self._sample_memory_state()
+        if low:
+            return False, 'lowMemory flag set by OS'
+        if ratio < 0.15:
+            return False, f'free RAM {ratio:.1%} < 15%'
+        try:
+            from jnius import autoclass
+            Context = autoclass('android.content.Context')
+            PythonActivity = autoclass(
+                'org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            cm = activity.getSystemService(
+                Context.CONNECTIVITY_SERVICE)
+            active = cm.getActiveNetwork()
+            if active is not None:
+                caps = cm.getNetworkCapabilities(active)
+                if caps is not None:
+                    # NET_CAPABILITY_NOT_METERED = 11.
+                    if not caps.hasCapability(11):
+                        return False, 'metered network'
+        except Exception as ex:
+            print(f'[prefetch] network-sample failed; '
+                  f'defaulting eager: {ex}')
+        return True, ''
 
     # ── CAWL cache-progress indicator ────────────────────────────────────
     # Per CLIENT_INTEGRATION.md § 10.5: while a CAWL prefetch is in
@@ -4047,7 +5073,7 @@ class LIFTRecorderApp(App):
     # doesn't disconnect Wi-Fi mid-warm and end up with a half-cache.
 
     def _start_cache_status_poll(self, langcode):
-        """Begin a 5-second poll of the daemon's CAWL cache status.
+        """Begin a 1-second poll of the daemon's CAWL cache status.
         Idempotent: an already-running poll is replaced (langcode may
         have changed via project switch). Stops on its own once the
         cache catches up to the index."""
@@ -4058,6 +5084,14 @@ class LIFTRecorderApp(App):
                 pass
             self._cache_status_event = None
         self._cache_status_langcode = langcode
+        # Reset the state-change tracker so the first poll always
+        # logs (subsequent identical polls don't, per the contract).
+        # Tuple is (cached, total, offline, circuit_open) — flag flips
+        # without count changes still need to produce one log line so
+        # logcat shows when the daemon transitioned to
+        # offline-skipped / paused state.
+        self._cache_status_last = (-1, -1, False, False)
+        self._logged_total_zero = False
         print(f'[cache-status] poll starting for langcode={langcode!r}')
         self._cache_status_event = Clock.schedule_interval(
             lambda _dt: self._tick_cache_status(), 1.0)
@@ -4066,7 +5100,17 @@ class LIFTRecorderApp(App):
     def _tick_cache_status(self):
         """One poll iteration. Runs the daemon RPC on a worker so the
         UI thread isn't pinned waiting for the cache_status response;
-        marshals the label update back to the main thread."""
+        marshals the label update back to the main thread.
+
+        #6: skip the tick if the user is actively interacting (touch
+        within the last second). The 1Hz poll burns a daemon round-
+        trip and an indicator-text re-render — wasted during a
+        swipe gesture where the user can't perceive the indicator
+        anyway."""
+        import time as _time
+        if _time.monotonic() - getattr(
+                self, '_last_touch_time', 0.0) < 1.0:
+            return
         langcode = getattr(self, '_cache_status_langcode', '') or ''
         if not langcode:
             self._hide_cache_indicator()
@@ -4082,27 +5126,55 @@ class LIFTRecorderApp(App):
                 return
             cached = int(status.get('cached') or 0)
             total = int(status.get('total') or 0)
-            print(f'[cache-status] daemon reports cached={cached} '
-                  f'total={total} image_repo={status.get("image_repo")!r}')
+            # `offline` / `circuit_open` are additive flags from
+            # daemon 0.41.21 — `.get()` with False default keeps the
+            # pre-0.41.21 path working (active-progress branch).
+            offline = bool(status.get('offline'))
+            circuit_open = bool(status.get('circuit_open'))
+            # Log only on state change so a 1 Hz poll doesn't fill
+            # logcat with identical lines (contract § 10). State
+            # includes the flags so a flag flip still produces one
+            # log even when the counts didn't move.
+            last = getattr(self, '_cache_status_last',
+                           (-1, -1, False, False))
+            key = (cached, total, offline, circuit_open)
+            if key != last:
+                print(f'[cache-status] cached={cached} total={total} '
+                      f'offline={offline} circuit_open={circuit_open} '
+                      f'image_repo={status.get("image_repo")!r}')
+                self._cache_status_last = key
             Clock.schedule_once(
-                lambda dt, c=cached, t=total: self._apply_cache_status(
-                    c, t), 0)
+                lambda dt, c=cached, t=total, o=offline, x=circuit_open:
+                    self._apply_cache_status(c, t, o, x), 0)
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _apply_cache_status(self, cached, total):
+    def _apply_cache_status(self, cached, total,
+                            offline=False, circuit_open=False):
         """Render the indicator (or hide it) based on the latest
-        cached / total counts. Cancels the polling Clock event once
-        the cache catches up."""
+        cached / total counts plus the `offline` / `circuit_open`
+        flags. Cancels the polling Clock event once the cache
+        catches up. Diagnostic prints fire only on the first
+        occurrence of each terminal state — _tick already rate-
+        limits per-tick logs.
+
+        Polling continues during offline / circuit_open per contract
+        § 10 — the daemon's scheduler watcher fires
+        `cawl.on_online_edge()` on the offline→online transition
+        which re-fires `auto_prefetch`; the running 1 Hz poll is
+        what lets the banner flip back to live progress
+        automatically when that happens."""
         if total == 0:
-            print('[cache-status] total=0 → hiding indicator '
-                  '(daemon has no index entries: endpoint missing on '
-                  'this server APK, no image_repo configured, or '
-                  'index transport still broken)')
+            if not getattr(self, '_logged_total_zero', False):
+                self._logged_total_zero = True
+                print('[cache-status] total=0 → hiding indicator '
+                      '(no index entries: endpoint missing on this '
+                      'server APK, no image_repo configured, or the '
+                      'index transport is broken)')
             self._hide_cache_indicator()
             return
         if cached >= total:
-            print(f'[cache-status] cached={cached} >= total={total} '
-                  '→ cache warm; hiding + stopping poll')
+            print(f'[cache-status] cache warm: {cached}/{total}; '
+                  'hiding + stopping poll')
             self._hide_cache_indicator()
             event = getattr(self, '_cache_status_event', None)
             if event:
@@ -4112,14 +5184,26 @@ class LIFTRecorderApp(App):
                     pass
                 self._cache_status_event = None
             return
-        # Shared msgid with azt_collab_client/locales (the daemon
-        # settings UI uses the same indicator) so the recorder
-        # inherits the French translation via the gettext fallback
+        # Shared msgids with azt_collab_client/locales (the daemon
+        # settings UI uses the same three indicator strings) so the
+        # recorder inherits translations via the gettext fallback
         # chain — no peer-side duplicate.
-        self._show_cache_indicator(_tr(
-            'Caching images: {cached} / {total} '
-            '(network in use — please stay online)'
-        ).format(cached=cached, total=total))
+        if offline:
+            msg = _tr(
+                'Image cache: {cached} / {total} '
+                '(offline — will resume when online)'
+            ).format(cached=cached, total=total)
+        elif circuit_open:
+            msg = _tr(
+                'Image cache: {cached} / {total} '
+                '(paused — connectivity lost)'
+            ).format(cached=cached, total=total)
+        else:
+            msg = _tr(
+                'Caching images: {cached} / {total} '
+                '(network in use — please stay online)'
+            ).format(cached=cached, total=total)
+        self._show_cache_indicator(msg)
 
     def _show_cache_indicator(self, text):
         try:
@@ -4133,6 +5217,49 @@ class LIFTRecorderApp(App):
         lbl.height = dp(22)
         lbl.opacity = 1
 
+    def _show_severe_alert(self, text):
+        """Show the sticky red banner used for the never-silenced
+        sync codes (CLIENT_INTEGRATION.md § 17: DATA_LOSS_RISK +
+        COMMIT_REPEATEDLY_FAILED). Tap-to-dismiss via the banner's
+        on_release. Replaces the previous _show_toast call for
+        these codes — a 1.5s toast wasn't long enough for the user
+        to read the multi-line maintainer-contact wording.
+
+        ``text`` is the already-translated message (markup OK)."""
+        try:
+            btn = self.root.ids.sm.get_screen('recorder').ids.get(
+                'severe_alert_banner')
+        except Exception:
+            return
+        if not btn:
+            return
+        btn.text = text
+        # Fixed height fits ~4-5 lines of sp(12) wrapped text;
+        # the daemon translations land around 4 lines on a typical
+        # phone width. Wrap drops further text on overflow —
+        # acceptable for an emergency banner, the action is the
+        # same regardless of which file count is shown.
+        btn.height = dp(80)
+        btn.opacity = 1
+
+    def _dismiss_severe_alert(self):
+        """Hide the severe-alert banner. Wired to the banner's
+        on_release in KV. The daemon will re-emit the underlying
+        status code (DATA_LOSS_RISK / COMMIT_REPEATEDLY_FAILED)
+        on the next sync if the condition persists, so dismissing
+        doesn't actually silence anything — the next poll-job /
+        do_sync cycle will surface it again if still applicable."""
+        try:
+            btn = self.root.ids.sm.get_screen('recorder').ids.get(
+                'severe_alert_banner')
+        except Exception:
+            return
+        if not btn:
+            return
+        btn.text = ''
+        btn.height = 0
+        btn.opacity = 0
+
     def _hide_cache_indicator(self):
         try:
             lbl = self.root.ids.sm.get_screen('recorder').ids.get(
@@ -4144,32 +5271,6 @@ class LIFTRecorderApp(App):
         lbl.text = ''
         lbl.height = 0
         lbl.opacity = 0
-
-    def _prefetch_images_worker(self, db):
-        """Pull each CAWL basename via the resolver so the daemon's
-        cache fills (and the local tmp pull-through path is ready).
-        Skips on any error — spotty network surfaces as missing
-        images on demand, not as a prefetch crash."""
-        try:
-            basenames = db.all_cawl_basenames()
-        except Exception as ex:
-            print(f'[image-prefetch] all_cawl_basenames failed: {ex}')
-            return
-        if not basenames:
-            print('[image-prefetch] no basenames to warm (resolver '
-                  'has empty CAWL → basename map; see [cawl] _load '
-                  'output for why)')
-            return
-        count = 0
-        for cawl in basenames:
-            try:
-                path = db._image_resolver.get_path(cawl)
-                if path:
-                    count += 1
-            except Exception:
-                pass
-        print(f'[image-prefetch] warmed {count}/{len(basenames)} '
-              f'CAWL images via daemon')
 
     def load_lift(self, path):
         self._dismiss_loading_overlay()
@@ -4501,6 +5602,9 @@ class LIFTRecorderApp(App):
             is the number of commits ahead of the remote that haven't
             been pushed yet (ProjectStatus.commits_ahead). ``(OK)``
             when commits_ahead is 0.
+          - Work-offline mode appends ``' · offline'`` per
+            CLIENT_INTEGRATION.md § 17b: the daemon-side toggle is
+            on, so pending commits won't be pushed even when online.
 
         Date prefixes (``'yesterday HH:MM'`` / ``'N days ago HH:MM'``)
         prepend the time when last_sync is older than today.
@@ -4522,8 +5626,22 @@ class LIFTRecorderApp(App):
         last_sync = float(getattr(status, 'last_sync', 0.0) or 0.0)
         last_commit = float(getattr(status, 'last_commit', 0.0) or 0.0)
         commits_ahead = int(getattr(status, 'commits_ahead', 0) or 0)
+        n_changes = int(getattr(status, 'n_changes', 0) or 0)
+        work_offline = bool(getattr(status, 'work_offline', False))
+        # Always render the uncommitted-file count in red when
+        # n_changes > 0. We started with a >60 s persistence gate
+        # to avoid flashing during normal record-and-commit cycles,
+        # but the user wants to see the count empirically — short
+        # flashes during transient dirty windows are acceptable
+        # tuition; a steady non-zero red is the data-loss-risk
+        # signal we want users to learn to read.
+        show_dirty_red = n_changes > 0
+        offline_tag = f' · {_tr("offline")}' if work_offline else ''
         if not last_sync:
-            return (_tr('not backed up'), 0.0, last_commit)
+            base = _tr('not backed up')
+            if show_dirty_red:
+                base = f'{base} [color=ff4444]+{n_changes}[/color]'
+            return (f'{base}{offline_tag}', 0.0, last_commit)
         dt_sync = datetime.datetime.fromtimestamp(last_sync)
         now = datetime.datetime.now()
         sync_date = dt_sync.date()
@@ -4535,10 +5653,21 @@ class LIFTRecorderApp(App):
             base = f'yesterday {time_str}'
         else:
             base = f'{days} days ago {time_str}'
-        if commits_ahead > 0:
-            base = f'{base} (+{commits_ahead})'
-        else:
-            base = f'{base} (OK)'
+        suffix = f'+{commits_ahead}' if commits_ahead > 0 else 'OK'
+        # Examples on the rendered indicator:
+        #   (OK)                — committed + pushed, all clean
+        #   (+3)                — 3 commits ahead of remote
+        #   (OK <red>+5</red>)  — 5 dirty files awaiting commit;
+        #                         brief if commits are happening,
+        #                         sticky if they aren't (the
+        #                         data-loss-risk signal we want
+        #                         users to learn to read)
+        #   (+1 <red>+5</red>)  — both: unpushed commit AND dirty
+        #   (+1) · offline      — work-offline toggle is on; daemon
+        #                         won't push even when online
+        if show_dirty_red:
+            suffix = f'{suffix} [color=ff4444]+{n_changes}[/color]'
+        base = f'{base} ({suffix}){offline_tag}'
         return (base, last_sync, last_commit)
 
     def _update_sync_status(self):
@@ -4547,7 +5676,14 @@ class LIFTRecorderApp(App):
         driven debounced sync) by watching project_status.last_commit
         across polls. On a change, refresh the recorder UI in place
         per CLIENT_INTEGRATION.md § 11 — same anchor entry, fresh
-        content."""
+        content.
+
+        Also polls the most recent auto-commit job (if any) for
+        DATA_LOSS_RISK statuses per CLIENT_INTEGRATION.md § 17 —
+        commit_project is fire-and-forget so this is the only
+        seam where the eventual Result becomes observable for the
+        auto-commit context."""
+        self._check_data_loss_risk_async()
         text, _last_sync, last_commit = self._sync_status_info()
         sm = self.root.ids.sm
         rec_screen = sm.get_screen('recorder')
@@ -4575,19 +5711,36 @@ class LIFTRecorderApp(App):
         mark_github_app_installed(True)
 
     def _auto_commit_sync(self):
-        """Fire-and-forget: ask the server to schedule a debounced sync.
-        Bursts of edits within sync.debounce_ms collapse into one
-        commit/push. The server stamps last_sync on success; the UI
-        refreshes its sync indicator after a short delay."""
+        """Fire-and-forget: ask the server to commit the current
+        group of changes. The peer's job is to mark the boundary
+        between meaningful chunks of work (one swipe = one entry's
+        worth of changes); the daemon's scheduler-drain loop decides
+        when to push (online + post_online_grace_s + !work_offline).
+        Commit happens regardless of connectivity. The UI refreshes
+        its sync indicator after a short delay.
+
+        Per CLIENT_INTEGRATION.md § 17b (0.43.0+): this RPC NEVER
+        emits PUSHED — push is daemon-driven. Peer surface for
+        "are we pushed up?" reads ProjectStatus.commits_ahead /
+        ProjectStatus.work_offline."""
         if not self.recorder:
             return
         langcode = self._current_langcode_or_register()
         if not langcode:
             return
         try:
-            from azt_collab_client import request_sync, ServerUnavailable
+            from azt_collab_client import commit_project, ServerUnavailable
             # § 12: contributor is daemon-owned, no longer on the wire.
-            request_sync(langcode)
+            job_id = commit_project(langcode)
+            # Stash for the data-loss-risk poller in
+            # _update_sync_status. commit_project is fire-and-forget,
+            # so DATA_LOSS_RISK on this code path can only be
+            # observed by poll_job-ing the eventual Result. The
+            # daemon's debounce collapses bursts into one run, so
+            # only the latest job_id matters — overwriting on each
+            # request is the right dedupe.
+            if job_id:
+                self._latest_sync_job_id = job_id
         except ServerUnavailable as ex:
             # Per azt_collab_client/CLAUDE.md "Peer contract: routing
             # on sync results", auto-sync on SERVER_UNAVAILABLE /
@@ -4596,6 +5749,7 @@ class LIFTRecorderApp(App):
             # mid-something-else and shouldn't be derailed.
             print(f'[auto-sync] sync service unavailable: {ex}',
                   file=sys.stderr, flush=True)
+            _log_server_crash_if_any('auto_sync')
             return
         except Exception as ex:
             print(f'[auto-sync] error: {ex}', file=sys.stderr, flush=True)
@@ -4604,6 +5758,67 @@ class LIFTRecorderApp(App):
         # the debounce window so a successful job's last_sync is in
         # place.
         Clock.schedule_once(lambda dt: self._update_sync_status(), 1.5)
+
+    def _check_data_loss_risk_async(self):
+        """Poll the most recent ``commit_project`` job for
+        never-silenced sync signals (``S.DATA_LOSS_RISK`` and
+        ``S.COMMIT_REPEATEDLY_FAILED``) per CLIENT_INTEGRATION.md
+        § 17.
+
+        Auto-commit goes through ``commit_project``
+        (fire-and-forget, daemon-debounced), which only returns a
+        job_id — not a Result. The eventual Result becomes
+        observable via ``poll_job(job_id)``, which is what this
+        method does. Called from ``_update_sync_status`` (every
+        30s tick + on events that already touch the status
+        indicator).
+
+        DATA_LOSS_RISK is never silenced per contract — render
+        the translated toast as soon as we see it. Drops the
+        stashed job_id once we observe a terminal state so we
+        don't poll the same finished job forever; the next
+        ``commit_project`` will stash a fresh one."""
+        job_id = getattr(self, '_latest_sync_job_id', '')
+        if not job_id:
+            return
+        try:
+            from azt_collab_client import poll_job, translate_status, S
+        except ImportError:
+            return
+        try:
+            info = poll_job(job_id)
+        except Exception as ex:
+            print(f'[auto-sync] poll_job({job_id!r}) failed: {ex}',
+                  file=sys.stderr)
+            return
+        if info is None:
+            # Unknown job — daemon evicted it. Stop polling.
+            self._latest_sync_job_id = ''
+            return
+        state = info.get('state', '')
+        if state in ('PENDING', 'RUNNING'):
+            return  # check again next tick
+        result = info.get('result')
+        # Terminal — DONE or otherwise. Drop the job_id so we don't
+        # re-observe the same Result on every status tick. Next
+        # commit_project will stash a fresh one.
+        self._latest_sync_job_id = ''
+        if result is None:
+            return
+        # Surface both never-silenced codes per
+        # CLIENT_INTEGRATION.md § 17 routing table. Banner, not
+        # toast — see _show_severe_alert for rationale.
+        for _severe_code in (S.DATA_LOSS_RISK,
+                             S.COMMIT_REPEATEDLY_FAILED):
+            _severe = next((s for s in result.statuses
+                            if s.code == _severe_code), None)
+            if _severe is None:
+                continue
+            msg = translate_status(_severe)
+            print(f'[auto-sync] {_severe_code}: {msg}',
+                  file=sys.stderr, flush=True)
+            Clock.schedule_once(
+                lambda dt, m=msg: self._show_severe_alert(m), 0)
 
     def start_over(self):
         """Spawn the picker directly. Runs the auto-commit/sync and
@@ -4689,7 +5904,7 @@ class LIFTRecorderApp(App):
         longer hosts its own setup screen — there's one canonical
         settings UI in the suite, owned by azt_collabd, reached via
         azt_collab_client.open_server_ui(). _auto_commit_sync runs
-        in a worker so a slow request_sync RPC can't freeze the tap
+        in a worker so a slow commit_project RPC can't freeze the tap
         (same pattern as start_over)."""
         from azt_collab_client import open_server_ui as _open_server_ui
         import threading
@@ -4712,12 +5927,37 @@ class LIFTRecorderApp(App):
                 msg = _tr(
                     'Could not open sync settings: {error}'
                 ).format(error=err)
+            # If the failure isn't one of the benign environment
+            # cases, the daemon may have a crash worth surfacing.
+            # 'spawn_exited' especially — that's exactly the case
+            # the daemon's crash.log was written for.
+            if err not in ('desktop_only', 'server_apk_not_installed'):
+                _log_server_crash_if_any('go_collab')
             Clock.schedule_once(lambda dt: self._show_toast(msg), 0)
         threading.Thread(target=_worker, daemon=True).start()
 
     def share_apk(self):
         from azt_collab_client.ui import share_running_apk
         share_running_apk(on_error=self._show_error)
+
+    def share_log(self):
+        """Share the recorder's log file via Android's share sheet.
+
+        Delegates to ``azt_collab_client.ui.share.share_log_file``
+        (shipped daemon-side 0.41.19). The helper bundles the
+        current session plus the rotated `<path>.prev` previous
+        session into one text/plain blob, inserts via MediaStore
+        Downloads, and dispatches ACTION_SEND."""
+        # Imported via the module path because share_log_file isn't
+        # re-exported from azt_collab_client.ui.__init__ yet — keeps
+        # this peer-side call working independent of when the daemon
+        # team adds the convenience re-export.
+        from azt_collab_client.ui.share import share_log_file
+        share_log_file(
+            log_path=_LOG_PATH,
+            prev_path=(_LOG_PATH + '.prev') if _LOG_PATH else None,
+            on_error=self._show_error,
+        )
 
     def do_sync(self):
         if not self.recorder:
@@ -4744,6 +5984,15 @@ class LIFTRecorderApp(App):
             # Structure per azt_collab_client/CLAUDE.md "Peer contract:
             # routing on sync results" (do_sync example, lines 389-430):
             #
+            # 0. DATA_LOSS_RISK — never silenced (CLIENT_INTEGRATION.md
+            #    § 17, since 0.41.13). The daemon emits this when files
+            #    written by this peer aren't reaching git — surface
+            #    BEFORE any routing branch consumes the result so the
+            #    warning can't be hidden by a benign code that lands
+            #    in the same Result. Auto/user distinction does NOT
+            #    apply; both contexts must render the translated
+            #    toast / banner with the maintainer-contact wording.
+            #
             # 1. AUTH_REFRESH_STALE — toast first, no return. It
             #    piggybacks on the primary code, so the deadline
             #    warning must surface before any routing branch
@@ -4767,6 +6016,28 @@ class LIFTRecorderApp(App):
             # In this peer the server's one-size-fits-all settings UI
             # (go_collab) hosts both Publish and GitHub Connect — so
             # NOT_A_REPO/NO_REMOTE/AUTH_REQUIRED all route there.
+            # DATA_LOSS_RISK + COMMIT_REPEATEDLY_FAILED are the two
+            # never-silenced signals — surface BOTH before any
+            # routing branch consumes the result. Both are
+            # data-loss-class per CLIENT_INTEGRATION.md § 17
+            # routing table; COMMIT_REPEATEDLY_FAILED specifically
+            # catches the catchup-commit pattern (one fat commit
+            # after a streak of local-commit failures) — distinct
+            # from network-out, where push fails but commit
+            # succeeds.
+            for _severe_code in (S.DATA_LOSS_RISK,
+                                 S.COMMIT_REPEATEDLY_FAILED):
+                _severe = next((s for s in result.statuses
+                                if s.code == _severe_code), None)
+                if _severe is not None:
+                    _severe_msg = translate_status(_severe)
+                    # Sticky banner, not toast — these messages
+                    # tell the user to share the daemon log and
+                    # 1.5s isn't long enough to read the
+                    # instruction. The banner persists until tap.
+                    Clock.schedule_once(
+                        lambda dt, m=_severe_msg:
+                            self._show_severe_alert(m), 0)
             stale = next((s for s in result.statuses
                           if s.code == S.AUTH_REFRESH_STALE), None)
             if stale is not None:
@@ -4782,13 +6053,27 @@ class LIFTRecorderApp(App):
                 return
             if result.has(S.CONTRIBUTOR_UNSET):
                 # § 12: daemon refuses commit-issuing endpoints when no
-                # contributor name is set. Route to the daemon settings
-                # UI where set_contributor lives.
+                # contributor name is set. Route through go_collab —
+                # same App-level entry every other config-class branch
+                # in this table uses (AUTH_REQUIRED above, NOT_A_REPO,
+                # NO_REMOTE below). go_collab handles the settings-UI
+                # dispatch + the desktop-only fallback message.
                 _msg = translate_result(result)
                 Clock.schedule_once(
                     lambda dt, m=_msg: self._show_toast(m), 0)
+                Clock.schedule_once(lambda dt: self.go_collab(), 0)
+                return
+            if result.has(S.WORK_OFFLINE_ENABLED):
+                # Daemon-wide work-offline toggle is on; sync_project
+                # refused without attempting any push. Per
+                # CLIENT_INTEGRATION.md § 17 routing, toast + route
+                # to the daemon settings UI so the user can flip the
+                # toggle. Same shape as AUTH_REQUIRED / NOT_A_REPO.
+                _msg = translate_result(result)
                 Clock.schedule_once(
-                    lambda dt: self.open_server_ui(), 0)
+                    lambda dt, m=_msg: self._show_toast(m), 0)
+                from azt_collab_client import open_server_ui
+                Clock.schedule_once(lambda dt: open_server_ui(), 0)
                 return
             if result.has_any(S.APP_NOT_INSTALLED, S.APP_SUSPENDED,
                               S.REPO_NOT_AUTHORIZED):
@@ -4809,6 +6094,7 @@ class LIFTRecorderApp(App):
                 _unavail_msg = translate_result(result)
                 Clock.schedule_once(
                     lambda dt, m=_unavail_msg: self._show_toast(m), 0)
+                _log_server_crash_if_any('do_sync')
                 return
             if result.has(S.JOB_INTERRUPTED):
                 if retried:
@@ -5204,6 +6490,12 @@ class LIFTRecorderApp(App):
             img = ids.entry_image
             if r.has_image:
                 new_src = r.image_path
+                # #2 On lowMemory devices, hand AsyncImage a
+                # downsampled side-cache path instead of the full-
+                # resolution original. Reduces texture-upload memory
+                # and Kivy's decode cost. No-op on devices with
+                # headroom — full-res displayed.
+                new_src = self._downsample_for_display(new_src)
                 if img.source != new_src:
                     img.source = new_src
                     img.opacity = 1

@@ -4,10 +4,10 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: azt-recorder 1.41.11\n"
+"Project-Id-Version: azt-recorder 1.42.13\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-13 00:00+0000\n"
-"PO-Revision-Date: 2026-05-13 00:00+0000\n"
+"POT-Creation-Date: 2026-05-14 00:00+0000\n"
+"PO-Revision-Date: 2026-05-14 00:00+0000\n"
 "Last-Translator: \n"
 "Language-Team: French\n"
 "Language: fr\n"
@@ -504,3 +504,86 @@ msgstr "Aller au numéro de {label} ({lo}-{hi})"
 
 msgid "list"
 msgstr "liste"
+
+msgid "Hold the button to record"
+msgstr "Maintenez le bouton pour enregistrer"
+
+msgid "Audio quality:"
+msgstr "Qualité audio :"
+
+msgid "High"
+msgstr "Haute"
+
+msgid "Medium"
+msgstr "Moyenne"
+
+msgid "Low"
+msgstr "Basse"
+
+msgid "Low AAC"
+msgstr "Basse (AAC)"
+
+msgid "High AAC"
+msgstr "Haute (AAC)"
+
+msgid "Medium AAC"
+msgstr "Moyenne (AAC)"
+
+msgid "Very Low"
+msgstr "Très basse"
+
+msgid "Very Low AAC"
+msgstr "Très basse (AAC)"
+
+# Auto-sync setting (#8 of the low-power policy).
+msgid "Auto-sync:"
+msgstr "Synchronisation auto :"
+
+msgid "Every swipe"
+msgstr "Chaque glissement"
+
+msgid "When idle"
+msgstr "Au repos"
+
+msgid "Manual only"
+msgstr "Manuel uniquement"
+
+# ── v1.42.x additions ──────────────────────────────────────────────────────
+
+# Section headers grouping the settings page after the v1.42.x
+# layout cleanup: UI Language / Project / Conserve power / Debug.
+msgid "Project"
+msgstr "Projet"
+
+msgid "Conserve power"
+msgstr "Économiser la batterie"
+
+msgid "Debug"
+msgstr "Débogage"
+
+# v1.42.9 renamed the "Share log" button to include the app name so
+# the user knows which suite peer's log is being shared after the
+# Android share-sheet hand-off. {app} is filled at rule-eval time
+# with APP_NAME (A-Z+T Recorder).
+msgid "Share {app} log"
+msgstr "Partager le journal de {app}"
+
+# v1.42.0 auto-degrading audio quality: surfaced when a recording
+# fails and the ladder drops one rung (container swap then bitrate
+# drop). _floor variant is for when we're already at very_low_aac.
+msgid "Recording failed; quality lowered. Please try again."
+msgstr "Échec de l'enregistrement ; qualité abaissée. Veuillez réessayer."
+
+msgid "Recording failed at the lowest quality. Please try again."
+msgstr "Échec de l'enregistrement à la qualité la plus basse. Veuillez réessayer."
+
+# v1.42.7 image-cache offline / circuit_open flag wording, per
+# CLIENT_INTEGRATION.md § 10. Mirrors the daemon settings UI's
+# strings; peer-side copies act as a backstop if the client
+# catalog doesn't yet have them (no harm if it does — translations
+# stay consistent).
+msgid "Image cache: {cached} / {total} (offline — will resume when online)"
+msgstr "Cache d'images : {cached} / {total} (hors ligne — reprendra une fois en ligne)"
+
+msgid "Image cache: {cached} / {total} (paused — connectivity lost)"
+msgstr "Cache d'images : {cached} / {total} (en pause — connexion perdue)"

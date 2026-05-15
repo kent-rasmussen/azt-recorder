@@ -1,5 +1,1296 @@
 CHANGELOG — A-Z+T Recorder
 
+1.44.0
+  Removed the auto-sync mode setting and migrated to the daemon's
+  new commit/push split (paired with daemon 0.43.0 / client 0.43.0,
+  CLIENT_INTEGRATION.md § 17b).
+
+  Setting removed: was a 3-way selector on the config screen
+  ('every swipe' / 'when idle' / 'manual only'). Behavior is now
+  unconditional — every swipe fires commit_project, marking the
+  boundary between meaningful chunks of work; the daemon's
+  scheduler-drain loop decides when to push (online +
+  post_online_grace_s + !work_offline). Commit and push are
+  separate concerns — commit is local-state hygiene that should
+  happen on every swipe regardless of connectivity, push is the
+  network step and is the daemon's call. The user-facing toggle
+  was conflating the two and exposing a knob users shouldn't have
+  had to think about.
+
+  Concretely removed: KV auto_sync_row + auto_sync_btn (config
+  screen); _AUTO_SYNC_LABELS, _AUTO_SYNC_DEFAULT, _AUTO_SYNC_IDLE_SEC
+  class attrs; _build_auto_sync_row, _show_auto_sync_overlay
+  methods; the mode/idle branches in _auto_commit_sync. Stale
+  peer_pref('auto_sync_on_swipe') values in $AZT_HOME/config.json
+  are now ignored (no migration needed — unknown keys are silently
+  dropped by the prefs store).
+
+  Contract migration (per CLIENT_INTEGRATION.md § 17 / § 17b):
+
+  - _auto_commit_sync now calls commit_project(langcode) instead
+    of request_sync(langcode). The alias still works but
+    commit_project is the explicit name for the commit-only RPC.
+  - _on_sync_done (manual Sync button) gains an
+    S.WORK_OFFLINE_ENABLED branch — toast + open_server_ui() so
+    the user can flip the daemon-wide work-offline toggle. Same
+    shape as the AUTH_REQUIRED / CONTRIBUTOR_UNSET routings.
+  - _sync_status_info now reads ProjectStatus.work_offline and
+    appends ' · offline' to the indicator when set. Examples:
+    'HH:MM (+3) · offline' = three pending commits, daemon won't
+    push because work-offline is on; 'HH:MM (+3)' = three pending,
+    daemon will drain on the next scheduler tick.
+  - Comments / docstrings referencing request_sync updated to
+    commit_project throughout.
+
+1.43.2
+  _show_toast helper rewritten: was fixed 250x50dp with a
+  non-wrapping label and a fixed 1.5s dismiss, which clipped
+  and outran longer status messages (e.g. AUTH_REFRESH_STALE's
+  ~125-char "...expires in N minute(s). Open GitHub Connect and
+  tap Re-authenticate." surfaced on do_sync). Now caps width at
+  min(85% of window, dp(320)), wraps the label, and sizes the
+  box vertically to fit the wrapped text. Duration scales with
+  message length (~25 chars/sec read speed, 1.5s floor, 8s
+  cap); call sites passing an explicit duration override
+  unchanged.
+
+1.43.1
+  Removed stale AZT_COLLAB_README.md (vendored snapshot of the
+  azt-collab suite README that predated the peer/daemon split:
+  told peers to `import azt_collabd` directly, predated
+  bootstrap()/LiftHandle/CAWL Stage 2). README.md and CLAUDE.md
+  link-fix: README points readers at
+  azt_collab_client/CLIENT_INTEGRATION.md for the peer contract;
+  CLAUDE.md points at azt_collab_client/status.py for the status-
+  code list (was the only thing CLAUDE.md cited the deleted file
+  for).
+
+1.43.0
+  Bundled azt_collab_client bumped from 0.41.24 to 0.42.0 via
+  the canonical symlink. Minor version bump for the recorder
+  per the paired-bump rule (peer APK visible signal of the
+  client-lib change) and because the client lands a real new
+  capability.
+
+  Contract delta (§ 19 "Rollout window"):
+
+  - Floor for "every APK has the in-receiver reap step" moved
+    from daemon 0.41.30 → 0.42.
+  - `_prompt_server_update` in client 0.42+ now auto-detects
+    the legacy-rollout case: reads PackageManager.getPackageInfo
+    for the server APK on-disk, compares to whatever /v1/health
+    reports as the running version; if installed > running it
+    substitutes `_prompt_server_reboot_to_apply` (a "you have X
+    installed but the running process is Y — reboot to switch"
+    popup) for the usual download-and-install popup. Closes
+    the UX gap where users who had just sideloaded a newer
+    server were told to "wait for an update" they already had.
+
+  Recorder side is automatic — the recorder uses the standard
+  bootstrap() flow, which inherits the new pre-install
+  detection. No main.py change, no buildozer.spec change.
+
+1.42.31
+  Contract catch-up: CLIENT_INTEGRATION.md § 19 resolved the
+  hook/contract drift filed in 1.42.30. The daemon team's
+  resolution kept the hook injecting both the receiver and
+  KILL_BACKGROUND_PROCESSES into every suite APK (including
+  peers), but the rationale changed: each APK's own
+  SuiteSelfReplaceReceiver reaps its OWN old-code processes
+  via killBackgroundProcesses(getPackageName()) — no
+  cross-package killing happens, so the permission is needed
+  on the APK whose receiver fires.
+
+  Implications for the recorder:
+    - buildozer.spec.tmpl: KILL_BACKGROUND_PROCESSES stays
+      OUT of android.permissions per § 19 "Peers MUST NOT add
+      KILL_BACKGROUND_PROCESSES to their own android.
+      permissions" — the hook adds it during manifest
+      injection. Declaring it peer-side is redundant and
+      gives Play Store an extra permission to scrutinise.
+    - The hook-injected KILL_BACKGROUND_PROCESSES + receiver
+      visible in our build output ([hook] injected … lines)
+      is the expected behaviour now, not the contract drift
+      it appeared to be when I filed the NOTES item.
+    - bootstrap._kill_server_background (the pre-0.41.30
+      peer-side cross-package backstop) is gone in client
+      0.41.28+. Standard bootstrap() flow inherits the new
+      shape automatically.
+
+  No code change in the recorder this version — recording
+  the catch-up + ratifying our existing spec state.
+
+1.42.30
+  Filed NOTES_TO_DAEMON.md item: shared p4a_hook.py still
+  injects KILL_BACKGROUND_PROCESSES into peer APKs despite
+  CLIENT_INTEGRATION.md § 2 saying "Peers do NOT need to
+  declare" it. Two resolution paths offered in the note —
+  gate the injection on dist (preferred, matches the explicit
+  reasoning) or walk back the contract's wording (lower-
+  effort if the peer-side receiver actually needs the
+  permission for something).
+
+  No recorder-side action — buildozer.spec.tmpl already
+  follows § 2 (KILL_BACKGROUND_PROCESSES removed in 1.42.29);
+  this version just records that the field-observable manifest
+  still contains it because the hook overrides our spec.
+
+1.42.29
+  Removed KILL_BACKGROUND_PROCESSES from android.permissions —
+  the contract no longer requires it. § 2 of CLIENT_INTEGRATION
+  .md is now explicit: "Peers do NOT need to declare
+  KILL_BACKGROUND_PROCESSES. ... that backstop is gone as of
+  daemon 0.41.30 / client 0.41.28 — the server APK's own
+  SuiteSelfReplaceReceiver reaps any old-code daemon process
+  from inside the new APK using its own permission, so peers
+  no longer need a permission to explain."
+
+  Net effect: 1.42.28 added the permission to comply with the
+  then-current contract; 1.42.29 takes it back out, since the
+  contract shifted the responsibility entirely to the
+  server-APK side. No code change in main.py — just the
+  buildozer.spec.tmpl revert.
+
+1.42.28
+  Picked up CLIENT_INTEGRATION.md § 19 "Package-replacement
+  handling" (acted on the NOTES_TO_DAEMON.md item filed in
+  1.42.26 / extended in 1.42.27). Daemon team shipped most of
+  it via shared infrastructure:
+
+  - ``SuiteSelfReplaceReceiver`` Java class in
+    azt-collab/android/src/main/java/, compiled into every APK
+    via the existing android.add_src — recorder inherits it
+    free (no peer-side Java needed).
+  - p4a_hook.py:_inject_self_replace_receiver injects the
+    manifest declaration for every APK in the suite, so the
+    recorder's AndroidManifest.xml picks up the receiver
+    without a manifest_extras change.
+  - bootstrap._do_check_again now calls
+    _kill_server_background (in azt_collab_client) as a
+    belt-and-braces measure for legacy server APKs that
+    pre-date 0.41.28's receiver — the recorder inherits this
+    via the standard bootstrap() flow.
+
+  Only required peer-side change: add KILL_BACKGROUND_PROCESSES
+  to android.permissions so bootstrap's kill helper actually
+  has permission to fire (normal-protection, no runtime grant
+  prompt). Per § 2 of the contract, which now lists it as
+  required.
+
+  § 17a (stuck-commit telemetry on ProjectStatus) is
+  informational — diagnostic fields peers MAY surface, NOT
+  load-bearing for any alarm path. Existing COMMIT_REPEATEDLY_
+  FAILED handling (1.42.24, via sync-Result iteration) is the
+  canonical surface and stays unchanged. Contract explicitly
+  warns against synthesising the toast off the polled count,
+  which our wiring already avoids.
+
+1.42.27
+  Extended the NOTES_TO_DAEMON.md package-upgrade item with two
+  clarifications under "Server APK self-handling":
+    - Install channels covered: all four pathways (adb install
+      -r, file-manager sideload, browser-driven INSTALL_PACKAGE,
+      Google Play) trigger MY_PACKAGE_REPLACED — they converge
+      on the same PackageInstaller commit. Fresh installs fire
+      PACKAGE_ADDED instead, fine for this bug.
+    - Manifest receiver, not runtime: runtime receivers require
+      a live process; manifest receivers cold-start to deliver
+      the broadcast, which is exactly what's needed when the OS
+      has killed the old process as part of the replace.
+
+1.42.26
+  Filed NOTES_TO_DAEMON.md item: "Suite-wide package-upgrade
+  handling — APK replacement vs. running process". Triggered by
+  a user-visible bug where sideloading the required server APK
+  in response to a client_too_old prompt didn't fix the prompt
+  — Android kept the old server process alive serving the old
+  version. Note lays out the principled fix:
+    1. Server APK self-handles MY_PACKAGE_REPLACED → killProcess
+       (removes the bug for every peer with no peer-side
+       cooperation needed).
+    2. Peer "Check again" backstop with
+       killBackgroundProcesses(<server package>).
+    3. KILL_BACKGROUND_PROCESSES added to CLIENT_INTEGRATION.md
+       § 2's required permissions list.
+    4. Peer self-replacement (each peer handles its own
+       MY_PACKAGE_REPLACED).
+    5. Contract codification as CLIENT_INTEGRATION.md § 19.
+
+  Peer-side bits will land here once the daemon team commits to
+  the contract — held off on shipping the recorder's permission
+  + receiver until then so we don't drift ahead of an evolving
+  contract.
+
+1.42.25
+  Upgraded the surface for never-silenced sync codes
+  (DATA_LOSS_RISK + COMMIT_REPEATEDLY_FAILED) from toast to
+  a sticky red banner. The 1.5 s toast wasn't long enough
+  for the user to read multi-line wording like "Saving to
+  git has failed N times in a row ... share daemon log so
+  we can investigate" before it vanished.
+
+  Banner specifics:
+    - Lives in RecorderScreen KV between the top bar and the
+      cache-progress indicator, at id `severe_alert_banner`
+    - Button (not Label) so tap-to-dismiss is native; KV
+      `on_release: app._dismiss_severe_alert()`
+    - Dark-red background, white text, markup=True
+    - Sticky: stays up until tapped. Dismissing doesn't
+      silence anything — the daemon re-emits the status on
+      the next sync if the condition persists, and the
+      next poll-job / do_sync re-shows the banner
+    - Show/hide via app._show_severe_alert(text) /
+      _dismiss_severe_alert; same Kivy hide pattern
+      (height: 0 / opacity: 0) the cache indicator uses
+
+  Wiring: replaced the `_show_toast` calls in both
+  do_sync._on_sync_done and _check_data_loss_risk_async with
+  `_show_severe_alert`. Translation still flows from
+  azt_collab_client.translate_status, no peer-side .po
+  addition needed.
+
+1.42.24
+  Contract catch-up: CLIENT_INTEGRATION.md § 17 formalized
+  S.COMMIT_REPEATEDLY_FAILED (routing-table entry, code-shape
+  example, and Constants list). The daemon team also exported
+  the constant — `azt_collab_client.status:56` defines
+  COMMIT_REPEATEDLY_FAILED. Switched our 1.42.22 string-literal
+  pre-wire over to the proper symbol (S.COMMIT_REPEATEDLY_FAILED)
+  in both surfacing paths (do_sync._on_sync_done and
+  _check_data_loss_risk_async). No behavior change — just code
+  style consistency with the contract example.
+
+1.42.23
+  Dropped the 60 s persistence gate added in 1.42.21 — red
+  `+n_changes` now shows whenever n_changes > 0, no waiting
+  period. Short flashes during the normal record → commit
+  window are acceptable; the signal we want users reading is
+  a sticky non-zero red, which is exactly the data-loss-risk
+  case. Empirical: ship, see if the flashes are actually a
+  problem. Removed `_n_changes_dirty_since` state tracking
+  and the monotonic-time import that supported it.
+
+1.42.22
+  Pre-wired `COMMIT_REPEATEDLY_FAILED` handling alongside the
+  existing `S.DATA_LOSS_RISK`. The daemon team is preparing
+  this status code for the case where local commits keep
+  failing (disk full, working tree corrupt, etc.) — distinct
+  from internet-out, where the push fails but the commit
+  succeeds. Both codes follow the same "never silenced —
+  surface in both auto-sync and user-initiated contexts"
+  contract.
+
+  Matched by string literal (`'COMMIT_REPEATEDLY_FAILED'`) so
+  the peer works pre-and-post the daemon's release of the
+  constant — `Status.code` is the string anyway, and the
+  string match keeps working when `S.COMMIT_REPEATEDLY_FAILED`
+  later lands as an export.
+
+  Wired in the same two places as DATA_LOSS_RISK:
+    - do_sync._on_sync_done: surface at the top, before
+      routing
+    - _check_data_loss_risk_async: surface from the 30 s
+      auto-sync poll-job loop
+
+1.42.21
+  Sync indicator now surfaces uncommitted-changes accumulation
+  in red after the dirty state has persisted for >60 seconds.
+  Closes the visibility gap from #1 (silent request_sync
+  failures during a daemon-unhealthy stretch) — when commits
+  aren't keeping pace, the indicator shows it instead of letting
+  dirties pile up invisibly until one giant commit eventually
+  fires.
+
+  Renders, using `n_changes` from project_status alongside the
+  existing `commits_ahead`:
+
+    (OK)                  — committed + pushed, clean
+    (+3)                  — 3 commits ahead of remote
+    (OK +5)               — 5 dirty files <60s — NORMAL, no red
+                            (transient state during the request_
+                            sync → debounce → commit round-trip)
+    (OK <red>+5</red>)    — 5 dirty files >60s old — PROBLEM
+                            (daemon not committing)
+    (+1 <red>+5</red>)    — both: 1 unpushed commit AND 5 dirty
+                            files stuck >60s
+
+  Persistence gate (`_n_changes_dirty_since`) prevents the red
+  number from flashing during normal record-and-commit cycles.
+  The 60 s threshold is about two poll cycles past the typical
+  commit window, so a steady-state recorder will never see red
+  unless something is actually wrong.
+
+  KV: `markup: True` on sync_status_label so [color=ff4444]
+  works. The dirty-count read uses the project_status field
+  already exposed by the client (no new RPC).
+
+1.42.20
+  Surface S.DATA_LOSS_RISK per CLIENT_INTEGRATION.md § 17 (new
+  in daemon 0.41.13). The daemon emits this status when files
+  written by the peer aren't reaching git — the "164 sound files
+  in one commit was actually OK, but where data loss WOULD
+  happen we wouldn't know" gap. Contract requires the status be
+  surfaced in BOTH contexts, never silenced.
+
+  Wired in two places:
+
+  - do_sync._on_sync_done: DATA_LOSS_RISK toast at the top of
+    the handler, BEFORE any routing branch consumes the result
+    (mirrors the existing AUTH_REFRESH_STALE pattern). User
+    sees the warning even if the primary code routes them to a
+    settings page.
+  - _auto_commit_sync: request_sync is fire-and-forget and
+    returns only a job_id, not a Result. Stash the job_id, then
+    poll it via the new _check_data_loss_risk_async helper,
+    which runs from _update_sync_status (~30 s cadence + after
+    do_sync). On a terminal Result with DATA_LOSS_RISK present,
+    render the same translated toast. Drops the stashed job_id
+    once observed so we don't re-surface stale warnings.
+
+  Translation is the daemon-team-owned msgid in
+  azt_collab_client/locales — French translation already
+  present (verified at line 1249); no peer-side .po addition
+  needed. Falls through the standard recorder → client catalog
+  chain.
+
+1.42.19
+  KEEP_SCREEN_ON addFlags moved off the worker thread. The
+  hint set in _start_android_recording was running on the
+  same worker that hosts the MediaRecorder.prepare/start
+  chain (spawned by start_recording so the touch dispatcher
+  doesn't block on JNI), but window.addFlags mutates the
+  view hierarchy — Android only permits that from the UI
+  thread. Symptom in logcat was:
+
+    [record] KEEP_SCREEN_ON add failed: JVM exception:
+        Only the original thread that created a view
+        hierarchy can touch its views. Expected: SDLActivity
+        Calling: Thread-17
+        ViewRootImpl$CalledFromWrongThreadException
+
+  The flag silently never got set, so aggressive OEM power
+  management (HiOS, MIUI, etc.) could still freeze the
+  MediaRecorder surface mid-capture. Fix: pre-resolve the
+  autoclass / Activity / Window references on the worker
+  (those are JNI lookups, fine off-thread), then marshal
+  the actual addFlags call via Clock.schedule_once so it
+  lands on the main thread. clearFlags in _stop_android_
+  recording was already on the main thread (called from
+  stop_recording / on_touch_up) so no fix needed there.
+
+1.42.18
+  buildozer.spec.tmpl: added ACCESS_NETWORK_STATE to
+  android.permissions per CLIENT_INTEGRATION.md § 18
+  "Permission requirement: ACCESS_NETWORK_STATE". The
+  is_metered_network helper (used by _have_room_for_prefetch to
+  gate the CAWL bulk warm on cellular / metered networks) calls
+  ConnectivityManager.isActiveNetworkMetered(), which requires
+  this permission. Without it the JNI call raises
+  SecurityException and the helper returns False — biasing the
+  prefetch decision toward "eager", which prefetches over
+  metered connections instead of skipping. Normal-protection
+  permission: manifest entry alone, no runtime grant prompt.
+
+1.42.17
+  Self-update popup loop fix. When the running peer was the same
+  version as the latest GitHub release but the daemon's
+  min_client_version was higher than what the peer bundled, the
+  client_too_old branch in azt_collab_client.ui.bootstrap's
+  _peer_update_with_confirm._probe forced a prompt unconditionally
+  ("install 1.42.16 to fix"). Installing the same version didn't
+  change the bundled client library, so the daemon kept saying
+  too old and the popup kept re-firing. mandatory_force now
+  requires version_newer / digest_changed / unknown_baseline — the
+  parity case falls through to on_no_update → _show_no_newer_release
+  (the already-existing "send the developer an email" terminal
+  popup that surfaces all four version anchors so the maintainer
+  knows to cut a fresh build).
+
+  Edit lands in the symlinked azt_collab_client/ui/bootstrap.py;
+  propagates to the canonical ../azt-collab/ tree.
+
+1.42.15
+  Project-switch reconciliation on App.on_resume per
+  CLIENT_INTEGRATION.md § 14a (new peer contract, daemon 0.41.x).
+  When the recorder is backgrounded and the user switches projects
+  externally — most commonly via the daemon settings UI's
+  "Switch project" button, but any path landing in
+  daemon.set_last_langcode counts — the daemon stamps a new
+  last_project() before the peer resumes. Without this hook the
+  recorder came back to the foreground still rendering the OLD
+  project, silently ignoring the user's switch.
+
+  on_resume now reads last_project(), compares against
+  _current_langcode, and if they differ calls
+  _auto_load_last_project (the same path used on initial load) to
+  reopen the new project and refresh UI. Wrapped in try/except per
+  contract — transport failure leaves the current view alone
+  rather than blanking it. Sync-status poll re-arm runs after the
+  potential reload so the indicator fires for the right project.
+
+1.42.14
+  Translations: ship a fresh `.mo` with every build. Added
+  compile_translations.py at the source root that walks
+  locales/<lang>/LC_MESSAGES/*.po and runs azt_collab_client.i18n
+  .ensure_mo on each — idempotent, no external msgfmt needed.
+
+  Reason: the runtime ensure_mo in i18n.py was silently skipping
+  on Android, so msgids added to the .po since the previous .mo
+  build never translated even after a rebuild and reinstall. The
+  symptom on the device was a mix of translated and untranslated
+  strings in the settings screen (e.g. UI Language was French,
+  but the audio-quality labels High/Low/etc., the auto-sync
+  options Every swipe/When idle/Manual only, and the new Share
+  {app} log button all stayed English) — the entries existed in
+  the .po but not in the bundled .mo.
+
+  Pre-compiling at build time bypasses the runtime catch-up
+  entirely; the .mo on disk is always at least as fresh as the
+  .po that produced it. compile_translations.py added to
+  source.exclude_patterns (dev tool, not runtime), and
+  setup_from_nuke.sh updated so the build flow is:
+
+      python compile_translations.py && buildozer android debug
+
+1.42.13
+  Settings layout: new "Project" section header between the
+  UI Language row and the Setup Collaboration + Select Project
+  buttons. Both project-acting affordances now share a header
+  instead of floating loose under UI Language. Page reads top to
+  bottom as: UI Language → Project → Conserve power → Debug.
+
+  French translations updated for the v1.42.x additions:
+    - "Project" → "Projet"
+    - "Conserve power" → "Économiser la batterie"
+    - "Debug" → "Débogage"
+    - "Share {app} log" → "Partager le journal de {app}"
+      (placeholder preserved; APP_NAME substituted at rule-eval)
+    - "Recording failed; quality lowered. ..." and the at-floor
+      variant for the auto-degrading audio quality ladder
+    - "Image cache: ... (offline — will resume when online)"
+      and the (paused — connectivity lost) variant for the
+      cawl_cache_status flag wording
+  Stripped the obsolete "Share log" fall-through comment since
+  the msgid changed. Auto-compile from .po to .mo at next launch
+  via i18n.py's ensure_mo helper — no external msgfmt step.
+
+1.42.12
+  Third (and hopefully last) startup-crash fix in this series.
+  In 1.42.11 I wrote a comment INSIDE the KV string that
+  contained the literal text "{x}" as an example placeholder
+  explaining the brace-escape rule. The comment is inside the
+  KV_TEMPLATE triple-quoted string and gets processed by
+  .format() just like the rest of it — so "{x}" was consumed
+  as a substitution target, KeyError: 'x'. Rewrote the comment
+  to avoid any single-brace patterns. Recursive irony: the
+  comment explaining the brace-escape rule was itself broken
+  by the rule it was explaining. Cross-swept the rest of the
+  KV range for stray single-braces; {font_name} at line 262 is
+  the only intended substitution and the only one in range.
+
+1.42.11
+  Actual fix for the 1.42.9/1.42.10 startup crash (KeyError:
+  'app' on launch). Root cause was not Kivy's `app` global —
+  it was the outer KV_TEMPLATE.format(font_name=_FONT_NAME)
+  call at main.py:1222 consuming the literal `{app}` in the
+  Share-log button's gettext format string. Doubled the braces
+  to `{{app}}` so the outer format() pass leaves them alone;
+  the inner .format(app='A-Z+T Recorder') on the gettext-
+  translated string still substitutes correctly at rule-eval
+  time. Memory updated with the actual lesson — the 1.42.10
+  build was a misdiagnosis, this is the real fix.
+
+1.42.10
+  Settings UI:
+  - New "Conserve power" section grouping Audio quality + Auto-
+    sync just above Debug. Both rows are now always visible
+    (peer-pref-backed suite-wide settings; their old placement
+    inside db_settings_box hid them when no project was loaded,
+    a layout accident). Builders for the two rows moved from
+    _build_rec_options (project-gated) to ConfigScreen.on_enter
+    so they populate regardless of project state.
+  - Startup crash fix: the 1.42.9 "Share log" rename used
+    `_('Share {app} log').format(app=app.title)` in the KV
+    expression, but the KV `app` global isn't bound at parse
+    time → KeyError: 'app' on launch. App name hardcoded as
+    a string literal in the .format() call; translators still
+    see the {app} placeholder.
+
+1.42.9
+  Settings layout: moved "Share log" out of the top "Share this
+  app" row down to the bottom of the page, under a new "Debug"
+  section header. Button label is now "Share {app} log" with
+  app.title (= APP_NAME = "A-Z+T Recorder") substituted, so the
+  user knows which app's log is being shared after they tap —
+  matters when the recorder, the server APK, and any other
+  suite peer all expose a similar share-log affordance and the
+  log lands in their share sheet without a clear owner.
+  "Share this app" (APK sharing) stays at the top — that's a
+  user-facing affordance, not a diagnostic.
+
+1.42.8
+  Filed NOTES_TO_DAEMON.md item for a reproducible native
+  SIGSEGV in `collab:provider` Thread-3 around the CAWL prefetch
+  lifecycle. Daemon's pid SIGSEGVs at fault addr 0x0 (native
+  null deref), and the recorder dies a few hundred ms later as
+  binder-collateral. Confirmed via logcat: peer process is pid
+  12990, the SIGSEGV is in pid 12917 (the standalone server
+  APK), and ActivityManager force-removes the recorder activity
+  afterwards. The peer's [server-crash] mirroring (1.42.4) does
+  not help here because native SIGSEGV bypasses the daemon's
+  Python excepthook — last_crash on /v1/health stays None when
+  the daemon respawns.
+
+1.42.7
+  CAWL cache-progress indicator now reads the `offline` and
+  `circuit_open` flags from `cawl_cache_status` (additive in
+  daemon 0.41.21) and surfaces three distinct banner strings
+  per the matching wording in CLIENT_INTEGRATION.md § 10:
+
+    offline       → "Image cache: M / N (offline — will resume
+                     when online)"
+    circuit_open  → "Image cache: M / N (paused — connectivity
+                     lost)"
+    active        → "Caching images: M / N (network in use —
+                     please stay online)"     (unchanged)
+
+  Previously the recorder read only cached/total, so the banner
+  kept claiming "network in use" while the daemon had actually
+  paused on a connectivity loss. The running 1 Hz poll continues
+  through both flag states so the banner flips back to live
+  progress automatically when the daemon's scheduler watcher
+  fires `on_online_edge`. Shared msgids let the existing
+  azt_collab_client locales translate the new strings without
+  a peer-side duplicate.
+
+  State-change log tuple expanded from (cached, total) to
+  (cached, total, offline, circuit_open) so a flag flip without
+  a count change still produces one logcat line, and `.get()`
+  with False defaults keeps pre-0.41.21 daemons working
+  (no flags → active-progress branch).
+
+1.42.6
+  buildozer.spec.tmpl: stop shipping developer-only files in user
+  APKs. Added `examples/` to source.exclude_dirs (it's the
+  sister-app symlink to ../azt-collab/examples/ — kill_recovery,
+  non_kivy_pick, sister_app — smoke-test scripts, not runtime
+  code). Added source.exclude_patterns for generate_presplash.py,
+  populate_images.py, strip_langtags.py — build-time scripts
+  main.py never imports.
+
+1.42.4
+  When the recorder observes SERVER_UNAVAILABLE / SERVER_ERROR (or
+  catches ServerUnavailable directly), it now pulls /v1/health and
+  tees the daemon's `last_crash` into azt_recorder.log under a
+  `[server-crash]` prefix. Verbatim daemon lines get a `| `
+  continuation marker so the peer-side postmortem captures both
+  sides of the failure in one file, and there's no ambiguity over
+  which side the traceback came from — recorder's own crashes
+  remain under the existing `[CRASH]` tag.
+
+  Wired into four observable failure paths:
+    - _auto_commit_sync ServerUnavailable handler
+    - do_sync._on_sync_done SERVER_UNAVAILABLE/SERVER_ERROR branch
+    - go_collab worker (on non-benign open_server_ui errors)
+    - CollabScreen.open_server_ui (synchronous variant)
+
+  Rate-limited by (server.started_at, hash(last_crash)) so a repeat
+  failure with the same daemon crash isn't re-dumped on every
+  retry. When /v1/health itself is unreachable (daemon fully down,
+  or 'spawn_exited' case), the helper logs that fact and stops
+  there — $AZT_HOME/state/crash.log is daemon-owned territory that
+  the peer doesn't reach into directly.
+
+1.42.3
+  Switched presplash bucket logging over to the shared helper
+  `azt_collab_client.lowpower.log_presplash_variant` per
+  CLIENT_INTEGRATION.md § "Diagnostic logging — verify which
+  bucket landed". Deleted the local _PRESPLASH_BUCKETS table,
+  _log_presplash_density, _dpi_to_bucket, _native_to_variant and
+  the accompanying comment block — the contract is now the
+  single source of truth and the helper handles the same
+  BitmapFactory.decodeResource + inScaled=false recipe + bucket
+  reverse-lookup, so every peer that adopts the helper gets the
+  corrected diagnostic without copying code.
+
+1.42.2
+  NOTES_TO_DAEMON.md: refiled the presplash diagnostic ask as a
+  focused, forward-looking note for the server_apk team. Includes
+  the working BitmapFactory.decodeResource recipe and a pre/post
+  log pair from the same two handsets (180dpi and 400dpi) for the
+  daemon-side sanity check before merging the diagnostic into the
+  server APK.
+
+1.42.1
+  Presplash diagnostic fixed (third attempt — this one works).
+  1.41.32's switch to BitmapDrawable.getBitmap().getDensity() /
+  .getWidth() was based on the assumption that those would report
+  the source folder's density and native width. They don't:
+  getDrawable() returns a bitmap that Android has *already
+  pre-scaled* to the device target density, and the bitmap's
+  density field is reset to target after scaling. So both fields
+  reflect post-scaling state. Real-device logs that proved it:
+
+    [presplash] device densityDpi=400 (xxhdpi); loaded unknown
+        variant (source=400dpi, native_w=800)
+    [presplash] device densityDpi=180 (hdpi);  loaded unknown
+        variant (source=180dpi, native_w=360)
+
+  Reported source_dpi == device_dpi on both, and native_w /
+  source_dpi == 2 on both — the same ratio every bucket has in
+  generate_presplash.py. All bucket rows collapse.
+
+  Correct API: BitmapFactory.decodeResource(resources, res_id,
+  opts) with opts.inJustDecodeBounds=True + opts.inScaled=False.
+  After the call, opts.outWidth is the unscaled native pixel
+  width of the picked folder's file, and opts.inDensity is the
+  source folder's density. inJustDecodeBounds skips the bitmap
+  allocation; inScaled=False is what actually disables the
+  pre-scaling step.
+
+  NOTES_TO_DAEMON.md updated with the correction and an ask to
+  apply the same diagnostic to the server_apk splash so the two
+  APKs can be told apart in a combined logcat.
+
+1.42.0
+  Auto-degrading audio-quality ladder. The 4×2 audio profile cross
+  (high/medium/low/very_low × MPEG_4/AAC_ADTS) is now walked
+  automatically when a recording fails, instead of leaving the user
+  to discover the picker and guess which profile their device can
+  handle. Three failure paths feed the same degrader:
+
+    - Synchronous start exception (_publish_start_failure).
+    - Stop-time exception on Android (MediaRecorder.stop() throws —
+      typically the moov-atom-missing MTK HAL wedge).
+    - Post-stop file-size validation: on Android filesystem paths
+      (not SAF content URIs), if the encoded file is below 25 % of
+      (held_seconds × bitrate / 8), the take is discarded and the
+      ladder drops one rung. Catches the silent zero-byte failure
+      mode where stop() returns clean but the encoder produced
+      nothing.
+
+  Ladder order swaps container before dropping bitrate (high →
+  high_aac → medium → ...) — container swap dodges the MTK MPEG_4
+  HAL bugs without giving up fidelity; bitrate drop is permanent
+  quality loss and only happens when both containers fail at a
+  given tier.
+
+  The ceiling is persisted as peer_pref('audio_quality_ceiling') so
+  it survives reboots; the audio-quality picker hides profiles
+  above the pinned ceiling. Bad takes are deleted from disk and
+  never advertised into the LIFT — the policy is "don't fool the
+  user into thinking a recording was good when we know it wasn't."
+
+1.41.32
+  Presplash diagnostic logic fixed. 1.41.31's reverse-lookup
+  was using Drawable.getIntrinsicWidth/Height, but those return
+  device-SCALED dimensions, not native pixel sizes — Android
+  scales the bitmap by (device_dpi / source_dpi) when reporting
+  intrinsic size. That made multiple buckets collapse to the
+  same number on any given device:
+
+  - On 180dpi (hdpi range): mdpi (320*1.125=360), hdpi
+    (480*0.75=360), and the .jpg fallback (480*1.125=540 —
+    actually different, but close) all looked like "unknown"
+    to the old reverse-lookup that compared against native
+    bucket sizes.
+  - On 400dpi (xxhdpi range): xhdpi (640*1.25=800), xxhdpi
+    (960*0.833=800), xxxhdpi (1280*0.625=800) all collapse.
+    Genuinely indistinguishable from dimensions alone.
+
+  Fix: cast Drawable → BitmapDrawable, get the Bitmap, read
+  Bitmap.getDensity() (the *source* density Android tags it
+  with based on which folder it came from) plus
+  Bitmap.getWidth() (native pixel width). Those two together
+  uniquely identify the bucket:
+
+  - density=120, native_w=240   → ldpi variant
+  - density=160, native_w=320   → mdpi variant
+  - density=160, native_w=480   → .jpg fallback (legacy)
+  - density=240, native_w=480   → hdpi variant
+  - density=320, native_w=640   → xhdpi variant
+  - density=480, native_w=960   → xxhdpi variant
+  - density=640, native_w=1280  → xxxhdpi variant
+
+  Log shape now:
+
+      [presplash] device densityDpi=420 (xxhdpi); loaded
+          xxhdpi variant (source=480dpi, native=960x1599)
+
+  Old "unknown — possibly .jpg fallback" message gone; the
+  message either identifies the variant or reports the raw
+  (source_dpi, native_w) pair for unrecognised cases.
+
+1.41.31
+  Presplash-bucket diagnostic logging. Android doesn't surface
+  resource-resolution decisions at logcat INFO/DEBUG, so the
+  peer introspects at startup:
+
+  - Read device densityDpi from DisplayMetrics; map to a bucket
+    name (ldpi/mdpi/hdpi/xhdpi/xxhdpi/xxxhdpi).
+  - Load R.drawable.presplash via Resources.getIdentifier +
+    getDrawable. Read intrinsic dimensions.
+  - Compare dimensions against the known bucket sizes
+    generate_presplash.py emits. Log the matched variant.
+
+  Logcat shape (steady-state happy path):
+
+      [presplash] device densityDpi=420 (xxhdpi); drawable
+          decoded 960x1599 (xxhdpi variant)
+
+  Caveat: at 480x800 the result is ambiguous — that's both the
+  hdpi variant AND the legacy .jpg fallback's size (the
+  generate_presplash _render at 1.5x). When the user sees
+  "480x800 (hdpi variant or .jpg fallback)", it just means we
+  can't distinguish from dimensions alone; on a device whose
+  bucket should be hdpi, either is fine.
+
+  Use case: confirm the multi-density wiring landed correctly
+  in the APK after 1.41.30. A new install on a Helio G81 /
+  Tecno KN4 (xhdpi DPI) should log:
+
+      [presplash] device densityDpi=~280 (xhdpi); drawable
+          decoded 640x1066 (xhdpi variant)
+
+  If it instead logs 480x800, that means the bucket variant
+  didn't make it into the APK and the .jpg fallback fired.
+
+1.41.30
+  #9 follow-up: multi-density presplash variants now wired into
+  the build. Research outcome:
+
+  Buildozer's `android.add_resources = <src>:<dest>` spec key
+  forwards a `--add-resource` flag to p4a, which in turn passes
+  `--resource <abspath>:<dest>` to the dist's build.py. That
+  invokes `shutil.copytree(src, join('src/main/res', dest),
+  dirs_exist_ok=True)`. Setting `dest = '.'` merges the contents
+  of the source directory directly into the dist's res/ root.
+
+  So the recorder's `presplash_variants/drawable-<bucket>/
+  presplash.png` (one per ldpi/mdpi/hdpi/xhdpi/xxhdpi/xxxhdpi)
+  ends up at the canonical Android resource path
+  `res/drawable-<bucket>/presplash.png`. The existing
+  `presplash.filename` keeps writing `res/drawable/presplash.jpg`
+  as the universal fallback for buckets none of the variants
+  cover; Android's resource system resolves
+  `R.drawable.presplash` across the .jpg / .png extension
+  boundary by base name (aapt2 builds one resource entry with
+  six bucket configs + the .jpg default).
+
+  Changes:
+  - buildozer.spec.tmpl: added
+    `android.add_resources = %(source.dir)s/presplash_variants:.`
+  - buildozer.spec.tmpl: added `presplash_variants` to
+    `source.exclude_dirs` so the variants don't get bundled
+    redundantly into the Python data tarball alongside their
+    role as res/ resources.
+  - .gitignore: added `presplash_variants/` (regenerated on
+    every version bump by the build prehook's
+    `generate_presplash.py` call; no need to commit binary
+    artefacts).
+
+  Per-peer mechanism — the recorder's `presplash_variants/`
+  lives in its own source.dir, so the shared
+  `../azt-collab/android/` tree stays untouched. Sister peers
+  (azt-viewer, future apps) opt in by adding the same line +
+  their own `presplash_variants/` directory.
+
+  Tecno KN4 (~280dpi, hdpi/xhdpi border) now gets a 480x800 /
+  640x1066 splash; Pixel 7 Pro (~xxxhdpi) gets a 1280x2133
+  splash; the old "stretch the 480x800 to whatever the screen
+  is" pixelation goes away.
+
+1.41.29
+  Low-power-mode policy expanded — items 2-6 + 8 from the
+  low-power-knob inventory, ordered by recommendation:
+
+  #2 Image display resolution cap. New
+  App._downsample_for_display(src_path) lazy-downsamples
+  images to 720px max via PIL when the OS reports memory
+  pressure. Side cache under <session tmp>/_lowres/, GC'd with
+  the rest of the per-session image cache. refresh_recorder_ui
+  routes entry_image through it on each source-change. Devices
+  with headroom display full-res; the side cache never
+  materialises.
+
+  #3 Kivy image cache size. Cache.register('kv.loader',
+  limit=10, timeout=60) on devices with ≤ 3 GB total RAM;
+  limit=25 / timeout=120 on 3-6 GB; Kivy defaults otherwise.
+  One-shot decision at App.build().
+
+  #4 Sync-status poll backgrounded-suspension. on_pause
+  cancels the 30s Clock.schedule_interval that runs
+  _update_sync_status; on_resume re-arms it and triggers an
+  immediate refresh. The cadence-while-foregrounded is
+  unchanged.
+
+  #5 Boot prewarm gating. App.build() skips
+  azt_collab_client.ui.bootstrap.prewarm() on devices with ≤ 3
+  GB total RAM. Prewarm normally overlaps daemon spawn with
+  Kivy init but burns ~30 MB of native memory during splash —
+  the worst possible window on a memory-tight device. The
+  existing $AZT_HOME/_no_prewarm sentinel still overrides
+  manually.
+
+  #6 Cache-status poll throttle during user interaction.
+  Window.bind(on_touch_down) stamps a _last_touch_time on every
+  touch. _tick_cache_status checks the stamp and skips ticks
+  within 1s of a touch — saves daemon round-trips during rapid
+  swipe gestures where the user couldn't see the indicator
+  changes anyway.
+
+  #8 Auto-sync-on-swipe setting. New peer_pref
+  ('auto_sync_on_swipe'): 'every' (default, current behavior),
+  'idle' (only after 10s of no nav), 'manual' (off; user
+  explicitly taps Sync). New ConfigScreen row "Auto-sync:"
+  with the same modal-picker shape as the existing "Audio
+  quality:" / "Recording:" rows. Translations: "Auto-sync:",
+  "Every swipe", "When idle", "Manual only".
+
+  #7 (max_visible_glosses) intentionally dropped — that's a
+  content choice, not a resource decision; users with a few
+  vs many gloss languages have legitimate workflows in both
+  modes.
+
+  Helpers extracted:
+  - App._sample_total_ram_mb() — one-shot total RAM at boot.
+  - App._sample_memory_state() → (low_memory, avail_ratio,
+    avail_mb).
+  - App._is_low_memory() — combined OS-flag + ratio check.
+  These are the single source of truth for low-power decisions
+  across the app; new heuristics should call one of these
+  rather than re-querying ActivityManager directly.
+
+  Two new translatable strings beyond the auto-sync ones (none
+  user-facing; for the existing helper messages).
+
+  generate_presplash.py refactored to a parameterised _render
+  + bucket loop. Produces presplash.png at the historical
+  480x800 (kept so buildozer.spec doesn't need to change yet)
+  PLUS six density variants in
+  presplash_variants/drawable-{ldpi,mdpi,hdpi,xhdpi,xxhdpi,
+  xxxhdpi}/presplash.png. The per-bucket variants aren't wired
+  into the build yet (android/ is shared across peers; the
+  right way to ship multi-density assets without polluting the
+  shared dir is a separate research item). #9 follow-up.
+
+1.41.28
+  "Be eager when you have room to" — adaptive CAWL prefetch.
+
+  _start_image_prefetch now samples three OS-level signals
+  before kicking the daemon's bulk warm:
+
+  - ActivityManager.MemoryInfo.lowMemory (the OS's own boolean
+    "I'm under memory pressure")
+  - availMem / totalMem < 15% (secondary memory check)
+  - Active network is metered (cellular/data plan)
+
+  Any one trips → skip the daemon-side warm this session;
+  on-demand CAWLHandle.open_read still serves the displayed
+  image, just without the bulk pre-fill or progress indicator.
+  Project switch re-samples naturally via load_lift's existing
+  flow; no periodic re-check timer within session.
+
+  Not a user setting — adapts automatically. Devices with
+  headroom keep the existing eager + indicator behavior;
+  constrained devices quietly drop to on-demand only.
+
+  JNI sample failures default to eager (better to attempt than
+  to silently disable on every transient hiccup).
+  _warm_jnius_classes pre-loads ActivityManager + MemoryInfo +
+  Context + ConnectivityManager on the main thread so the
+  load-sampling path doesn't first-load JNI classes during
+  prefetch decision.
+
+1.41.27
+  H2 implementation: MediaRecorder setup moved off the Kivy
+  main thread.
+
+  start_recording now returns immediately; a worker thread runs
+  the blocking JNI chain (ContentResolver.openFileDescriptor +
+  setOutputFormat + setOutputFile + prepare + start), which on
+  slow MediaTek chips can take 150-400ms. Previously this
+  blocked the touch loop, letting touch_up queue behind it —
+  the 1.41.20 min-hold-gate caught most but not all of those
+  races, because a slow-prepare-then-long-hold measured the
+  wall-clock as a long hold while the actual audio buffer only
+  got the tail.
+
+  New state machine:
+  - _start_pending: True while the worker is mid-setup. Gates
+    re-entrant start_recording; gates stop_recording's normal
+    path (touch_up during pending sets the cancel flag and
+    returns).
+  - _start_cancel_requested: set when stop_recording fires
+    during the pending window. Worker checks it after mr.start()
+    returns; if set, tears down the just-started MediaRecorder
+    without writing the LIFT reference (same end-state as the
+    min-hold-gate tap path).
+
+  _record_started_at semantics changed: now stamped when
+  mr.start() actually returned (in _publish_start_success),
+  not when start_recording was called. The min-hold-gate
+  therefore measures real recorded-audio duration, not
+  wall-clock since touch-down.
+
+  iOS / desktop paths use the same async dispatcher — typically
+  <50ms prepare equivalents, so no functional change visible,
+  but the state machine is uniform across all three platforms.
+
+  Two new methods on RecorderController:
+  - _start_worker: blocking JNI on worker thread, marshals via
+    Clock.schedule_once.
+  - _publish_start_success / _publish_start_failure: main-
+    thread callbacks that mutate publish-relevant state.
+
+  Test cases covered:
+  - Hold long enough for prepare + audio → normal record + save.
+  - Slow prepare, short hold (touch_up before publish) →
+    teardown, no LIFT write, "Hold the button to record" toast.
+  - Slow prepare, hold past publish, short remaining audio →
+    min-hold-gate measures post-publish time; tap-not-hold
+    toast.
+  - prepare raises → _publish_start_failure resets state.
+  - Re-tap during pending → gated by _start_pending; no-op.
+
+1.41.26
+  Full 4×2 audio-quality matrix for A/B isolation. The field
+  team confirmed `low_aac` rescues a mid-record-crash on
+  Tecno/Helio G81, but we don't yet know whether the rescue
+  came from the lower bitrate, the AAC_ADTS container, or
+  both. Eight profiles let users tier-vary independently of
+  container:
+
+    high       — 256k / 48 kHz    MPEG_4 (.m4a)   ← default
+    high_aac   — 256k / 48 kHz    AAC_ADTS (.aac)
+    medium     — 128k / 44.1 kHz  MPEG_4 (.m4a)
+    medium_aac — 128k / 44.1 kHz  AAC_ADTS (.aac)
+    low        —  64k / 22.05 kHz MPEG_4 (.m4a)
+    low_aac    —  64k / 22.05 kHz AAC_ADTS (.aac)
+    very_low   —  32k / 16 kHz    MPEG_4 (.m4a)
+    very_low_aac—  32k / 16 kHz   AAC_ADTS (.aac)
+
+  Very-low at 16 kHz / 32 kbps is telephone-quality voice but
+  still well within speech-intelligibility for transcription;
+  the 4 KB/sec on-disk rate makes a 60-second recording ~240 KB.
+
+  Expect to prune the matrix to ~3 profiles once the field
+  results identify which dimension was load-bearing for the
+  rescue.
+
+  Default switched back from 'medium' to 'high' — restores the
+  historical 1.41.20 default so a fresh install records at top
+  quality, and users opt down only if their device can't
+  sustain it. ConfigScreen's fallback values now reference
+  RecorderController._DEFAULT_AUDIO_PROFILE so the default is
+  pinned in one place.
+
+  New French translations: "High AAC", "Medium AAC",
+  "Very Low", "Very Low AAC".
+
+1.41.25
+  Phase-3 follow-up to 1.41.24's "Share log" stand-in: the
+  daemon team shipped `share_log_file(log_path, prev_path,
+  on_error, display_name)` in `azt_collab_client.ui.share`
+  (azt_collabd 0.41.19). Recorder's `share_log` method
+  collapsed to a thin wrapper calling the shared helper —
+  ~90 lines of MediaStore / JNI / blob-bundling logic removed.
+
+  Six stand-in translation strings dropped from
+  `aztrecorder.po` ("Share log", "Could not share log:",
+  "Log file is empty.", "No log file available.",
+  "Log file: {path}", "Share failed: could not create
+  MediaStore entry"). The peer's `_('Share log')` KV button
+  now falls through to the client catalog for its translation
+  via the gettext fallback chain — no peer-side duplicate.
+
+  Import goes via the explicit module path
+  (`from azt_collab_client.ui.share import share_log_file`)
+  rather than the package re-export, since the helper isn't
+  re-exported from `azt_collab_client.ui.__init__` yet.
+  Works either way; convenience re-export is a daemon-team
+  housekeeping detail.
+
+1.41.24
+  Diagnostic logging + "Share log" button:
+
+  - _setup_logging is more robust on devices without an SD card:
+    primary path is ANDROID_PRIVATE (always-writable filesDir),
+    new jnius-based fallback queries Context.getFilesDir() if
+    the env var is unset, /sdcard remains as the last resort.
+    Resolved log path is exposed via the module-level _LOG_PATH
+    constant so the share helper can find it.
+  - Rotate-on-launch: an existing log file gets renamed to
+    `<path>.prev` before the new session opens its own. A crash-
+    and-relaunch flow preserves the failing-session log so the
+    user can still share it.
+  - New "Share log" button in ConfigScreen — same pattern + same
+    icon as "Share this app". Tap → bundles current + previous
+    session logs into one text/plain blob → MediaStore Downloads
+    insert → ACTION_SEND chooser. User sends the .log file via
+    whatever share channel they prefer (email, WhatsApp, drive).
+    No need to know the storage path.
+  - Peer-side share_log implementation is a stand-in; filed a
+    NOTES_TO_DAEMON.md item asking for a shared
+    share_log_file(path, prev_path, on_error, display_name)
+    helper in azt_collab_client/ui/share.py so the daemon
+    settings UI's pending equivalent button can call the same
+    code. Once the helper lands, this peer-side method
+    collapses to a 3-line wrapper and the duplicate translation
+    strings migrate to the client catalog.
+
+  Translation strings added (stand-in, until the helper moves
+  to the client catalog):
+      "Share log"
+      "Could not share log:\n{error}"
+      "Log file is empty."
+      "No log file available."
+      "Log file: {path}"
+      "Share failed: could not create MediaStore entry"
+
+1.41.23
+  Fourth audio-quality profile, `low_aac`: same bitrate / sample
+  rate as `low` (64 kbps / 22.05 kHz mono) but uses
+  OutputFormat.AAC_ADTS instead of MPEG_4 — the deepest rescue
+  config for Helio-G80-class HW encoders that wedge specifically
+  on the MPEG_4 container path (N4 in the field-report hypothesis
+  table).
+
+  The profile dict now carries the container and file extension
+  too:
+
+      'high':    256k/48k    MPEG_4     .m4a
+      'medium':  128k/44.1k  MPEG_4     .m4a
+      'low':      64k/22.05k MPEG_4     .m4a
+      'low_aac':  64k/22.05k AAC_ADTS   .aac
+
+  _start_android_recording resolves the profile up front and
+  derives both the OutputFormat constant and the path-extension
+  swap from it (was hard-coded to '.m4a' / MPEG_4). Playback
+  works against either container — MediaPlayer sniffs the
+  content, doesn't rely on the extension — so .aac files coexist
+  with existing .m4a entries in the same LIFT.
+
+  Selector overlay grows to four rows. Translations:
+      "Low AAC" → "Basse (AAC)"
+
+1.41.22
+  Three selectable Android audio-quality profiles, user-pickable
+  in the settings screen:
+
+  - High:   256 kbps / 48 kHz / mono AAC   (original 1.41.20-)
+  - Medium: 128 kbps / 44.1 kHz / mono AAC  (1.41.21 default)
+  - Low:     64 kbps / 22.05 kHz / mono AAC (rescue config)
+
+  Stored as peer_pref('audio_quality') (default 'medium').
+  Applies on Android only — iOS keeps FLAC (lossless), desktop
+  keeps PCM WAV; both inherently unaffected.
+
+  New ConfigScreen row, directly below "Recording:" — "Audio
+  quality:" with a button that opens a modal picker. Same
+  shape as the existing rec_task selector.
+
+  Use "Low" for rescue cases (extremely constrained devices,
+  reproducible mid-record crash, Helio-G80-class encoders with
+  HAL bugs); the recording is still well within speech-
+  intelligibility range for fieldwork transcription, ~8KB/s on
+  disk so a 60s recording is roughly 480KB.
+
+  Translations added: "Audio quality:", "High", "Medium", "Low".
+
+1.41.21
+  Three defensive mitigations for the "crash while holding the
+  record button" report (Tecno KN4 / Helio G81 / Android 16 /
+  HiOS, 4GB physical RAM):
+
+  (N1) Lowered the Android AAC config from 256kbps/48kHz mono
+  to 128kbps/44.1kHz mono. The new combo is the universally-
+  supported voice-quality config across Android hardware
+  encoders; the old aggressive one has documented HAL-level
+  failures on mid-tier MediaTek chips. Voice fidelity at 128k
+  mono is still well above linguistic-fieldwork threshold;
+  encoder working buffer halves, which matters on a 4GB-RAM
+  device under zram swap.
+
+  (N3) Added MediaRecorder.setMaxDuration(60_000). Bounds the
+  worst-case encoder working set and gives a natural stopping
+  point on a held button. The platform-fired duration event
+  becomes a natural stop; can be lifted/changed later if
+  needed.
+
+  (N5) Added FLAG_KEEP_SCREEN_ON on the window during
+  recording (cleared in _stop_android_recording). A long
+  held-button gesture looks like idle to aggressive OEM power-
+  management (HiOS in particular has been observed to freeze
+  Activities under sustained no-touch-event windows); pinning
+  the screen on prevents the MediaRecorder surface from
+  being yanked mid-capture.
+
+  _warm_jnius_classes also warms
+  android.view.WindowManager$LayoutParams on the main thread
+  so the worker-side autoclass during recording doesn't race
+  the PyJNI ClassLoader hazard.
+
+  N2 (microphone foreground service for HiOS / Android 16 mic-
+  policy revocation) is the bigger manifest change; held back
+  for a separate release pending confirmation that N1+N3+N5
+  doesn't already resolve the field report.
+
+  Reminder for the next field report: the recorder writes its
+  own crash log to ANDROID_PRIVATE/azt_recorder.log (or
+  /sdcard/azt_recorder.log on the fallback path). [CRASH]
+  tracebacks from sys.excepthook land in that file and the
+  field user can pull it without adb.
+
+1.41.20
+  Two more record-button-tap-crash mitigations.
+
+  (1) Minimum hold-time gate. RecorderController._MIN_HOLD_SEC
+  (400ms) is checked at the top of stop_recording; under that,
+  the in-flight MediaRecorder is torn down without writing the
+  LIFT reference (the M4A is missing its moov atom anyway —
+  unplayable). The user gets a coaching toast: "Hold the button
+  to record" (+ French translation). 400ms is comfortably
+  longer than MediaRecorder.prepare() on Helio-G80-class chips
+  (~150-400ms) so a slow start path isn't misread as a short
+  hold.
+
+  (2) Deferred _notify_ui. start_recording / stop_recording
+  used to call _notify_ui synchronously, which triggers
+  refresh_recorder_ui → btn_area.clear_widgets() + re-add. On
+  slow chips under memory pressure (4GB physical + zram swap)
+  the widget swap has been observed to race the in-flight Kivy
+  touch dispatch and dereference a freed RecordButton instance.
+  Switched to Clock.schedule_once(_notify_ui, 0) so the touch
+  handler returns cleanly before the widget rebuild.
+
+  New translatable string:
+      "Hold the button to record"
+          → "Maintenez le bouton pour enregistrer"
+
+1.41.19
+  _stop_android_recording: split stop() and release() so
+  release() runs in a finally clause regardless of whether
+  stop() raised. Previously stop() throwing IllegalStateException
+  (typical when the user taps rather than holds — the M4A has
+  no moov atom by the time stop fires) skipped release(),
+  leaving the MediaRecorder + mic + native buffer wedged until
+  GC. On slow MTK chips (e.g. Helio G81 / Tecno KN4 field
+  report) the wedged recorder has been observed to take down
+  the subsequent record attempt.
+
+  release() inside finally is itself try/except'd so a
+  cascading failure doesn't propagate up and mask the
+  underlying stop() error in logcat.
+
+1.41.18
+  Play-button-doesn't-respond fix (user report:
+  "when I arrive on a new page, often clicking on play doesn't
+  work; if I delete and re-record, it plays fine"):
+
+  RecorderController.play_audio now tears down any previous
+  player (Android MediaPlayer, iOS AVAudioPlayer, or SDL2
+  Sound) before constructing a new one. Previously the
+  duration-based reset of `_playing` was best-effort — an
+  unfired timer or a prepare() that hung past navigation could
+  leave `_playing = True`, silently swallowing the next tap.
+  go_next / go_prev now also stop the active player so audio
+  doesn't continue playing on the entry the user navigated to.
+
+  New helper `_stop_active_player` is idempotent and safe to
+  call from any state; replaces the scattered ad-hoc cleanup
+  in nav + the now-removed "Stop any previous playback" block
+  inside the desktop branch.
+
+1.41.17
+  Reverted the string-literal workaround from 1.41.16 back to
+  the contract's recommended shape:
+
+      if result.has_any(S.SERVER_UNAVAILABLE, S.SERVER_ERROR):
+
+  The daemon team shipped the missing constants in
+  azt_collab_client/status.py (per the NOTES_TO_DAEMON.md
+  filing); the routing example in CLAUDE.md compiles again.
+
+1.41.16
+  Fixed second crash on Sync tap (back-to-back with 1.41.15's
+  open_server_ui crash):
+
+      AttributeError: module 'azt_collab_client.status' has
+      no attribute 'SERVER_UNAVAILABLE'
+      File "main.py", line 4808, in _on_sync_done
+
+  The contract's "Peer contract: routing on sync results"
+  example in azt_collab_client/CLAUDE.md uses
+  `S.SERVER_UNAVAILABLE` and `S.SERVER_ERROR`, but the actual
+  azt_collab_client/status.py module doesn't export those
+  constants — only the string literals appear inside
+  sync_project's transport-failure branches. Drift between the
+  docstring's S.* shape and the module's exports.
+
+  Patched the call site to use string literals
+  `'SERVER_UNAVAILABLE'` / `'SERVER_ERROR'` (which is what
+  Result.has_any compares against anyway). Filed
+  NOTES_TO_DAEMON.md asking the daemon team to add the
+  constants so the contract's recommended shape compiles
+  again; will switch back to S.* when they ship.
+
+1.41.15
+  Fixed crash on Sync tap when the user hasn't set their
+  contributor name yet:
+
+      AttributeError: 'LIFTRecorderApp' object has no
+      attribute 'open_server_ui'
+      File "main.py", line 4791, in <lambda>
+
+  The S.CONTRIBUTOR_UNSET branch in do_sync's _on_sync_done was
+  calling self.open_server_ui() — but open_server_ui is a
+  method on CollabScreen, not the App. The App-level entry is
+  go_collab (which every other config-class branch in this
+  routing table — AUTH_REQUIRED, NOT_A_REPO, NO_REMOTE —
+  already uses). Switched to go_collab so the user actually
+  lands on the screen with the Your-name input, with the
+  translated "Please set your name…" toast intact.
+
+  Same-frame Clock.schedule_once(toast) + schedule_once(crash)
+  meant the toast rendered for one frame before the crash
+  blew the app away; user reported "I never saw this do_sync
+  error in the UI." Both visible now.
+
+1.41.14
+  Daemon-driven CAWL prefetch per CLIENT_INTEGRATION.md § 10
+  update.
+
+  Peer no longer iterates CAWLHandle on every basename to warm
+  the cache. Instead:
+
+  - Computes one variant per CAWL id (lift.py's resolver tracks
+    `_paths` parallel to `_basenames`; new
+    `LIFTDatabase.all_cawl_paths()` returns the sorted list).
+  - Hands the list to ``cawl_prefetch(langcode, paths)`` once;
+    the daemon iterates in its own background thread.
+  - Polls ``cawl_cache_status`` at 1 Hz to drive the progress
+    label.
+
+  The point: when peer iterated, the daemon couldn't know the
+  size of the working set so `cawl_cache_status` denominator
+  was the whole index (every variant) — progress bar plateaued
+  far short of "100%" with no way for the user to tell whether
+  caching was done. Now the daemon knows exactly what the peer
+  asked for; ``total`` reflects the actual work, ``cached``
+  ticks up toward it cleanly.
+
+  Removed: ``_prefetch_images_worker`` and its peer-side
+  per-basename CAWLHandle loop (CAWLHandle stays in use for
+  on-demand fetches of the displayed image — the resolver's
+  ``_pull`` path).
+
+  Logging now state-change-only per the contract: the 1 Hz
+  poll only prints when (cached, total) actually moves, so
+  logcat doesn't fill with identical lines during a long
+  warm. ``_apply_cache_status``'s "total=0" branch also logs
+  just once per poll session.
+
 1.41.13
   Cache-progress indicator string switched to the shared msgid
   already in azt_collab_client/locales (the daemon settings UI

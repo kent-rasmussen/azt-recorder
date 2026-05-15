@@ -81,6 +81,7 @@ class _CAWLImageResolver:
         self._tmp_dir = tmp_dir
         self._basenames = None     # cawl str → first basename (preferred)
         self._all_basenames = None # cawl str → [all basenames]
+        self._paths = None         # cawl str → first repo-path (preferred)
         self._path_cache = {}      # basename → local tmp path (post-pull)
         self._lock = threading.Lock()
         self._pull_lock = threading.Lock()
@@ -152,6 +153,7 @@ class _CAWLImageResolver:
                 return
             self._basenames = {}
             self._all_basenames = {}
+            self._paths = {}
             langcode = ''
             try:
                 langcode = self._get_langcode() or ''
@@ -213,8 +215,10 @@ class _CAWLImageResolver:
                 is_default = '__' in filename
                 if cawl_num not in self._basenames:
                     self._basenames[cawl_num] = basename
+                    self._paths[cawl_num] = path
                 elif is_default and '__' not in self._basenames[cawl_num]:
                     self._basenames[cawl_num] = basename
+                    self._paths[cawl_num] = path
                 if is_default:
                     self._all_basenames.setdefault(cawl_num, []).insert(0, basename)
                 else:
@@ -622,13 +626,27 @@ class LIFTDatabase:
         return (el.text or '').strip()
 
     def all_cawl_basenames(self):
-        """Return dict of cawl → first basename (for prewarming the
-        daemon's cache via a worker thread). The basenames are what
-        ``CAWLHandle(langcode, basename).open_read()`` accepts."""
+        """Return dict of cawl → first basename. The basenames are
+        what ``CAWLHandle(langcode, basename).open_read()`` accepts
+        for on-demand fetches of individual images."""
         if self._image_resolver._basenames is None:
             self._image_resolver._load()
         return (dict(self._image_resolver._basenames)
                 if self._image_resolver._basenames else {})
+
+    def all_cawl_paths(self):
+        """Return the list of repo-relative paths (one per CAWL id,
+        the preferred-default variant) suitable for handing to
+        ``cawl_prefetch(langcode, paths)``. The daemon iterates this
+        in its own background thread and reports progress through
+        ``cawl_cache_status``. Same shape as ``cawl_index().files[i]
+        ['path']`` — preserves subdir layout so the daemon stores
+        each variant under its own cache key."""
+        if self._image_resolver._paths is None:
+            self._image_resolver._load()
+        if not self._image_resolver._paths:
+            return []
+        return sorted(self._image_resolver._paths.values())
 
     # ── Image helpers ──────────────────────────────────────────────────────
 
