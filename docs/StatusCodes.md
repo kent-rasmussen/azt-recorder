@@ -57,19 +57,20 @@ two `ProjectStatus` fields:
 
 - `commits_ahead` — number of local commits not on github yet
   (counting from github's last-fetched `main`).
-- `unshared_commits` — of those, how many are not on any other
-  remote (no github, no paired LAN peer). Zero means every
-  local commit lives on at least one other device.
+- `unshared_commits` — of those `commits_ahead`, how many are
+  also missing from every paired LAN peer. Zero means every
+  local commit lives on at least one other device (github, a
+  LAN peer, or both).
 
 This is the part that conveys "is the data safe even if this
 phone dies."
 
 | Rendered | Condition | Meaning |
 |---|---|---|
-| `(OK)` | `commits_ahead == 0` | Every local commit is on github. Only appears with a timestamp prefix; the "never pushed" path suppresses it. |
-| `(+3)` | `commits_ahead == 3`, `unshared_commits == 3` | 3 local commits, none on github, none on any LAN peer either. If this phone dies, those 3 commits are gone. |
-| `(LANOK +3)` | `commits_ahead == 3`, `unshared_commits == 0` | 3 local commits, none on github, but **all 3 exist on at least one paired LAN peer**. If this phone dies, the data survives. |
-| `(+1/3)` | `commits_ahead == 3`, `0 < unshared_commits < 3` (here, `unshared == 1`) | 3 local commits, 1 lives only on this phone, the other 2 are on at least one LAN peer. The slash reads "1 unshared, of 3 total ahead." |
+| `(OK)` | `commits_ahead == 0` | No local commits exist that github hasn't already seen. Only appears with a timestamp prefix; the "never pushed" path suppresses it. |
+| `(+3)` | `commits_ahead == 3`, `unshared_commits == 3` | 3 commits are ahead of github, and none of those 3 are on any LAN peer either. (Says nothing about the rest of project history — much of which is on github.) If this phone dies, those 3 commits are gone. |
+| `(LANOK +3)` | `commits_ahead == 3`, `unshared_commits == 0` | 3 commits are ahead of github, and **all 3 of those also exist on at least one paired LAN peer**. If this phone dies, those 3 survive on the LAN peer. |
+| `(+1/3)` | `commits_ahead == 3`, `0 < unshared_commits < 3` (here, `unshared == 1`) | 3 commits are ahead of github; of those 3, 1 lives only on this phone and the other 2 also exist on at least one LAN peer. The slash reads "1 unshared, of 3 total ahead." |
 
 The dirty-files addendum:
 
@@ -139,7 +140,7 @@ exhaustive cross-product of plausible values:
 | `sign in to back up` | Contributor set, no GitHub credentials yet. |
 | `sign in to back up (LANOK +1)` | Signed-out from github, but 1 commit has already reached a paired LAN peer. |
 | `publish to back up` | Signed in but the project has no remote configured. |
-| `publish to back up (LANOK +3)` | Project has commits but no github remote; commits already exist on a paired peer, so the data is safe pending publish. |
+| `publish to back up (LANOK +3)` | Project has commits but no github remote; the 3 commits ahead already exist on a paired peer, so those 3 are safe pending publish. |
 | `not backed up` | Generic fallback when none of the specific blockers apply. |
 | `not backed up (LANOK +3) · LAN-only` | Never github-pushed; user explicitly turned github push off via work-offline; LAN-share still on; 3 commits already delivered to a paired peer. |
 

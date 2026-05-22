@@ -1,5 +1,18 @@
 CHANGELOG — A-Z+T Recorder
 
+1.46.40
+  docs/StatusCodes.md tightens the suffix-table prose so the
+  "+N" / "LANOK +N" / "+u/N" entries no longer read as making
+  global claims about github/LAN absence. They were anchored
+  to the N commits all along but phrased ("none on github,
+  none on any LAN peer either") in a way that could be
+  misread as a statement about everything not on github/LAN.
+  Now explicit that the claim covers just those N commits;
+  rest-of-project state stays unstated. Also: tightened the
+  unshared_commits definition (names LAN directly instead of
+  "any other remote") and the "publish to back up (LANOK +3)"
+  example (anchors to "the 3 commits ahead", not "commits").
+
 1.46.39
   Add docs/StatusCodes.md — exhaustive enumeration of every
   text variant that can appear between the sync icon and the

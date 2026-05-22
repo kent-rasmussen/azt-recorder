@@ -4072,7 +4072,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.46.39'
+__version__ = '1.46.40'
 
 
 class LIFTRecorderApp(App):
