@@ -43,6 +43,15 @@ class _DeviceFlowFailure(Exception):
 os.environ.setdefault('KIVY_NO_ENV_CONFIG', '1')
 warnings.filterwarnings('ignore', message='.*olefile.*')
 
+
+# ── Language-name lookup ───────────────────────────────────────────────────
+# Used by the settings-page gloss-languages summary so the user sees
+# "Lingala (RDC)" rather than "ln-CD". Defers to LangToggle._LANG_NAMES
+# (defined further down) as the in-repo source of truth — that dict is
+# also what the gloss-picker overlay shows, so the two stay aligned.
+def _lang_display_name(code):
+    return LangToggle._LANG_NAMES.get(code, code)
+
 # ── Crash logging — runs before any Kivy import ────────────────────────────────
 # On Android: p4a sets $ANDROID_PRIVATE to the app's private files dir (always writable).
 #             Also tries /sdcard/ (may need MANAGE_EXTERNAL_STORAGE on API 30+).
@@ -509,6 +518,13 @@ KV_TEMPLATE = '''
                 height: self.minimum_height
                 padding: dp(20)
                 spacing: dp(14)
+                # ── UI Language (very top, no header — buttons speak
+                # for themselves) ──────────────────────────────────────
+                BoxLayout:
+                    id: lang_selector_row
+                    size_hint_y: None
+                    height: dp(44)
+                    spacing: dp(8)
                 # ── Share this app ─────────────────────────────────────
                 RecBtn:
                     text: _('Share this app')
@@ -516,6 +532,9 @@ KV_TEMPLATE = '''
                     padding: [dp(52), 0]
                     text_size: self.size
                     valign: 'middle'
+                    size_hint_x: None
+                    width: min(self.parent.width - dp(40), dp(360))
+                    pos_hint: {{'center_x': 0.5}}
                     normal_color: T.SURFACE
                     on_release: app.share_apk()
                     Image:
@@ -560,14 +579,16 @@ KV_TEMPLATE = '''
                         spacing: dp(8)
                         RecBtn:
                             id: gloss_toggle_btn
-                            text: _('Change gloss languages')
+                            text: _('Gloss languages')
+                            size_hint_x: None
+                            width: dp(160)
                             normal_color: T.ACCENT
                             font_size: sp(14)
                             on_release: root._show_gloss_overlay()
                         Label:
                             id: gloss_summary_label
                             text: ''
-                            font_size: sp(12)
+                            font_size: sp(14)
                             font_name: FONT
                             color: T.TEXT_DIM
                             halign: 'left'
@@ -581,6 +602,8 @@ KV_TEMPLATE = '''
                         RecBtn:
                             id: filter_toggle_btn
                             text: _('Filter words')
+                            size_hint_x: None
+                            width: dp(160)
                             normal_color: T.ACCENT
                             font_size: sp(14)
                             on_release: root.toggle_filter_panel()
@@ -663,26 +686,23 @@ KV_TEMPLATE = '''
                                 normal_color: T.GREEN
                                 font_size: sp(15)
                                 on_release: root.toggle_filter_panel()
-                # ── UI Language ─────────────────────────────────────────
-                SectionLabel:
-                    text: _('UI Language')
-                BoxLayout:
-                    id: lang_selector_row
-                    size_hint_y: None
-                    height: dp(44)
-                    spacing: dp(8)
                 # ── Project ───────────────────────────────────────────
                 # Setup Collaboration + Select Project both act on the
-                # project, so they share a header instead of floating
-                # loose under the UI-language row.
+                # project, so they share a header.
                 SectionLabel:
                     text: _('Project')
                 RecBtn:
                     text: _('Setup Collaboration')
+                    size_hint_x: None
+                    width: min(self.parent.width - dp(40), dp(360))
+                    pos_hint: {{'center_x': 0.5}}
                     normal_color: T.SURFACE
                     on_release: app.go_collab()
                 RecBtn:
                     text: _('Select Project')
+                    size_hint_x: None
+                    width: min(self.parent.width - dp(40), dp(360))
+                    pos_hint: {{'center_x': 0.5}}
                     normal_color: T.BTN_INACTIVE
                     on_release: app.start_over()
                 # ── Conserve power ──────────────────────────────────
@@ -745,6 +765,9 @@ KV_TEMPLATE = '''
                     padding: [dp(52), 0]
                     text_size: self.size
                     valign: 'middle'
+                    size_hint_x: None
+                    width: min(self.parent.width - dp(40), dp(360))
+                    pos_hint: {{'center_x': 0.5}}
                     normal_color: T.SURFACE
                     on_release: app.share_log()
                     Image:
@@ -2115,7 +2138,8 @@ class ConfigScreen(Screen):
             lbl.text = ''
             return
         langs = list(app.recorder.active_gloss_langs)
-        lbl.text = ', '.join(langs) if langs else _tr('(none selected)')
+        names = [_lang_display_name(c) for c in langs]
+        lbl.text = ', '.join(names) if names else _tr('(none selected)')
 
     _filter_open = False
 
@@ -3834,14 +3858,15 @@ class RecorderController:
             # MediaRecorder surface doesn't get frozen mid-capture.
             #
             # window.addFlags mutates the view hierarchy, which
-            # Android only permits from the UI thread. We're on a
-            # worker right now (start_recording spawned us so the
-            # MediaRecorder.prepare/start chain wouldn't block the
-            # touch dispatcher), so marshal the flag-flip via Clock
-            # to the main thread. Pre-resolving the LayoutParams /
-            # Activity / Window references here means the main-
-            # thread lambda is just two getters + one call — cheap
-            # and can't ImportError mid-tick.
+            # Android only permits from the Activity UI thread
+            # (SDLActivity on p4a). Clock.schedule_once marshals to
+            # the *Kivy* main thread (SDLThread) — a different
+            # thread that still raises CalledFromWrongThread-
+            # Exception when it touches Window. Use p4a's
+            # android.runnable.run_on_ui_thread to dispatch to the
+            # actual UI thread. Pre-resolving LayoutParams /
+            # Activity / Window here keeps the UI-thread closure
+            # to two getters + one call.
             try:
                 _WMLP = autoclass(
                     'android.view.WindowManager$LayoutParams')
@@ -3853,13 +3878,20 @@ class RecorderController:
                 # API renames don't silently no-op.
                 _flag = _WMLP.FLAG_KEEP_SCREEN_ON
 
-                def _add_keep_screen_on(_dt, w=_window, f=_flag):
+                def _add_keep_screen_on(w=_window, f=_flag):
                     try:
                         w.addFlags(f)
                     except Exception as ex:
-                        print(f'[record] KEEP_SCREEN_ON add (main '
+                        print(f'[record] KEEP_SCREEN_ON add (UI '
                               f'thread) failed: {ex}')
-                Clock.schedule_once(_add_keep_screen_on, 0)
+                try:
+                    from android.runnable import run_on_ui_thread
+                    run_on_ui_thread(_add_keep_screen_on)()
+                except ImportError:
+                    # Non-p4a environment shouldn't reach here
+                    # (the outer block is Android-only), but fall
+                    # back to a direct call for safety.
+                    _add_keep_screen_on()
             except Exception as ex:
                 # Best-effort; never fail a record because the
                 # power-management hint didn't take.
@@ -3916,15 +3948,32 @@ class RecorderController:
                 pass
             self._record_pfd = None
         # Release the KEEP_SCREEN_ON flag set in _start_android_recording.
-        # No-op if start failed before the addFlags ran.
+        # Must run on the Activity UI thread (SDLActivity), not the Kivy
+        # main thread (SDLThread) — Clock.schedule_once routes to the
+        # latter, which still raises CalledFromWrongThreadException on
+        # window.clearFlags. Use p4a's android.runnable.run_on_ui_thread
+        # to marshal to the real UI thread. No-op if start failed before
+        # addFlags ran.
         try:
             from jnius import autoclass
             _WMLP = autoclass('android.view.WindowManager$LayoutParams')
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
             window = PythonActivity.mActivity.getWindow()
-            window.clearFlags(_WMLP.FLAG_KEEP_SCREEN_ON)
+            _flag = _WMLP.FLAG_KEEP_SCREEN_ON
+
+            def _clear_keep_screen_on(w=window, f=_flag):
+                try:
+                    w.clearFlags(f)
+                except Exception as ex:
+                    print(f'[record] KEEP_SCREEN_ON clear (UI '
+                          f'thread) failed: {ex}')
+            try:
+                from android.runnable import run_on_ui_thread
+                run_on_ui_thread(_clear_keep_screen_on)()
+            except ImportError:
+                _clear_keep_screen_on()
         except Exception as ex:
-            print(f'[record] KEEP_SCREEN_ON clear failed: {ex}')
+            print(f'[record] KEEP_SCREEN_ON clear setup failed: {ex}')
 
     # iOS: use AVAudioRecorder via pyobjus for maximum quality
     def _start_ios_recording(self, path):
@@ -4023,7 +4072,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.44.0'
+__version__ = '1.46.39'
 
 
 class LIFTRecorderApp(App):
@@ -4280,8 +4329,11 @@ class LIFTRecorderApp(App):
             # is a single GET against the daemon — cheap. Retained so
             # on_pause / on_resume can suspend the polling while the
             # app is backgrounded (#4 of the low-power policy).
+            # § 17c Rule 4 — 5-15 s is the right range for the active
+            # project's sync badge; 10 s keeps the daemon-driven push
+            # visible promptly without burning RPCs.
             self._sync_status_event = Clock.schedule_interval(
-                lambda dt: self._update_sync_status(), 30)
+                lambda dt: self._update_sync_status(), 10)
         except Exception:
             traceback.print_exc()
             raise
@@ -4297,7 +4349,7 @@ class LIFTRecorderApp(App):
     def on_pause(self):
         self._finalise_active_recording('on_pause')
         # #4: suspend the sync-status poll while backgrounded.
-        # No reason to round-trip the daemon every 30s when the
+        # No reason to round-trip the daemon every 10s when the
         # user can't see the result. Resumed in on_resume.
         ev = getattr(self, '_sync_status_event', None)
         if ev:
@@ -4342,10 +4394,11 @@ class LIFTRecorderApp(App):
         # Idempotent — if we were never paused, the event will
         # have stayed alive and we skip.
         if not getattr(self, '_sync_status_event', None):
+            # § 17c Rule 4 — match the build-time cadence (10 s).
             self._sync_status_event = Clock.schedule_interval(
-                lambda dt: self._update_sync_status(), 30)
+                lambda dt: self._update_sync_status(), 10)
             # Immediate refresh so the user sees a fresh state on
-            # foreground rather than waiting up to 30s.
+            # foreground rather than waiting up to 10s.
             Clock.schedule_once(
                 lambda dt: self._update_sync_status(), 0)
         return True
@@ -5092,6 +5145,14 @@ class LIFTRecorderApp(App):
         # offline-skipped / paused state.
         self._cache_status_last = (-1, -1, False, False)
         self._logged_total_zero = False
+        # Prevent overlapping daemon round-trips when the worker takes
+        # longer than the 1s tick. Without this gate, two workers can
+        # race to "cache warm" and double the RPC rate plus the log
+        # line. Cleared by the worker once its dispatch lands.
+        self._cache_tick_in_flight = False
+        # Latches on the first cached>=total dispatch so any late
+        # worker (started before cancel ran) becomes a no-op.
+        self._cache_status_warmed = False
         print(f'[cache-status] poll starting for langcode={langcode!r}')
         self._cache_status_event = Clock.schedule_interval(
             lambda _dt: self._tick_cache_status(), 1.0)
@@ -5115,6 +5176,14 @@ class LIFTRecorderApp(App):
         if not langcode:
             self._hide_cache_indicator()
             return
+        # Skip if a worker from a prior tick is still resolving — the
+        # cancel that fires on cached>=total runs inside
+        # _apply_cache_status on the main thread, so without this gate
+        # a slow daemon means tick N+1 spawns a second worker that
+        # also reaches "cache warm" and double-fires the log + RPC.
+        if getattr(self, '_cache_tick_in_flight', False):
+            return
+        self._cache_tick_in_flight = True
         import threading
 
         def _worker():
@@ -5123,6 +5192,7 @@ class LIFTRecorderApp(App):
                 status = cawl_cache_status(langcode)
             except Exception as ex:
                 print(f'[cache-status] poll failed: {ex}')
+                self._cache_tick_in_flight = False
                 return
             cached = int(status.get('cached') or 0)
             total = int(status.get('total') or 0)
@@ -5146,6 +5216,7 @@ class LIFTRecorderApp(App):
             Clock.schedule_once(
                 lambda dt, c=cached, t=total, o=offline, x=circuit_open:
                     self._apply_cache_status(c, t, o, x), 0)
+            self._cache_tick_in_flight = False
         threading.Thread(target=_worker, daemon=True).start()
 
     def _apply_cache_status(self, cached, total,
@@ -5163,6 +5234,11 @@ class LIFTRecorderApp(App):
         which re-fires `auto_prefetch`; the running 1 Hz poll is
         what lets the banner flip back to live progress
         automatically when that happens."""
+        # Defence in depth: if a worker started before cancel ran is
+        # arriving late with cached>=total, drop it so we don't print
+        # "cache warm" twice or re-hide an already-hidden indicator.
+        if getattr(self, '_cache_status_warmed', False):
+            return
         if total == 0:
             if not getattr(self, '_logged_total_zero', False):
                 self._logged_total_zero = True
@@ -5173,6 +5249,7 @@ class LIFTRecorderApp(App):
             self._hide_cache_indicator()
             return
         if cached >= total:
+            self._cache_status_warmed = True
             print(f'[cache-status] cache warm: {cached}/{total}; '
                   'hiding + stopping poll')
             self._hide_cache_indicator()
@@ -5280,6 +5357,21 @@ class LIFTRecorderApp(App):
         from azt_collab_client import is_content_uri
         if not is_content_uri(path):
             path = os.path.abspath(path)
+            # Sweep the stale `.cawl_image_urls.json` that the desktop
+            # AZT app used to drop next to the LIFT. CAWL image URLs
+            # are daemon-owned now (CLIENT_INTEGRATION.md § 10); a
+            # peer-side mirror is exactly the kind of "just-in-case"
+            # cache the suite contract forbids. URI projects (Android)
+            # skip — the recorder doesn't own that directory.
+            try:
+                stale = os.path.join(os.path.dirname(path),
+                                     '.cawl_image_urls.json')
+                if os.path.exists(stale):
+                    os.unlink(stale)
+                    print(f'[load_lift] removed stale {stale}')
+            except OSError as ex:
+                print(f'[load_lift] stale CAWL cache cleanup skipped: '
+                      f'{ex}')
         try:
             db = LIFTDatabase(path,
                               image_cache_dir=self._get_image_cache_dir())
@@ -5390,13 +5482,13 @@ class LIFTRecorderApp(App):
     def _reload_and_restore(self, guid):
         """Reload the LIFT file and restore position to the entry with
         *guid*, refreshing the recorder UI in place per
-        CLIENT_INTEGRATION.md § 11. Same anchor (entry guid), fresh
+        CLIENT_INTEGRATION.md § 14. Same anchor (entry guid), fresh
         content (re-parsed from disk).
 
         If the saved guid would be hidden by a client-side filter
         after the refresh (e.g. only_unrecorded is on and another
         contributor just recorded the entry), suspend the filters
-        for this view so the user's anchor stays visible per § 11's
+        for this view so the user's anchor stays visible per § 14's
         filter-suspension rule. If the entry is genuinely gone from
         the new model (real upstream deletion), let the natural
         next-entry / empty-queue render so the change is visible."""
@@ -5433,7 +5525,7 @@ class LIFTRecorderApp(App):
                     return
             # Anchor not in current queue. If the new model still
             # has the entry, a client-side filter is hiding it; per
-            # § 11 drop the filters for this view so the user's
+            # § 14 drop the filters for this view so the user's
             # anchor stays present even though the data clock moved.
             # ConfigScreen.on_enter re-reads the recorder's filter
             # state into the input fields, so no extra UI sync.
@@ -5450,7 +5542,7 @@ class LIFTRecorderApp(App):
                         break
             # else: real upstream deletion — index is clamped to
             # [0, len(queue)-1] by rebuild_queue, so the user lands
-            # on whatever's at the same slot. Per § 11 let the
+            # on whatever's at the same slot. Per § 14 let the
             # natural propagation render; no toast.
         self.refresh_recorder_ui()
 
@@ -5590,6 +5682,28 @@ class LIFTRecorderApp(App):
                 print(f'[auto-publish] error: {ex}')
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _not_backed_up_text(self, status):
+        """Pick a 'not backed up' variant that hints at the *blocker* so
+        a tap on the indicator lands the user where they can actually
+        fix it. Probes in the order go_collab presents them: contributor
+        name → GitHub sign-in → project remote. Each _tr literal is
+        spelled out so xgettext can extract it."""
+        try:
+            from azt_collab_client import (
+                get_contributor, get_credentials_status)
+            if not (get_contributor() or '').strip():
+                return _tr('add name to back up')
+            cred = get_credentials_status() or {}
+            host = cred.get('host', 'github')
+            connected = bool(cred.get(host, {}).get('connected', False))
+            if not connected:
+                return _tr('sign in to back up')
+            if not (getattr(status, 'remote_url', '') or '').strip():
+                return _tr('publish to back up')
+        except Exception:
+            pass
+        return _tr('not backed up')
+
     def _sync_status_info(self):
         """Return (text, last_sync, last_commit) for the current project.
 
@@ -5613,7 +5727,7 @@ class LIFTRecorderApp(App):
         like do_sync can branch behaviour without re-querying.
         ``last_commit`` (most recent local commit timestamp) lets
         _update_sync_status detect external mutations between polls
-        per CLIENT_INTEGRATION.md § 11.
+        per CLIENT_INTEGRATION.md § 14.
         """
         import datetime
         langcode = getattr(self, '_current_langcode', '')
@@ -5626,8 +5740,11 @@ class LIFTRecorderApp(App):
         last_sync = float(getattr(status, 'last_sync', 0.0) or 0.0)
         last_commit = float(getattr(status, 'last_commit', 0.0) or 0.0)
         commits_ahead = int(getattr(status, 'commits_ahead', 0) or 0)
+        unshared_commits = int(
+            getattr(status, 'unshared_commits', commits_ahead) or 0)
         n_changes = int(getattr(status, 'n_changes', 0) or 0)
         work_offline = bool(getattr(status, 'work_offline', False))
+        lan_allow_sync = bool(getattr(status, 'lan_allow_sync', False))
         # Always render the uncommitted-file count in red when
         # n_changes > 0. We started with a >60 s persistence gate
         # to avoid flashing during normal record-and-commit cycles,
@@ -5636,12 +5753,62 @@ class LIFTRecorderApp(App):
         # tuition; a steady non-zero red is the data-loss-risk
         # signal we want users to learn to read.
         show_dirty_red = n_changes > 0
-        offline_tag = f' · {_tr("offline")}' if work_offline else ''
+        # Four-cell matrix per CLIENT_INTEGRATION.md § 17b:
+        #   work_offline=off, lan=*   → no suffix
+        #   work_offline=on,  lan=off → "offline" (commits accumulate)
+        #   work_offline=on,  lan=on  → "LAN-only" (paired phones
+        #                               still receive; github push
+        #                               suspended)
+        if work_offline and lan_allow_sync:
+            offline_tag = f' · {_tr("LAN-only")}'
+        elif work_offline:
+            offline_tag = f' · {_tr("offline")}'
+        else:
+            offline_tag = ''
+        # Suffix encodes "commits ahead of github" + LAN-shared
+        # breakdown per CLIENT_INTEGRATION.md § 17b
+        # (ProjectStatus.unshared_commits, daemon 0.45.0+):
+        #   commits_ahead == 0                              → "OK"
+        #   commits_ahead > 0, unshared == 0                → "LANOK +N"
+        #     (N ahead of github, but all already on LAN —
+        #      device could be wiped without losing data)
+        #   commits_ahead > 0, 0 < unshared < commits_ahead → "+M/N"
+        #     (M unshared / N total ahead — partial LAN coverage)
+        #   commits_ahead > 0, unshared == commits_ahead    → "+N"
+        #     (none on LAN; same as pre-LAN world)
+        # Computed regardless of last_sync: per § 17b the LANOK
+        # signal derives from commits_ahead / unshared_commits
+        # only — NOT from whether github has ever seen the
+        # project. A LAN-only project (last_sync == 0,
+        # commits_ahead > 0, unshared_commits == 0) must still
+        # surface LANOK so the user sees their data lives on a
+        # paired phone even before github push succeeds.
+        if commits_ahead == 0:
+            suffix = 'OK'
+        elif unshared_commits == 0:
+            suffix = f'LANOK +{commits_ahead}'
+        elif unshared_commits >= commits_ahead:
+            suffix = f'+{commits_ahead}'
+        else:
+            suffix = f'+{unshared_commits}/{commits_ahead}'
+        if show_dirty_red:
+            suffix = f'{suffix} [color=ff4444]+{n_changes}[/color]'
+        # Prefix: timestamp when github has accepted a push for
+        # this project; a call-to-action message otherwise. The
+        # suffix still rides along when there are commits or
+        # dirty files to report.
         if not last_sync:
-            base = _tr('not backed up')
-            if show_dirty_red:
-                base = f'{base} [color=ff4444]+{n_changes}[/color]'
-            return (f'{base}{offline_tag}', 0.0, last_commit)
+            base = self._not_backed_up_text(status)
+            if commits_ahead == 0:
+                # Nothing committed yet; the suffix would be
+                # "OK" (plus any dirty red) which misleadingly
+                # implies safety before any push. Surface the
+                # uncommitted-work signal on the prefix instead.
+                if show_dirty_red:
+                    base = f'{base} [color=ff4444]+{n_changes}[/color]'
+                return (f'{base}{offline_tag}', 0.0, last_commit)
+            return (f'{base} ({suffix}){offline_tag}',
+                    0.0, last_commit)
         dt_sync = datetime.datetime.fromtimestamp(last_sync)
         now = datetime.datetime.now()
         sync_date = dt_sync.date()
@@ -5653,29 +5820,44 @@ class LIFTRecorderApp(App):
             base = f'yesterday {time_str}'
         else:
             base = f'{days} days ago {time_str}'
-        suffix = f'+{commits_ahead}' if commits_ahead > 0 else 'OK'
         # Examples on the rendered indicator:
-        #   (OK)                — committed + pushed, all clean
-        #   (+3)                — 3 commits ahead of remote
-        #   (OK <red>+5</red>)  — 5 dirty files awaiting commit;
-        #                         brief if commits are happening,
-        #                         sticky if they aren't (the
-        #                         data-loss-risk signal we want
-        #                         users to learn to read)
-        #   (+1 <red>+5</red>)  — both: unpushed commit AND dirty
-        #   (+1) · offline      — work-offline toggle is on; daemon
-        #                         won't push even when online
-        if show_dirty_red:
-            suffix = f'{suffix} [color=ff4444]+{n_changes}[/color]'
-        base = f'{base} ({suffix}){offline_tag}'
-        return (base, last_sync, last_commit)
+        #   (OK)                  — committed + pushed, all clean
+        #   (+3)                  — 3 commits ahead of remote, none on LAN
+        #   (LANOK +3)            — 3 ahead of github, all on LAN already
+        #   (+1/3)                — 3 ahead, 1 unshared, 2 on LAN
+        #   (OK <red>+5</red>)    — 5 dirty files awaiting commit
+        #   (+1 <red>+5</red>)    — both: unpushed commit AND dirty
+        #   (+1) · offline        — work-offline on, LAN-share off:
+        #                           daemon won't push; commits accumulate
+        #   (LANOK +1) · LAN-only — work-offline on, LAN-share on:
+        #                           paired phones still receive locally;
+        #                           github push suspended
+        #   (LANOK +1 <red>+2</red>) · LAN-only
+        #                         — LAN-only mode with 1 commit on a
+        #                           paired phone but not on github, and
+        #                           2 dirty files still to commit
+        #   not backed up (LANOK +3)
+        #                         — never github-pushed yet, but the 3
+        #                           local commits all exist on a paired
+        #                           phone
+        #   not backed up <red>+2</red>
+        #                         — never committed; 2 dirty files
+        #                           present but no LAN/github safety
+        #                           to claim
+        #   not backed up (LANOK +1 <red>+2</red>) · LAN-only
+        #                         — 1 commit on a paired phone but not
+        #                           on github, 2 dirty files, github
+        #                           push suspended by work-offline +
+        #                           LAN-share toggle
+        return (f'{base} ({suffix}){offline_tag}',
+                last_sync, last_commit)
 
     def _update_sync_status(self):
         """Push sync status text into the recorder top bar, and
         detect external mutations (another peer's push, a daemon-
         driven debounced sync) by watching project_status.last_commit
         across polls. On a change, refresh the recorder UI in place
-        per CLIENT_INTEGRATION.md § 11 — same anchor entry, fresh
+        per CLIENT_INTEGRATION.md § 14 — same anchor entry, fresh
         content.
 
         Also polls the most recent auto-commit job (if any) for
@@ -5728,6 +5910,19 @@ class LIFTRecorderApp(App):
         langcode = self._current_langcode_or_register()
         if not langcode:
             return
+        # § 17c Rule 1 — share the in-flight guard with do_sync. While
+        # sync_project holds the daemon-side project_lock, a parallel
+        # commit_project would hit S.BUSY and the peer would pile up
+        # redundant calls. Drop, do NOT queue — commit_project is a
+        # debounced boundary marker; the next swipe's commit will
+        # cover whatever this one would have done. (The flag clears
+        # within milliseconds for the commit_project-only case since
+        # the RPC returns a job_id immediately.)
+        in_flight = getattr(self, '_sync_in_flight', {})
+        if in_flight.get(langcode):
+            return
+        in_flight[langcode] = True
+        self._sync_in_flight = in_flight
         try:
             from azt_collab_client import commit_project, ServerUnavailable
             # § 12: contributor is daemon-owned, no longer on the wire.
@@ -5752,8 +5947,11 @@ class LIFTRecorderApp(App):
             _log_server_crash_if_any('auto_sync')
             return
         except Exception as ex:
-            print(f'[auto-sync] error: {ex}', file=sys.stderr, flush=True)
+            print(f'[auto-sync] error: {ex}',
+                  file=sys.stderr, flush=True)
             return
+        finally:
+            self._sync_in_flight[langcode] = False
         # Refresh the recorder's sync status indicator slightly after
         # the debounce window so a successful job's last_sync is in
         # place.
@@ -5869,14 +6067,30 @@ class LIFTRecorderApp(App):
             return
         err = result.get('error', 'unknown')
         if err == 'cancelled':
-            # Per CLIENT_INTEGRATION.md § 5: cancel during Start over
-            # (a project was already loaded) leaves the previous
-            # project up — silent. First-setup cancel (no
-            # last_project, brand-new install) closes the app rather
-            # than parking the user on an empty window. The picker
-            # subprocess only emits 'cancelled' when it has no
-            # last_project to auto-resume to, so an empty
-            # last_project is the first-setup signal.
+            # CLIENT_INTEGRATION.md § 14a: picker-cancel writes
+            # nothing to the daemon, so the discriminator for
+            # "first-setup exit" vs "user changed their mind" is
+            # peer-side state, NOT the daemon's last_project().
+            # The contract phrases this as "_current_langcode is
+            # None *and* picker came back without a selection".
+            # We're already in the cancelled branch, so the second
+            # condition is implicit; check self.recorder (the
+            # recorder's peer-specific equivalent of "I have a
+            # project loaded").
+            #
+            # § 14a "Exception — first-boot picker-cancel: App.stop()
+            # is correct" carves this out as the only legit stop()
+            # in any picker / on_resume flow. Anywhere else, an
+            # exit would lose the user's place and look like a
+            # crash (Android does NOT auto-restart on App.stop()).
+            #
+            # Daemon-side invariants since 0.43.5: an empty
+            # last_project() is impossible outside first-boot — so
+            # the bootstrap-race tiebreaker below should never fire
+            # in practice; if it does, log so a daemon regression
+            # is visible.
+            if self.recorder is not None:
+                return
             try:
                 from azt_collab_client import last_project
                 resume = last_project()
@@ -5885,6 +6099,10 @@ class LIFTRecorderApp(App):
             if not resume:
                 self.stop()
                 return
+            print('[peer] picker cancel with last_project='
+                  f'{resume!r} but no peer-side recorder; '
+                  'falling through — daemon regression suspected '
+                  '(§ 14a invariant since 0.43.5)')
             return
         # 'server_apk_not_installed' falls through to the generic
         # error below; bootstrap() owns the install prompt at startup
@@ -5975,11 +6193,49 @@ class LIFTRecorderApp(App):
         if not last_sync:
             self.go_collab()
             return
+        # CLIENT_INTEGRATION.md § 17c Rule 3 — peer-side debounce on
+        # the Sync button (250 ms). sync_project is NOT debounced
+        # server-side, so a fast double-tap fires two parallel calls;
+        # Rule 1 below drops the second silently but the debounce
+        # avoids even queuing the second worker thread.
+        import time as _time
+        now = _time.monotonic()
+        last_tap = getattr(self, '_last_sync_tap_at', {})
+        if now - last_tap.get(langcode, 0.0) < 0.25:
+            return
+        last_tap[langcode] = now
+        self._last_sync_tap_at = last_tap
+        # § 17c Rule 1 — single in-flight guard per (RPC, project).
+        # Drop, do NOT queue, while a prior mutating RPC for this
+        # project is still in flight. Shared with _auto_commit_sync
+        # so commit_project also defers while sync_project holds the
+        # daemon-side project_lock (would otherwise hit S.BUSY).
+        in_flight = getattr(self, '_sync_in_flight', {})
+        if in_flight.get(langcode):
+            return
+        in_flight[langcode] = True
+        self._sync_in_flight = in_flight
         import threading
 
         saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''
+        # Mutable container so the retry branch can ask finally NOT to
+        # release the flag — the retry worker re-enters _on_sync_done
+        # (retried=True) and that invocation's finally does the release.
+        _keep_held = [False]
 
         def _on_sync_done(result, retried=False):
+            try:
+                _on_sync_done_inner(result, retried)
+            finally:
+                # § 17c Rule 1 — clear the in-flight flag on the "post"
+                # branch unless we just spawned a JOB_INTERRUPTED retry;
+                # in that case the retried=True invocation's own finally
+                # clears it instead.
+                if not _keep_held[0]:
+                    self._sync_in_flight[langcode] = False
+                _keep_held[0] = False
+
+        def _on_sync_done_inner(result, retried=False):
             print(f'[do_sync] {translate_result(result)}')
             # Structure per azt_collab_client/CLAUDE.md "Peer contract:
             # routing on sync results" (do_sync example, lines 389-430):
@@ -6010,7 +6266,7 @@ class LIFTRecorderApp(App):
             #                            on second failure
             # 3. Success path (else): PUSHED / PULLED / NOTHING_TO_COMMIT
             #    etc. Refresh the sync indicator + recorder-specific
-            #    follow-ups (PULLED reload per CLIENT_INTEGRATION § 11,
+            #    follow-ups (PULLED reload per CLIENT_INTEGRATION § 14,
             #    PUSHED app-installed mark).
             #
             # In this peer the server's one-size-fits-all settings UI
@@ -6102,12 +6358,23 @@ class LIFTRecorderApp(App):
                         _tr('Sync interrupted, please try again.')), 0)
                     return
                 # Silent one-shot retry on a fresh worker thread.
+                # Tell the outer finally to hold the in-flight flag —
+                # the retry's _on_sync_done(retried=True) clears it.
+                _keep_held[0] = True
                 def _retry_worker():
                     # § 12: contributor is daemon-owned.
-                    r = sync_project(langcode)
-                    Clock.schedule_once(
-                        lambda dt, rr=r: _on_sync_done(rr, retried=True),
-                        0)
+                    try:
+                        r = sync_project(langcode)
+                        Clock.schedule_once(
+                            lambda dt, rr=r:
+                                _on_sync_done(rr, retried=True),
+                            0)
+                    except Exception as ex:
+                        # Same belt-and-suspenders as the initial
+                        # _worker: don't strand the in-flight flag.
+                        print(f'[do_sync] retry worker error: {ex}',
+                              file=sys.stderr, flush=True)
+                        self._sync_in_flight[langcode] = False
                 threading.Thread(
                     target=_retry_worker, daemon=True).start()
                 return
@@ -6119,7 +6386,7 @@ class LIFTRecorderApp(App):
             # benefits from re-reading project_status in case another
             # peer pushed since we loaded.
             self._update_sync_status()
-            # Per CLIENT_INTEGRATION.md § 11, only refresh the
+            # Per CLIENT_INTEGRATION.md § 14, only refresh the
             # recorder UI when on-disk bytes actually changed — i.e.
             # remote→local was pulled. Local→remote-only pushes don't
             # invalidate our in-memory model, so skip the reparse.
@@ -6130,8 +6397,18 @@ class LIFTRecorderApp(App):
 
         def _worker():
             # § 12: contributor is daemon-owned, no longer on the wire.
-            result = sync_project(langcode)
-            Clock.schedule_once(lambda dt: _on_sync_done(result), 0)
+            try:
+                result = sync_project(langcode)
+                Clock.schedule_once(lambda dt: _on_sync_done(result), 0)
+            except Exception as ex:
+                # Belt-and-suspenders: if sync_project raises something
+                # the client didn't wrap into a Result, _on_sync_done
+                # never runs and its finally never clears the in-flight
+                # flag — the user would be locked out of Sync forever.
+                # Clear here and surface the error in the log.
+                print(f'[do_sync] worker error: {ex}',
+                      file=sys.stderr, flush=True)
+                self._sync_in_flight[langcode] = False
         threading.Thread(target=_worker, daemon=True).start()
 
     def show_image_picker(self):

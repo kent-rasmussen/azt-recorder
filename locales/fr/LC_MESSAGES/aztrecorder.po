@@ -4,10 +4,10 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: azt-recorder 1.42.13\n"
+"Project-Id-Version: azt-recorder 1.46.0\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-05-14 00:00+0000\n"
-"PO-Revision-Date: 2026-05-14 00:00+0000\n"
+"PO-Revision-Date: 2026-05-15 00:00+0000\n"
 "Last-Translator: \n"
 "Language-Team: French\n"
 "Language: fr\n"
@@ -16,29 +16,23 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=(n > 1);\n"
 
-# ── App identity ──────────────────────────────────────────────────────────────
-
-msgid "Record My Wordlist"
-msgstr "Enregistrer ma liste de mots"
-
-# ── Welcome screen ────────────────────────────────────────────────────────────
-
-msgid "I have one on my phone"
-msgstr "J'en ai un sur mon téléphone"
-
-msgid "Clone Internet Repository"
-msgstr "Cloner un dépôt Internet"
-
-msgid "Start New"
-msgstr "Nouveau projet"
+# This catalog holds only peer-specific strings. UI primitives
+# (Cancel/OK/Clone/Continue/...), status-code messages
+# (Committed./Pushed.../Pulled.../...), GitHub/GitLab credential
+# flow, welcome/picker/clone-form vocabulary, and image-cache
+# wording all live in the client catalog
+# (azt_collab_client/locales/<lang>/LC_MESSAGES/azt_collab_client.po).
+# The recorder's gettext chain has the client catalog as the
+# add_fallback target (CLIENT_INTEGRATION.md § 6), so client-owned
+# strings translate without per-peer duplication.
 
 # ── Recorder screen ──────────────────────────────────────────────────────────
 
 msgid "Recording:"
 msgstr "Enregistrement :"
 
-msgid "Change gloss languages"
-msgstr "Changer les langues de glose"
+msgid "Gloss languages"
+msgstr "Langues de glose"
 
 msgid "Filter words"
 msgstr "Filtrer les mots"
@@ -58,16 +52,10 @@ msgstr "rechercher une glose…"
 msgid "Setup Collaboration"
 msgstr "Configurer la collaboration"
 
-msgid "Start over"
-msgstr "Recommencer"
-
 msgid "Show past work"
 msgstr "Afficher le travail passé"
 
 # ── Config / Setup screen ────────────────────────────────────────────────────
-
-msgid "Setup"
-msgstr "Paramètres"
 
 msgid "Your name [color=ff4444]*[/color]"
 msgstr "Votre nom [color=ff4444]*[/color]"
@@ -75,35 +63,17 @@ msgstr "Votre nom [color=ff4444]*[/color]"
 msgid "Your name (for commit attribution)"
 msgstr "Votre nom (pour l’attribution des contributions)"
 
-msgid "GitHub"
-msgstr "GitHub"
-
-msgid "GitLab"
-msgstr "GitLab"
-
 msgid "GitHub account"
 msgstr "Compte GitHub"
 
 msgid "Not connected"
 msgstr "Non connecté"
 
-msgid "Connect to GitHub"
-msgstr "Se connecter à GitHub"
-
 msgid "Reconnect"
 msgstr "Se reconnecter"
 
-msgid "Install GitHub App"
-msgstr "Installer l’appli GitHub"
-
-msgid "Copy"
-msgstr "Copier"
-
 msgid "GitLab account"
 msgstr "Compte GitLab"
-
-msgid "Personal access token"
-msgstr "Jeton d’accès personnel"
 
 msgid "GitLab username"
 msgstr "Nom d’utilisateur GitLab"
@@ -134,35 +104,7 @@ msgstr "Photo"
 msgid "File"
 msgstr "Fichier"
 
-# ── Language picker screen ───────────────────────────────────────────────────
-
-msgid "Choose your language"
-msgstr "Choisissez votre langue"
-
-msgid "Type a language name..."
-msgstr "Tapez un nom de langue…"
-
-# ── Dialect / region selection ───────────────────────────────────────────────
-
-msgid "Select region:"
-msgstr "Sélectionnez la région :"
-
-msgid "I'm working on a dialect"
-msgstr "Je travaille sur un dialecte"
-
-msgid "Variant code (2-8 chars)"
-msgstr "Code de variante (2-8 caract.)"
-
-msgid "Continue"
-msgstr "Continuer"
-
-msgid "Multiple / all regions"
-msgstr "Plusieurs / toutes les régions"
-
 # ── Recorder status ──────────────────────────────────────────────────────────
-
-msgid "Settings"
-msgstr "Paramètres"
 
 msgid "Recording..."
 msgstr "Enregistrement en cours…"
@@ -172,75 +114,19 @@ msgstr "Pas encore enregistré"
 
 # ── Common buttons ───────────────────────────────────────────────────────────
 
-msgid "Cancel"
-msgstr "Annuler"
-
-msgid "Open"
-msgstr "Ouvrir"
-
-msgid "Yes"
-msgstr "Oui"
-
-msgid "OK"
-msgstr "OK"
-
-msgid "Clone"
-msgstr "Cloner"
-
 msgid "Clear"
 msgstr "Effacer"
 
 # ── Popups / dialogs ─────────────────────────────────────────────────────────
 
-msgid "Open LIFT from URL"
-msgstr "Ouvrir un LIFT depuis une URL"
-
-msgid "Paste the URL to a .lift file:"
-msgstr "Collez l’URL d’un fichier .lift :"
-
-msgid "Error"
-msgstr "Erreur"
-
-msgid "Start a new wordlist"
-msgstr "Créer une nouvelle liste de mots"
-
-msgid "Start a new wordlist with this template?"
-msgstr "Créer une nouvelle liste de mots avec ce modèle ?"
-
 msgid "Go to entry (1-{total})"
 msgstr "Aller à l’entrée (1-{total})"
-
-msgid "Clone Repository"
-msgstr "Cloner un dépôt"
-
-msgid "Clone a git repository containing a LIFT file:"
-msgstr "Cloner un dépôt git contenant un fichier LIFT :"
-
-msgid "Owner (username)"
-msgstr "Propriétaire (nom d’utilisateur)"
-
-msgid "Repository name"
-msgstr "Nom du dépôt"
 
 msgid "Select image"
 msgstr "Sélectionner une image"
 
-msgid "Open LIFT file"
-msgstr "Ouvrir un fichier LIFT"
-
 msgid "Type your name as you want it to appear online, then click 'Connect'"
 msgstr "Tapez votre nom tel que vous voulez qu’il apparaisse en ligne, puis cliquez sur « Se connecter »"
-
-# ── Loading / status messages ────────────────────────────────────────────────
-
-msgid "Setting up wordlist for {code}..."
-msgstr "Préparation de la liste de mots pour {code}…"
-
-msgid "Publishing..."
-msgstr "Publication en cours…"
-
-msgid "Cloning repository..."
-msgstr "Clonage du dépôt en cours…"
 
 # ── Toast / feedback messages ────────────────────────────────────────────────
 
@@ -286,147 +172,13 @@ msgstr "Connecté en tant que {username} — installez l’appli pour accéder a
 msgid "Authorization failed: {error}"
 msgstr "Échec de l’autorisation : {error}"
 
-msgid "No project loaded."
-msgstr "Aucun projet chargé."
-
 msgid "Could not open file:\n{error}"
 msgstr "Impossible d’ouvrir le fichier :\n{error}"
 
-# ── Collab messages ──────────────────────────────────────────────────────────
-
-msgid "Authorization expired. Please try again."
-msgstr "Autorisation expirée. Veuillez réessayer."
-
-msgid "Authorization denied by user."
-msgstr "Autorisation refusée par l’utilisateur."
-
-msgid "Authorization timed out."
-msgstr "Délai d’autorisation dépassé."
-
-msgid "Not connected to GitHub. Go to Setup > Connect to GitHub."
-msgstr "Non connecté à GitHub. Allez dans Paramètres > Se connecter à GitHub."
-
-msgid "Not a git repository."
-msgstr "Ce n’est pas un dépôt git."
-
-msgid "No remote configured. Publish the project first."
-msgstr "Aucun dépôt distant configuré. Publiez d’abord le projet."
-
-msgid "Not a git repository. Publish the project first."
-msgstr "Ce n’est pas un dépôt git. Publiez d’abord le projet."
-
-msgid "No .lift file found in cloned repository."
-msgstr "Aucun fichier .lift trouvé dans le dépôt cloné."
-
-msgid "No new audio"
-msgstr "Pas de nouvel audio"
-
-msgid "Committed locally (offline)"
-msgstr "Validé localement (hors ligne)"
-
-msgid "Committed (no remote configured)"
-msgstr "Validé (aucun dépôt distant configuré)"
-
-msgid "Committed and pushed {n} file(s)"
-msgstr "{n} fichier(s) validé(s) et envoyé(s)"
-
-msgid "No repo"
-msgstr "Pas de dépôt"
-
-msgid "Initialized git repository."
-msgstr "Dépôt git initialisé."
-
-msgid "Repository already initialized."
-msgstr "Dépôt déjà initialisé."
-
-msgid "Created .gitignore."
-msgstr "Fichier .gitignore créé."
-
-msgid "Pulled latest changes from origin."
-msgstr "Dernières modifications récupérées depuis origin."
-
-msgid "Pulled latest changes."
-msgstr "Dernières modifications récupérées."
-
-msgid "Staged all changes."
-msgstr "Toutes les modifications indexées."
-
-msgid "Committed."
-msgstr "Validé."
-
-msgid "Nothing new to commit."
-msgstr "Rien de nouveau à valider."
-
-msgid "Committed local changes."
-msgstr "Modifications locales validées."
-
-msgid "No local changes to commit."
-msgstr "Aucune modification locale à valider."
-
-msgid "Open your git host to create a pull request."
-msgstr "Ouvrez votre hébergeur git pour créer une demande de fusion."
-
-# ── Newly added strings ──────────────────────────────────────────────────────
-
-msgid "Language code: {code}"
-msgstr "Code de langue : {code}"
+# ── Misc ─────────────────────────────────────────────────────────────────────
 
 msgid "unrecorded only"
 msgstr "non enregistrés uniquement"
-
-msgid "Committed ({sha})."
-msgstr "Validé ({sha})."
-
-msgid "Commit: {error}"
-msgstr "Validation : {error}"
-
-msgid "Remote updated to {url}"
-msgstr "Dépôt distant mis à jour : {url}"
-
-msgid "Remote: {url}"
-msgstr "Dépôt distant : {url}"
-
-msgid "Remote set to {url}"
-msgstr "Dépôt distant défini : {url}"
-
-msgid "Pushed to {url} (branch: {branch})."
-msgstr "Envoyé à {url} (branche : {branch})."
-
-msgid "Push failed: {error}"
-msgstr "Échec de l'envoi : {error}"
-
-msgid "Cloned to {dir}"
-msgstr "Cloné dans {dir}"
-
-msgid "Clone failed: {error}"
-msgstr "Échec du clonage : {error}"
-
-msgid "Found: {file}"
-msgstr "Trouvé : {file}"
-
-msgid "Pull failed: {error}"
-msgstr "Échec de la récupération : {error}"
-
-msgid "On branch {branch}."
-msgstr "Sur la branche {branch}."
-
-msgid "Branch error: {error}"
-msgstr "Erreur de branche : {error}"
-
-msgid "Pushed {branch}."
-msgstr "Branche {branch} envoyée."
-
-msgid "Pushed to {branch}."
-msgstr "Envoyé sur {branch}."
-
-msgid "Commit failed: {error}"
-msgstr "Échec de la validation : {error}"
-
-msgid "Committed locally, sync failed: {error}"
-msgstr "Validé localement, synchronisation échouée : {error}"
-
-msgid "Committed locally, push failed: {error}"
-msgstr "Validé localement, envoi échoué : {error}"
 
 # ── v1.21.0 additions ──────────────────────────────────────────────────────
 
@@ -444,9 +196,6 @@ msgstr "Installez maintenant l'application pour accorder l'accès aux dépôts."
 
 msgid "Select \"All repositories\"."
 msgstr "Sélectionnez « Tous les dépôts »."
-
-msgid "Paste the repository URL here"
-msgstr "Collez l'adresse du dépôt ici"
 
 # ── v1.37.12 additions ─────────────────────────────────────────────────────
 
@@ -480,8 +229,20 @@ msgstr "URL d'installation de l'appli GitHub indisponible."
 msgid "not backed up"
 msgstr "non sauvegardé"
 
-msgid "Sync service unavailable: {error}"
-msgstr "Service de synchronisation indisponible : {error}"
+# v1.46.0 — blocker-aware variants of "not backed up". Picked in
+# main.py:_not_backed_up_text when last_sync == 0: probes contributor
+# name → sign-in → project remote and surfaces whichever is missing.
+# "Sauvegarder" keeps continuity with the fallback "non sauvegardé"
+# above. Infinitive imperative parallels the English "<verb> to back up"
+# structure and is the idiomatic French for short instructional UI.
+msgid "add name to back up"
+msgstr "ajouter un nom pour sauvegarder"
+
+msgid "sign in to back up"
+msgstr "se connecter pour sauvegarder"
+
+msgid "publish to back up"
+msgstr "publier pour sauvegarder"
 
 msgid "Could not open project picker: {error}"
 msgstr "Impossible d'ouvrir le sélecteur de projet : {error}"
@@ -490,11 +251,6 @@ msgstr "Impossible d'ouvrir le sélecteur de projet : {error}"
 
 msgid "This project"
 msgstr "Ce projet"
-
-# "Caching images: {cached} / {total} (network in use — please stay online)"
-# lives in azt_collab_client/locales/<lang>/azt_collab_client.po — shared
-# with the daemon settings UI's cache indicator. The recorder's _tr()
-# falls through to the client catalog for this msgid; no peer-side copy.
 
 msgid "Sync interrupted, please try again."
 msgstr "Synchronisation interrompue, veuillez réessayer."
@@ -511,6 +267,11 @@ msgstr "Maintenez le bouton pour enregistrer"
 msgid "Audio quality:"
 msgstr "Qualité audio :"
 
+# Audio quality labels — main.py's _AUDIO_QUALITY_LABELS tuple
+# maps profile-key → label, and the labels reach gettext via
+# _tr(label) (variable, not literal). Static .po audits will flag
+# these as orphans because the AST walker can't see through the
+# dynamic dispatch. They're load-bearing — keep them.
 msgid "High"
 msgstr "Haute"
 
@@ -534,19 +295,6 @@ msgstr "Très basse"
 
 msgid "Very Low AAC"
 msgstr "Très basse (AAC)"
-
-# Auto-sync setting (#8 of the low-power policy).
-msgid "Auto-sync:"
-msgstr "Synchronisation auto :"
-
-msgid "Every swipe"
-msgstr "Chaque glissement"
-
-msgid "When idle"
-msgstr "Au repos"
-
-msgid "Manual only"
-msgstr "Manuel uniquement"
 
 # ── v1.42.x additions ──────────────────────────────────────────────────────
 
@@ -577,13 +325,27 @@ msgstr "Échec de l'enregistrement ; qualité abaissée. Veuillez réessayer."
 msgid "Recording failed at the lowest quality. Please try again."
 msgstr "Échec de l'enregistrement à la qualité la plus basse. Veuillez réessayer."
 
-# v1.42.7 image-cache offline / circuit_open flag wording, per
-# CLIENT_INTEGRATION.md § 10. Mirrors the daemon settings UI's
-# strings; peer-side copies act as a backstop if the client
-# catalog doesn't yet have them (no harm if it does — translations
-# stay consistent).
-msgid "Image cache: {cached} / {total} (offline — will resume when online)"
-msgstr "Cache d'images : {cached} / {total} (hors ligne — reprendra une fois en ligne)"
+# ── v1.45.0 additions ──────────────────────────────────────────────────────
 
-msgid "Image cache: {cached} / {total} (paused — connectivity lost)"
-msgstr "Cache d'images : {cached} / {total} (en pause — connexion perdue)"
+# v1.45.0 work-offline badge on the sync indicator (e.g. "(+3) · offline").
+# Rendered when ProjectStatus.work_offline is True per
+# CLIENT_INTEGRATION.md § 17b — daemon-wide toggle is on, pending commits
+# won't be pushed even when online. Lowercase to compose with the
+# preceding parenthesised suffix.
+msgid "offline"
+msgstr "hors ligne"
+
+# v1.46.36 fourth cell of the work_offline × lan_allow_sync matrix
+# (CLIENT_INTEGRATION.md § 17b). Rendered when both flags are on:
+# github push is suspended but paired phones still receive over
+# LAN. Same composition rules as "offline" — lowercase, follows
+# the parenthesised suffix.
+msgid "LAN-only"
+msgstr "LAN seulement"
+
+# v1.45.0 audit fix: "Share this app" button (main.py KV at line ~514,
+# bound to app.share_apk()) was using gettext but had no peer-side
+# translation and no client-catalog fallback. Genuine gap, not a
+# delegated-to-client string.
+msgid "Share this app"
+msgstr "Partager cette appli"

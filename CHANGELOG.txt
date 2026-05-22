@@ -1,6 +1,212 @@
 CHANGELOG — A-Z+T Recorder
 
-1.44.0
+1.46.39
+  Add docs/StatusCodes.md — exhaustive enumeration of every
+  text variant that can appear between the sync icon and the
+  gear icon in the top bar: prefixes (timestamp variants vs
+  not-backed-up call-to-action), suffixes (OK / +N / LANOK +N
+  / +u/N with optional dirty-red), offline tags ('' / offline
+  / LAN-only), and combined examples. Cross-referenced with
+  the status-code routing in CLIENT_INTEGRATION.md § 17 so
+  the "label text vs status code" distinction is documented.
+
+1.46.38
+  Sync-status badge no longer gates the LANOK / +u/a suffix on
+  uncommitted work. Pre-fix, _sync_status_info short-circuited
+  to "not backed up" whenever last_sync == 0, conflating two
+  separate things — committed history vs the working-tree dirty
+  count — and hiding the LAN-share signal behind the same
+  branch that handled "never pushed." Per CLIENT_INTEGRATION.md
+  § 17b the suffix is a statement about committed history
+  (commits_ahead vs unshared_commits); it's now computed
+  whenever commits exist, regardless of last_sync. Uncommitted
+  work (n_changes red) rides separately on the prefix when no
+  commits are present, so "not backed up [red]+5[/red]" still
+  flags dirty files but doesn't get a misleading "(OK)" suffix.
+  Renders e.g. "not backed up (LANOK +3)" when github hasn't
+  seen the project but a paired phone has all three local
+  commits.
+
+1.46.37
+  Sync-status suffix now encodes the LAN-shared breakdown per
+  azt_collab_client/projects.py:130-138 (ProjectStatus.
+  unshared_commits, daemon 0.45.0+):
+    commits_ahead == 0                              → "OK"
+    commits_ahead > 0, unshared == 0                → "LANOK +N"
+      (N ahead of github but all already on LAN — device could
+       be wiped without losing data)
+    commits_ahead > 0, 0 < unshared < commits_ahead → "+M/N"
+    commits_ahead > 0, unshared == commits_ahead    → "+N"
+  Pre-0.45 daemons omit unshared_commits; getattr default ==
+  commits_ahead biases to the legacy "+N" rendering so older
+  daemons keep working unchanged. Composes with the work_offline
+  × lan_allow_sync suffix from 1.46.36, so a LAN-only project
+  with one local-only commit renders "(LANOK +1) · LAN-only".
+
+1.46.36
+  Sync-status badge now reads ProjectStatus.lan_allow_sync in
+  addition to .work_offline, surfacing the fourth cell of the
+  CLIENT_INTEGRATION.md § 17b matrix: work_offline=on +
+  lan_allow_sync=on now renders " · LAN-only" (paired phones
+  still receive locally; github push suspended) instead of being
+  silently collapsed into " · offline". Single-RPC pattern
+  preserved — both flags come from the existing
+  project_status(langcode) call, no extra round-trip. New
+  msgid "LAN-only" added to fr.po (recompile .mo to take effect).
+
+1.46.29
+  Settings page tidy-up: the four full-width buttons (Share this
+  app, Setup Collaboration, Select Project, Share log) now cap at
+  dp(360) wide and center horizontally so they're not absurdly
+  wide on tablets. The Gloss-languages and Filter-words toggle
+  buttons (each paired with a summary label in a row) get a fixed
+  dp(160) width so the summary label takes the remaining space
+  instead of stealing half. Gloss button drops the leading
+  "Change" verb (the summary next to it already says what's
+  selected); the summary now shows the full names from
+  LangToggle._LANG_NAMES (e.g. "Lingala (RDC)") rather than raw
+  codes, at sp(14) instead of sp(12). New _lang_display_name()
+  helper defers to LangToggle._LANG_NAMES so the summary and the
+  picker overlay stay aligned on one source of truth.
+
+1.46.18
+  KEEP_SCREEN_ON add/clear now dispatch via p4a's
+  android.runnable.run_on_ui_thread instead of Clock.schedule_once.
+  Logcat showed `KEEP_SCREEN_ON clear (main thread) failed: ...
+  CalledFromWrongThreadException Expected: SDLActivity Calling:
+  SDLThread` on stop_recording — Clock.schedule_once marshals to
+  the Kivy main thread (SDLThread) but Android wants the Activity
+  UI thread (SDLActivity); on p4a those are different threads, so
+  the Clock detour didn't satisfy Android's view-mutation rule.
+  Reference implementation lives in
+  azt-collab/azt_collabd/ui/picker_app.py's
+  setDecorFitsSystemWindows path. Both add (start_recording) and
+  clear (stop_recording) paths updated; ImportError fallback to a
+  direct call for the non-p4a case (which shouldn't be reached
+  inside the Android-only branch).
+
+1.46.16
+  load_lift unlinks any `.cawl_image_urls.json` it finds next to a
+  filesystem-path LIFT — that was a desktop-AZT-only disk cache for
+  the CAWL→GitHub-URL map, and CAWL image URLs are daemon-owned in
+  the suite now. URI projects (Android) skip the sweep; the
+  recorder doesn't own that directory. Recorder has never written
+  the file itself, so this is cleanup of a peer-foreign artifact.
+
+1.46.10
+  Fix the cache-status duplicate-poller pattern flagged by the
+  daemon team (status RPCs at ~2 Hz, "cache warm" logged twice,
+  overlapping daemon round-trips). Root cause: _tick_cache_status
+  fires every 1s and spawns a worker thread that calls
+  cawl_cache_status async, then marshals back to the main thread
+  to run _apply_cache_status — which is also where the event
+  cancel happens. If the worker took >1s (typical during a
+  cache-fill burst), tick N+1 spawned a second worker before the
+  first's cancel ran, and both reached "cache warm" before the
+  event was unscheduled. Added _cache_tick_in_flight to gate
+  overlapping workers, and a _cache_status_warmed latch in
+  _apply_cache_status so any late warm dispatch from a worker
+  started before cancel ran becomes a no-op. Both flags reset
+  in _start_cache_status_poll alongside the existing per-poll
+  state so project switches start clean.
+
+1.46.6
+  _handle_pick comment refreshed to cite § 14a's now-explicit
+  "Exception — first-boot picker-cancel: App.stop() is correct"
+  carve-out and "Daemon-side invariants (since 0.43.5)"
+  subsection. Behavior unchanged from 1.46.5; the contract was
+  updated in parallel to make our discriminator (peer-side
+  state, not daemon's last_project return) the contract-
+  endorsed pattern. The "bootstrap-race fall-through" log line
+  now mentions the 0.43.5 invariant so a future occurrence
+  reads as a daemon regression rather than a routine peer log.
+
+1.46.5
+  _handle_pick first-setup detector now reads peer-side state
+  (self.recorder is not None) instead of treating an empty
+  last_project() as proof of first-setup. § 5's literal pattern
+  was written for the brand-new-install case where both answers
+  empty in lockstep, but daemon-side flows (e.g. Switch-Project)
+  can transiently empty last_project() while the peer is mid-
+  session — in which case the old detector treated a routine
+  picker cancel as a first-setup-cancel and called self.stop(),
+  exactly the § 14a anti-pattern. New shape: self.recorder is
+  None → genuine first-setup → exit per § 5; otherwise return
+  silently and leave the previous project loaded.
+
+  Resolves the § 5 vs § 14a tension: stop() now fires only when
+  there is literally nothing loaded yet, never as a reload
+  mechanism a last_project blip could trip.
+
+1.46.2
+  CLIENT_INTEGRATION.md § 17c conformance (peer concurrency
+  obligations). Closes the field-log signature the contract
+  section was written to fix: parallel POST /sync calls per
+  user tap, daemon refusing later ones with S.BUSY.
+
+  Rule 1 — Single in-flight guard per (RPC, project). New
+  shared dict App._sync_in_flight gates BOTH do_sync's
+  sync_project AND _auto_commit_sync's commit_project on the
+  same langcode key. Set on dispatch, cleared in a finally on
+  the callback. The JOB_INTERRUPTED retry path holds the flag
+  across the retry so a user tap during the retry window is
+  dropped (not queued). Drop, do NOT queue — the in-progress
+  sync covers what the dropped one would have done.
+
+  Rule 3 — 250 ms peer-side debounce on do_sync. Tracks last
+  tap time per langcode via time.monotonic(). sync_project is
+  not server-side debounced (it's the explicit "do it now"
+  gesture), so this is the peer's job.
+
+  Rule 4 — Background sync-status poll tightened from 30 s to
+  10 s. Contract range is 5-15 s; 30 s let daemon-driven
+  pushes go invisible for up to half a minute after they
+  drained. Build-time and on_resume re-arms both use 10 s.
+
+  Net effect for the user: rapid Sync taps no longer pile up
+  S.BUSY refusals; a successful daemon-driven push reaches
+  the badge within 10 s instead of 30 s; the JOB_INTERRUPTED
+  retry remains transparent.
+
+1.46.1
+  Recording-stop path: defer window.clearFlags(FLAG_KEEP_SCREEN_ON)
+  onto the Kivy main thread. The add side (_start_android_recording)
+  already deferred via Clock.schedule_once; the clear side
+  (_stop_android_recording) was inlined, so when stop ran on
+  SDLThread Android rejected it with CalledFromWrongThreadException
+  ("Only the original thread that created a view hierarchy can
+  touch its views"). Cosmetic until now — the try/except caught
+  the throw and only the screen-on flag stayed set — but the
+  fix matches the documented pattern in
+  feedback_kivy_view_mutation_main_thread.
+
+1.46.0
+  Settings page reorder + clearer "not backed up" indicator.
+
+  Settings: UI Language now sits as a single row of language
+  buttons at the very top of ConfigScreen, with no header — the
+  buttons are self-evident. "Share this app" stays as the second
+  affordance. Everything below it (Recording: row, Project,
+  Conserve power, Debug) is unchanged. Motivation: language
+  choice is the most-likely first tap for a new user and was
+  buried below recording controls.
+
+  Sync indicator: when a project has never been pushed
+  (last_sync == 0) the indicator used to read "not backed up"
+  unconditionally. It now adapts to the actual blocker so a tap
+  has a known purpose:
+    - "add name to back up"    — contributor name unset
+    - "sign in to back up"     — no token for the active host
+    - "publish to back up"     — signed in but no git remote
+    - "not backed up"          — fallback if probes fail
+  Routing is unchanged (tap → go_collab); go_collab already
+  exposes the Name field, GitHub Connect, and Open Sync Settings
+  (→ Publish) so the user lands one screen away from the fix.
+
+  Helper _not_backed_up_text wraps the probe; each branch is a
+  separate _tr literal so xgettext picks them up at extraction.
+
+1.45.0
   Removed the auto-sync mode setting and migrated to the daemon's
   new commit/push split (paired with daemon 0.43.0 / client 0.43.0,
   CLIENT_INTEGRATION.md § 17b).
@@ -41,6 +247,62 @@ CHANGELOG — A-Z+T Recorder
     daemon will drain on the next scheduler tick.
   - Comments / docstrings referencing request_sync updated to
     commit_project throughout.
+
+  Translation catalog (locales/fr/LC_MESSAGES/aztrecorder.po):
+  removed the four auto-sync-setting orphans ('Auto-sync:',
+  'Every swipe', 'When idle', 'Manual only'); added "offline" /
+  "hors ligne" for the new work-offline badge. Project-Id-Version
+  header bumped to 1.45.0.
+
+  Additional .po hygiene from a static drift audit: pruned 24
+  long-orphan entries left behind by completed migrations.
+    - Welcome / picker / clone-form strings now hosted by
+      azt_collab_client/ui/: 'Record My Wordlist', 'Start over',
+      'Setup', 'Settings', 'Open', 'Yes', 'Open LIFT file',
+      'Open LIFT from URL', 'Paste the URL to a .lift file:',
+      'Paste the repository URL here', 'Start a new wordlist',
+      'Start a new wordlist with this template?',
+      'Owner (username)', 'Repository name', 'Publishing...',
+      'Cloning repository...'.
+    - Status-code translations now owned by
+      azt_collab_client/translate.py: 'No project loaded.',
+      'Not a git repository.', 'Pulled latest changes from
+      origin.', 'No local changes to commit.', 'Pushed {branch}.',
+      'Commit failed: {error}', 'Committed locally, sync failed:
+      {error}', 'Committed locally, push failed: {error}'.
+  Kept (flagged as false-positive orphans by static audits but
+  reached via dynamic _tr(label) dispatch): the 8 audio-quality
+  labels ('High', 'High AAC', 'Medium', 'Medium AAC', 'Low',
+  'Low AAC', 'Very Low', 'Very Low AAC') — added an inline .po
+  comment to head off the next audit. .mo regenerates at build
+  time (compile_translations.py runs before buildozer android
+  debug).
+
+  Cross-catalog dedup: a follow-up audit found 62 msgids
+  duplicated between the peer .po and the client .po (UI primitives
+  like Cancel/OK/Clone, the welcome/picker/clone-form vocabulary,
+  the GitHub/GitLab credential strings, every status-code message,
+  and the two image-cache wording strings). Per CLIENT_INTEGRATION.md
+  § 6 ("chain the client catalog as a fallback so client-owned
+  strings translate without duplication"), all 62 are now pruned
+  from the peer .po — the client catalog's translations win via
+  add_fallback, and any future refinement to those strings lands
+  in one place instead of needing parallel updates in every peer's
+  .po. Safe because no translators had ever touched the peer-side
+  copies (they were verbatim duplicates of the client originals).
+  Added a header comment to the peer .po stating the scoping rule
+  for future maintainers / audits.
+
+  Genuine gap closed: 'Share this app' (peer-side button at
+  main.py:514, on_release=app.share_apk) was wrapped in gettext but
+  had no peer-side translation and no client-catalog fallback. A
+  prior audit report misidentified it as "covered by client
+  catalog" — verified against
+  azt_collab_client/locales/fr/LC_MESSAGES/azt_collab_client.po,
+  the msgid is absent there. Added "Partager cette appli" to the
+  peer .po (matching the casual 'appli' register used elsewhere in
+  the catalog, e.g. "Installer l'appli GitHub", "Partager le
+  journal de {app}").
 
 1.43.2
   _show_toast helper rewritten: was fixed 250x50dp with a

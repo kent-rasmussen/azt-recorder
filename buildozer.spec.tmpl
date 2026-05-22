@@ -46,7 +46,7 @@ source.exclude_dirs = azt_images,env,.venv,venv,__pycache__,presplash_variants,e
 # CAWL images into a LIFT project before publish; strip_langtags.py rebuilds the
 # gzipped langtags lookup). Excluded to keep the APK lean and reduce
 # "what's this doing in the bundle?" surface for anyone unpacking it.
-source.exclude_patterns = generate_presplash.py,populate_images.py,strip_langtags.py,compile_translations.py
+source.exclude_patterns = generate_presplash.py,populate_images.py,strip_langtags.py
 #version = 1.3.1
 version.regex = __version__ = ['"](.*)['"]
 version.filename = %(source.dir)s/main.py
