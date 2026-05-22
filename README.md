@@ -1,4 +1,4 @@
-# A-Z+T Recorder
+# A-Z+T Recorder -- Record My Wordlist
 
 A mobile field recorder for LIFT XML lexicon databases. Part of the A-Z+T suite of linguistic tools. Works on **Android** (primary) and **iOS** / desktop (secondary).
 
@@ -67,9 +67,42 @@ bash setup_from_nuke.sh
 python3 -m venv env
 source env/bin/activate
 pip install --upgrade pip setuptools
-pip install buildozer kivy pillow typing_extensions
+pip install buildozer kivy pillow typing_extensions dulwich
 python main.py
 ```
+
+`dulwich` is the git library used by the `azt_collabd` daemon. The
+client auto-spawns the daemon into the recorder's venv on desktop, so
+it has to be importable here even though the recorder never imports it
+directly. `setup_from_nuke.sh` already installs it; the manual snippet
+above mirrors that.
+
+## Collaboration architecture
+
+The recorder is a **pure peer** of the AZT collaboration daemon
+(`azt_collabd`); it does not host or import the daemon. All git
+operations, credentials, and project-registry state live behind a
+single thin client library, `azt_collab_client`:
+
+- On **desktop**, `azt_collab_client` auto-spawns
+  `python -m azt_collabd` over loopback HTTP on first use.
+- On **Android**, the recorder talks to the standalone AZT collab
+  server APK (`org.atoznback.aztcollab`) via a ContentProvider. Both
+  APKs must be signed with the same suite keystore, and the server APK
+  has to be installed — there is no Android fallback to loopback.
+
+`azt_collab_client/` in this repo is a symlink to the canonical copy
+in the sibling `../azt-collab/` repo. Set it up once with:
+
+```bash
+ln -s ../azt-collab/azt_collab_client azt_collab_client
+```
+
+For the peer conformity contract (bootstrap, LIFT/audio/CAWL handles,
+picker-cancel handling, etc.) see
+[`azt_collab_client/CLIENT_INTEGRATION.md`](azt_collab_client/CLIENT_INTEGRATION.md).
+For wiring a new sister app as a peer (manifest, signing, install
+prompts), see [`README_NewClient.txt`](README_NewClient.txt).
 
 ## Build for Android
 

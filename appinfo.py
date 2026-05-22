@@ -10,3 +10,4 @@ APP_SLUG = 'azt-recorder'             # URL/package slug
 APP_TAGLINE = 'Record My Wordlist'    # shown on welcome screen & window title
 APP_USER_AGENT = 'AZTRecorder'        # HTTP User-Agent prefix (no spaces)
 APP_ICON = 'icons/icon_dark.png'        # some day will be subject to theme
+FILE_W_VERSION = 'main.py'  # So others can find the canonical version without importing

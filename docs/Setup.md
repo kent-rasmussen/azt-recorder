@@ -13,15 +13,25 @@ You will need a couple things to get started
 ## Collaboration information
 
 Whether you are starting now, or continuing work, you will want to share it.
-- select Github (or Gitlab)
-- create an account there, if you don't have one already
-- input your 
+Pick GitHub or GitLab and create an account there if you don't have one already.
+
+### GitHub (recommended)
 
 1. Tap "Connect to GitHub"
 2. App shows: "Go to github.com/login/device and enter code WDJB-MJHT"
-3. User opens a browser, enters the code, clicks "Authorize"
+3. Open a browser on any device, enter the code, click "Authorize"
 4. App automatically detects authorization and is ready to go
 
-  No PATs, no tokens, no git usernames. Just a one-time code entry.
+No PATs, no tokens, no git usernames. Just a one-time code entry.
+
+### GitLab
+
+GitLab does not have a device-flow equivalent, so you'll need to
+create a personal access token (PAT) once:
+
+1. In GitLab, go to **Preferences → Access Tokens**.
+2. Create a token with `read_repository` and `write_repository` scopes.
+3. In the recorder's settings, enter your GitLab username and paste
+   the token. The daemon stores both for you; you won't be asked again.
 
 

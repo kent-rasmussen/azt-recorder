@@ -14,36 +14,98 @@ import sys
 import traceback
 import warnings
 
-from appinfo import APP_NAME, APP_TAGLINE, APP_USER_AGENT, APP_ICON
-import theme
+from appinfo import APP_NAME, APP_TAGLINE, APP_USER_AGENT, APP_ICON, APP_SLUG
 from i18n import _ as _tr, set_language, current_language, available_languages
+
+# Tell the collab backend who we are. Defaults match the recorder, but
+# calling configure() documents the contract and lets other suite apps
+# override identity values via the same hook.
+import azt_collab_client
+from azt_collab_client import peer_pref, set_peer_pref
+from azt_collab_client.ui import theme
+azt_collab_client.configure(app_id='azt-recorder')
+# Route client status/popup translations through the recorder's catalog
+# so a single language preference covers both. The recorder's _ already
+# falls back to the client catalog for client-owned strings.
+azt_collab_client.set_translator(_tr)
+
+
+class _DeviceFlowFailure(Exception):
+    """Internal sentinel: GitHub device flow returned a structured Status
+    code from the server (e.g. AUTH_DENIED). Carries the code + params
+    so the UI can translate via azt_collab_client.translate_status."""
+    def __init__(self, code, params=None):
+        super().__init__(code)
+        self.code = code
+        self.params = params or {}
+
 
 os.environ.setdefault('KIVY_NO_ENV_CONFIG', '1')
 warnings.filterwarnings('ignore', message='.*olefile.*')
+
+
+# ── Language-name lookup ───────────────────────────────────────────────────
+# Used by the settings-page gloss-languages summary so the user sees
+# "Lingala (RDC)" rather than "ln-CD". Defers to LangToggle._LANG_NAMES
+# (defined further down) as the in-repo source of truth — that dict is
+# also what the gloss-picker overlay shows, so the two stay aligned.
+def _lang_display_name(code):
+    return LangToggle._LANG_NAMES.get(code, code)
 
 # ── Crash logging — runs before any Kivy import ────────────────────────────────
 # On Android: p4a sets $ANDROID_PRIVATE to the app's private files dir (always writable).
 #             Also tries /sdcard/ (may need MANAGE_EXTERNAL_STORAGE on API 30+).
 # On desktop: ~/azt_recorder.log
+_LOG_PATH = ''  # resolved by _setup_logging; read by App.share_log
+
+
 def _setup_logging():
+    global _LOG_PATH
     _on_android = os.path.exists('/system/build.prop')
     candidates = []
     if _on_android:
         # ANDROID_PRIVATE is set by p4a bootstrap, e.g. /data/user/0/org.x.y/files
+        # This is the app's private filesDir — exists on every
+        # Android install regardless of SD card presence.
         android_private = os.environ.get('ANDROID_PRIVATE', '')
         if android_private:
             candidates.append(os.path.join(android_private, 'azt_recorder.log'))
-        # Fallback using known package name pattern
-        candidates += [
-            '/data/user/0/org.atoznback.azt_recorder/files/azt_recorder.log',
-            '/sdcard/azt_recorder.log',
-        ]
+        # Defensive fallback when ANDROID_PRIVATE somehow isn't set:
+        # query Context.getFilesDir() via jnius directly. Always works
+        # on Android, doesn't depend on env-var plumbing.
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            if activity is not None:
+                files_dir = str(activity.getFilesDir().getAbsolutePath())
+                if files_dir:
+                    candidates.append(
+                        os.path.join(files_dir, 'azt_recorder.log'))
+        except Exception:
+            pass
+        # /sdcard fallback. Unreliable on API 30+ (scoped storage)
+        # but cheap to try; the env-var path above is the normal one.
+        candidates.append('/sdcard/azt_recorder.log')
     else:
         candidates += [os.path.join(os.path.expanduser('~'), 'azt_recorder.log')]
     fh = None
     for path in candidates:
         try:
+            # Rotate the previous session's log out of the way before
+            # truncating — `<path>.prev` keeps the prior session
+            # available after a crash + relaunch, so the user can still
+            # share the log that captures the original failure.
+            if os.path.exists(path):
+                prev = path + '.prev'
+                try:
+                    if os.path.exists(prev):
+                        os.remove(prev)
+                    os.replace(path, prev)
+                except OSError:
+                    pass
             fh = open(path, 'w', buffering=1, encoding='utf-8')
+            _LOG_PATH = path
             break
         except OSError:
             continue
@@ -80,6 +142,87 @@ def _setup_logging():
 
 _setup_logging()
 
+# ── Server-crash mirroring into the peer log ───────────────────────────────
+# When the recorder observes a SERVER_UNAVAILABLE / SERVER_ERROR (or
+# catches ServerUnavailable directly), it queries /v1/health and tees
+# the daemon's `last_crash` into azt_recorder.log under a
+# [server-crash] prefix — verbatim lines get a `| ` continuation so
+# they're visually distinct from the recorder's own [CRASH] traceback.
+# Without this, the recorder log shows a "server unavailable" line and
+# the user would have to also grab $AZT_HOME/state/crash.log to see
+# why. Rate-limited by (server started_at, hash(text)) so the same
+# crash isn't re-dumped on every retry.
+
+_LAST_SERVER_CRASH_FINGERPRINT = None
+
+
+def _log_server_crash_if_any(context):
+    """Pull /v1/health on a worker thread and dump the daemon's
+    `last_crash` (if any) into the recorder log, clearly marked as
+    coming from the SERVER's crash record — not the recorder's own.
+
+    Best-effort: if /v1/health is itself unreachable (daemon fully
+    down, or just-exited 'spawn_exited' case), we log that fact and
+    return — the on-disk $AZT_HOME/state/crash.log is daemon-owned
+    territory the peer doesn't reach into.
+
+    ``context`` is a short string naming the peer-side call site
+    (``auto_sync``, ``do_sync``, ``go_collab``, ``open_server_ui``)
+    so the log can be grep-filtered by failure path."""
+
+    def _worker():
+        global _LAST_SERVER_CRASH_FINGERPRINT
+        try:
+            from azt_collab_client.rpc import (
+                health as _health, ServerUnavailable)
+        except ImportError:
+            return
+        try:
+            h = _health()
+        except ServerUnavailable as ex:
+            print(f'[server-crash] context={context}: /v1/health '
+                  f'unreachable — daemon is fully down ({ex}); '
+                  f'recorder log cannot mirror the daemon crash '
+                  f'log because the daemon process is gone. Pull '
+                  f'$AZT_HOME/state/crash.log directly for the '
+                  f'postmortem.', flush=True)
+            return
+        except Exception as ex:
+            print(f'[server-crash] context={context}: /v1/health '
+                  f'raised: {ex}', flush=True)
+            return
+        if not isinstance(h, dict):
+            return
+        last_crash = h.get('last_crash')
+        started_at = h.get('started_at')
+        if not last_crash:
+            print(f'[server-crash] context={context}: no last_crash '
+                  f'on /v1/health (server started_at={started_at}); '
+                  f'failure was not a daemon-side crash',
+                  flush=True)
+            return
+        text = str(last_crash)
+        fingerprint = (started_at, hash(text))
+        if fingerprint == _LAST_SERVER_CRASH_FINGERPRINT:
+            print(f'[server-crash] context={context}: same daemon '
+                  f'crash as previously logged; skipping replay',
+                  flush=True)
+            return
+        _LAST_SERVER_CRASH_FINGERPRINT = fingerprint
+        print(f'[server-crash] context={context}: server '
+              f'started_at={started_at}; verbatim daemon crash '
+              f'follows (from /v1/health.last_crash) — lines '
+              f'prefixed with "| " are the SERVER log, not the '
+              f'recorder log:', flush=True)
+        for line in text.splitlines():
+            print(f'[server-crash] | {line}', flush=True)
+        print('[server-crash] (end of daemon crash log)',
+              flush=True)
+
+    import threading
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 # On Android the default KIVY_HOME lands inside the read-only app bundle.
 # Point it to a writable location before Kivy is imported.
 if 'ANDROID_PRIVATE' in os.environ:
@@ -110,71 +253,20 @@ if platform == 'android':
     ])
 
 # ── Charis SIL font registration ──────────────────────────────────────────────
-# Place CharisSIL-Regular.ttf (and optionally Bold/Italic/BoldItalic) in a
-# 'fonts/' directory next to main.py.  Download from: https://software.sil.org/charis/
-# On Linux you can also: sudo apt install fonts-sil-charis
-# The font files are also searched in the system font directories.
-
-def _find_font(filename):
-    """Search for a font file in several likely locations."""
-    app_dir = os.path.dirname(os.path.abspath(__file__))
-    search = [
-        os.path.join(app_dir, 'fonts', filename),
-        os.path.join(app_dir, filename),
-        os.path.join('/usr/share/fonts/truetype/fonts-sil-charis', filename),
-        os.path.join('/usr/share/fonts/opentype/charis', filename),
-        os.path.join(os.path.expanduser('~'), '.fonts', filename),
-        os.path.join(os.path.expanduser('~'), '.local/share/fonts', filename),
-        # Android: Kivy bundles app assets here at runtime
-        os.path.join('/data/user/0', 'org.atoznback.azt_recorder', 'files/app/fonts', filename),
-    ]
-    for path in search:
-        if os.path.exists(path):
-            return path
-    # Broader system search (slower, only if above fails)
-    for root, dirs, files in os.walk('/usr/share/fonts'):
-        if filename in files:
-            return os.path.join(root, filename)
-    return None
-
-def _register_charis():
-    from kivy.core.text import LabelBase
-    regular = _find_font('CharisSIL-Regular.ttf')
-    if regular is None:
-        # Try alternate naming conventions
-        regular = (_find_font('CharisSIL.ttf') or
-                   _find_font('charissil.ttf') or
-                   _find_font('CharisSIL-R.ttf'))
-    if regular is None:
-        print('[WARN] Charis SIL font not found. '
-              'Place CharisSIL-Regular.ttf in a fonts/ subdirectory next to main.py, '
-              'or install with: sudo apt install fonts-sil-charis')
-        return False
-    bold    = (_find_font('CharisSIL-Bold.ttf') or
-               _find_font('CharisSIL-B.ttf') or regular)
-    italic  = (_find_font('CharisSIL-Italic.ttf') or
-               _find_font('CharisSIL-I.ttf') or regular)
-    boldita = (_find_font('CharisSIL-BoldItalic.ttf') or
-               _find_font('CharisSIL-BI.ttf') or bold)
-    LabelBase.register(
-        name='CharisSIL',
-        fn_regular=regular,
-        fn_bold=bold,
-        fn_italic=italic,
-        fn_bolditalic=boldita,
-    )
-    print(f'[INFO] Charis SIL registered: {regular}')
-    return True
-
-_CHARIS_AVAILABLE = _register_charis()
-_FONT_NAME = 'CharisSIL' if _CHARIS_AVAILABLE else 'Roboto'
+# Discovery + LabelBase.register lives in azt_collab_client.ui.fonts so the
+# recorder, the standalone picker, and the settings UI all agree on the
+# search path. The shared helper checks the recorder's fonts/ dir first.
+# Download from https://software.sil.org/charis/ or `apt install fonts-sil-charis`.
+from azt_collab_client.ui import register_charis
+_FONT_NAME = register_charis()
+_CHARIS_AVAILABLE = _FONT_NAME == 'CharisSIL'
 
 # ── KV layout ─────────────────────────────────────────────────────────────────
 # Font name is injected at build time so every widget uses Charis SIL if available.
 KV_TEMPLATE = '''
 #:import dp kivy.metrics.dp
 #:import sp kivy.metrics.sp
-#:import T theme
+#:import T azt_collab_client.ui.theme
 #:import _ i18n._
 #:set FONT '{font_name}'
 
@@ -194,114 +286,17 @@ KV_TEMPLATE = '''
             height: root._inset_top
         ScreenManager:
             id: sm
-            WelcomeScreen:
-                name: 'welcome'
             RecorderScreen:
                 name: 'recorder'
             ConfigScreen:
                 name: 'config'
             CollabScreen:
                 name: 'collab'
-            LangPickerScreen:
-                name: 'langpicker'
             ImagePickerScreen:
                 name: 'imagepicker'
         Widget:
             size_hint_y: None
             height: root._inset_bottom
-
-<WelcomeScreen>:
-    canvas.before:
-        Color:
-            rgba: T.BG
-        Rectangle:
-            pos: self.pos
-            size: self.size
-    BoxLayout:
-        orientation: 'vertical'
-        # ── Gear row (no padding so it hugs the right edge) ──────
-        BoxLayout:
-            size_hint_y: None
-            height: dp(44)
-            padding: 0, dp(4), dp(8), 0
-            Widget:
-            Button:
-                size_hint: None, None
-                size: dp(44), dp(44)
-                background_color: T.TRANSPARENT
-                background_normal: ''
-                on_release: app.go_config()
-                Image:
-                    source: 'icons/gear.png'
-                    size: dp(28), dp(28)
-                    size_hint: None, None
-                    center: self.parent.center
-                    allow_stretch: True
-                    keep_ratio: True
-        # ── Main content ─────────────────────────────────────────
-        BoxLayout:
-            orientation: 'vertical'
-            padding: dp(40), 0, dp(40), dp(20)
-            spacing: dp(12)
-            Image:
-                source: app.icon #'icons/icon.png'
-                size_hint: None, None
-                size: dp(200), dp(200)
-                pos_hint: {{'center_x': 0.5}}
-            Label:
-                text: app.title
-                font_size: sp(28)
-                font_name: FONT
-                bold: True
-                color: T.ACCENT
-                size_hint_y: None
-                height: dp(40)
-            Label:
-                text: app.subtitle
-                font_size: sp(16)
-                font_name: FONT
-                color: T.TEXT_DIM
-                size_hint_y: None
-                height: dp(24)
-            Widget:
-                size_hint_y: None
-                height: dp(8)
-            ScrollView:
-                size_hint_y: 1
-                do_scroll_x: False
-                BoxLayout:
-                    orientation: 'vertical'
-                    size_hint_y: None
-                    height: self.minimum_height
-                    spacing: dp(20)
-                    RecBtn:
-                        text: _('I have one on my phone')
-                        normal_color: T.ACCENT
-                        on_release: app.open_file()
-                    RecBtn:
-                        text: _('Clone Internet Repository')
-                        normal_color: T.BTN_INACTIVE
-                        on_release: app.clone_dialog()
-                    RecBtn:
-                        text: _('Start New')
-                        normal_color: T.BTN_INACTIVE
-                        on_release: app.show_start_over() #< should be Start a new wordlist
-                    # ── Existing projects ─────────────────────────────────────
-                    BoxLayout:
-                        id: project_list
-                        orientation: 'vertical'
-                        size_hint_y: None
-                        height: self.minimum_height
-                        spacing: dp(6)
-            Label:
-                text: app.version_string
-                font_size: sp(11)
-                font_name: FONT
-                color: T.TEXT_FAINT
-                size_hint_y: None
-                height: dp(20)
-                halign: 'center'
-                text_size: self.size
 
 <RecorderScreen>:
     canvas.before:
@@ -360,6 +355,11 @@ KV_TEMPLATE = '''
                         font_size: sp(13)
                         font_name: FONT
                         color: T.TEXT_MID
+                        # markup=True so _sync_status_info can wrap
+                        # the uncommitted-files count in [color=ff4444]
+                        # — surfaces the "commits aren't happening"
+                        # state (daemon-unreachable accumulation).
+                        markup: True
                         halign: 'left'
                         valign: 'middle'
                         text_size: self.size
@@ -376,6 +376,48 @@ KV_TEMPLATE = '''
                     center: self.parent.center
                     allow_stretch: True
                     keep_ratio: True
+        # ── Severe-alert banner (CLIENT_INTEGRATION.md § 17,
+        # never-silenced row: DATA_LOSS_RISK + COMMIT_REPEATEDLY_
+        # FAILED). Sticky — stays up until the user taps to
+        # dismiss, because the message tells them to share the
+        # daemon log and a 1.5s toast wouldn't survive long
+        # enough to read. Button rather than Label so the tap-
+        # to-dismiss is native; on_release fires _dismiss_severe_
+        # alert. Visually distinct red background. Starts
+        # collapsed (height: 0 / opacity: 0).
+        Button:
+            id: severe_alert_banner
+            text: ''
+            font_size: sp(12)
+            font_name: FONT
+            color: 1, 1, 1, 1
+            background_color: 0.55, 0.18, 0.18, 1
+            background_normal: ''
+            size_hint_y: None
+            height: 0
+            opacity: 0
+            halign: 'center'
+            valign: 'middle'
+            text_size: self.width - dp(16), None
+            markup: True
+            on_release: app._dismiss_severe_alert()
+        # ── Cache-progress indicator (CLIENT_INTEGRATION.md § 10.5 —
+        # required whenever a CAWL prefetch is in flight; conveys "network
+        # in use" so the user doesn't disconnect Wi-Fi mid-warm). Starts
+        # collapsed; expanded by _tick_cache_status while cached < total,
+        # collapsed again when caching catches up.
+        Label:
+            id: cache_status_label
+            text: ''
+            font_size: sp(11)
+            font_name: FONT
+            color: T.ACCENT
+            size_hint_y: None
+            height: 0
+            opacity: 0
+            halign: 'center'
+            valign: 'middle'
+            text_size: self.width, None
         # ── Image ────────────────────────────────────────────────────────────
         FloatLayout:
             id: image_container
@@ -476,6 +518,13 @@ KV_TEMPLATE = '''
                 height: self.minimum_height
                 padding: dp(20)
                 spacing: dp(14)
+                # ── UI Language (very top, no header — buttons speak
+                # for themselves) ──────────────────────────────────────
+                BoxLayout:
+                    id: lang_selector_row
+                    size_hint_y: None
+                    height: dp(44)
+                    spacing: dp(8)
                 # ── Share this app ─────────────────────────────────────
                 RecBtn:
                     text: _('Share this app')
@@ -483,6 +532,9 @@ KV_TEMPLATE = '''
                     padding: [dp(52), 0]
                     text_size: self.size
                     valign: 'middle'
+                    size_hint_x: None
+                    width: min(self.parent.width - dp(40), dp(360))
+                    pos_hint: {{'center_x': 0.5}}
                     normal_color: T.SURFACE
                     on_release: app.share_apk()
                     Image:
@@ -521,19 +573,28 @@ KV_TEMPLATE = '''
                             normal_color: T.SURFACE
                             on_release: root._show_rec_overlay()
                     # ── Three blue collapsible buttons ─────────────────────
-                    RecBtn:
-                        id: gloss_toggle_btn
-                        text: _('Change gloss languages')
-                        normal_color: T.ACCENT
-                        font_size: sp(14)
-                        on_release: root.toggle_gloss_panel()
-                    GridLayout:
-                        id: lang_box
-                        cols: 3
+                    BoxLayout:
                         size_hint_y: None
-                        height: 0
-                        opacity: 0
-                        spacing: dp(6)
+                        height: dp(44)
+                        spacing: dp(8)
+                        RecBtn:
+                            id: gloss_toggle_btn
+                            text: _('Gloss languages')
+                            size_hint_x: None
+                            width: dp(160)
+                            normal_color: T.ACCENT
+                            font_size: sp(14)
+                            on_release: root._show_gloss_overlay()
+                        Label:
+                            id: gloss_summary_label
+                            text: ''
+                            font_size: sp(14)
+                            font_name: FONT
+                            color: T.TEXT_DIM
+                            halign: 'left'
+                            valign: 'middle'
+                            text_size: self.size
+                            markup: True
                     BoxLayout:
                         size_hint_y: None
                         height: dp(44)
@@ -541,6 +602,8 @@ KV_TEMPLATE = '''
                         RecBtn:
                             id: filter_toggle_btn
                             text: _('Filter words')
+                            size_hint_x: None
+                            width: dp(160)
                             normal_color: T.ACCENT
                             font_size: sp(14)
                             on_release: root.toggle_filter_panel()
@@ -562,6 +625,7 @@ KV_TEMPLATE = '''
                         opacity: 0
                         spacing: dp(8)
                         Label:
+                            id: cawl_label
                             text: _('CAWL number or range (e.g. 1-100, 42, leave blank for all)')
                             font_size: sp(13)
                             font_name: FONT
@@ -583,6 +647,7 @@ KV_TEMPLATE = '''
                             multiline: False
                             on_text_validate: root.apply_cawl(self.text)
                         Label:
+                            id: gloss_search_label
                             text: _('Gloss search (filter by gloss text)')
                             font_size: sp(13)
                             font_name: FONT
@@ -602,67 +667,115 @@ KV_TEMPLATE = '''
                             foreground_color: T.TEXT
                             cursor_color: T.ACCENT
                             multiline: False
-                        UnrecordedToggle:
-                            id: unrecorded_toggle
-                            active: False
-                            on_active: root.toggle_show_past(self.active)
-                    BoxLayout:
-                        size_hint_y: None
-                        height: dp(44)
-                        spacing: dp(8)
-                        RecBtn:
-                            id: imgrepo_toggle_btn
-                            text: _('Change image repository')
-                            normal_color: T.ACCENT
-                            font_size: sp(14)
-                            on_release: root.toggle_imgrepo_panel()
-                        Label:
-                            id: imgrepo_summary_label
-                            text: ''
-                            font_size: sp(11)
-                            font_name: FONT
-                            color: T.TEXT_DIM
-                            halign: 'left'
-                            valign: 'middle'
-                            text_size: self.size
-                    TextInput:
-                        id: image_repo_input
-                        hint_text: 'https://github.com/kent-rasmussen/images_CAWL'
-                        font_size: sp(12)
-                        font_name: FONT
-                        size_hint_y: None
-                        height: 0
-                        opacity: 0
-                        background_color: T.SURFACE
-                        foreground_color: T.TEXT
-                        cursor_color: T.ACCENT
-                        multiline: False
-                        disabled: True
-                # ── UI Language ─────────────────────────────────────────
+                        BoxLayout:
+                            id: filter_bottom_row
+                            orientation: 'horizontal'
+                            size_hint_y: None
+                            height: dp(56)
+                            spacing: dp(8)
+                            UnrecordedToggle:
+                                id: unrecorded_toggle
+                                active: False
+                                size_hint_x: 3
+                                on_active: root.toggle_show_past(self.active)
+                            RecBtn:
+                                id: filter_ok_btn
+                                text: _('OK')
+                                size_hint_x: 1
+                                height: dp(56)
+                                normal_color: T.GREEN
+                                font_size: sp(15)
+                                on_release: root.toggle_filter_panel()
+                # ── Project ───────────────────────────────────────────
+                # Setup Collaboration + Select Project both act on the
+                # project, so they share a header.
                 SectionLabel:
-                    text: _('UI Language')
-                BoxLayout:
-                    id: lang_selector_row
-                    size_hint_y: None
-                    height: dp(44)
-                    spacing: dp(8)
-                # ── Setup Collaboration (always visible) ──────────────
+                    text: _('Project')
                 RecBtn:
                     text: _('Setup Collaboration')
+                    size_hint_x: None
+                    width: min(self.parent.width - dp(40), dp(360))
+                    pos_hint: {{'center_x': 0.5}}
                     normal_color: T.SURFACE
                     on_release: app.go_collab()
-                # ── Navigation (database-dependent) ───────────────────
+                RecBtn:
+                    text: _('Select Project')
+                    size_hint_x: None
+                    width: min(self.parent.width - dp(40), dp(360))
+                    pos_hint: {{'center_x': 0.5}}
+                    normal_color: T.BTN_INACTIVE
+                    on_release: app.start_over()
+                # ── Conserve power ──────────────────────────────────
+                # Audio quality and auto-sync cadence are both power
+                # / network trade-offs. Always visible (these are
+                # peer-pref-backed suite-wide settings, not
+                # project-bound), and grouped under one header so
+                # the user knows where to look when battery / data
+                # is the constraint. Audio quality additionally has
+                # a hidden auto-degradation ceiling (audio_quality_
+                # ceiling, set on repeated record failures) that
+                # clamps the picker — see _start_android_recording.
+                SectionLabel:
+                    text: _('Conserve power')
+                # ── Audio quality selector ─────────────────────────────
                 BoxLayout:
-                    id: db_nav_box
-                    orientation: 'vertical'
+                    id: audio_quality_row
                     size_hint_y: None
                     height: 0
                     opacity: 0
-                    spacing: dp(14)
+                    spacing: dp(8)
+                    Label:
+                        text: _('Audio quality:')
+                        font_size: sp(15)
+                        font_name: FONT
+                        color: T.TEXT_DIM
+                        size_hint_x: None
+                        size: self.texture_size
+                        valign: 'middle'
                     RecBtn:
-                        text: _('Start over')
-                        normal_color: T.BTN_INACTIVE
-                        on_release: app.go_welcome()
+                        id: audio_quality_btn
+                        text: ''
+                        font_size: sp(15)
+                        normal_color: T.SURFACE
+                        on_release: root._show_audio_quality_overlay()
+                # ── Debug ────────────────────────────────────────────
+                # Diagnostic affordances live at the bottom — most
+                # users will never tap these, but when something is
+                # wrong the support flow is "scroll all the way down,
+                # share the log".
+                SectionLabel:
+                    text: _('Debug')
+                RecBtn:
+                    # Double-brace escapes are mandatory below: the
+                    # whole KV template gets passed through
+                    # KV_TEMPLATE.format(font_name=_FONT_NAME) before
+                    # Kivy ever sees it, so any single-brace placeholder
+                    # in KV is interpreted by the outer format() as a
+                    # substitution target (and crashes with KeyError if
+                    # the key isn't in the kwargs). Double braces survive
+                    # the outer pass as a single brace pair, then the
+                    # inner .format(app=...) on the gettext-translated
+                    # string substitutes correctly at rule-eval time.
+                    # NB: this comment lives inside the KV string too,
+                    # so avoid putting any single-brace patterns here.
+                    # If APP_NAME in appinfo.py ever changes, update
+                    # the literal string below to match.
+                    text: _('Share {{app}} log').format(app='A-Z+T Recorder')
+                    halign: 'left'
+                    padding: [dp(52), 0]
+                    text_size: self.size
+                    valign: 'middle'
+                    size_hint_x: None
+                    width: min(self.parent.width - dp(40), dp(360))
+                    pos_hint: {{'center_x': 0.5}}
+                    normal_color: T.SURFACE
+                    on_release: app.share_log()
+                    Image:
+                        source: 'icons/share_dark.png'
+                        size_hint: None, None
+                        size: dp(24), dp(24)
+                        x: self.parent.x + dp(16)
+                        center_y: self.parent.center_y
                 Widget:
                     size_hint_y: None
                     height: dp(40)
@@ -848,42 +961,16 @@ KV_TEMPLATE = '''
                         text: _('Save GitLab credentials')
                         normal_color: T.GREEN
                         on_release: root.save_gitlab_credentials()
-                # ── Publish (hidden when no database or remote exists) ─
-                BoxLayout:
-                    id: publish_section
-                    orientation: 'vertical'
-                    size_hint_y: None
-                    height: 0
-                    opacity: 0
-                    spacing: dp(14)
-                    SectionLabel:
-                        text: _('Publish this project')
-                    TextInput:
-                        id: langcode_input
-                        hint_text: _('Language code (repo name)')
-                        font_size: sp(14)
-                        font_name: FONT
-                        size_hint_y: None
-                        height: dp(48)
-                        background_color: T.SURFACE
-                        foreground_color: T.TEXT
-                        cursor_color: T.ACCENT
-                        multiline: False
-                        on_text: root.update_publish_url()
-                    Label:
-                        id: publish_url_label
-                        text: ''
-                        font_size: sp(12)
-                        font_name: FONT
-                        color: T.TEXT_DIM
-                        size_hint_y: None
-                        height: dp(28)
-                        halign: 'left'
-                        text_size: self.width, None
-                    RecBtn:
-                        text: _('Publish')
-                        normal_color: T.ACCENT
-                        on_release: root.do_publish()
+                # Project-bound surfaces (Publish, Grant collaborator
+                # access, Share-repo) moved to the daemon settings UI
+                # in 1.41.5 / azt_collabd 0.41.0 per CLIENT_INTEGRATION.md
+                # § 13. Peers delegate via the button below.
+                SectionLabel:
+                    text: _('This project')
+                RecBtn:
+                    text: _('Open Sync Settings')
+                    normal_color: T.ACCENT
+                    on_release: root.open_server_ui()
                 # ── Log ───────────────────────────────────────────────────
                 SectionLabel:
                     text: _('Last operation')
@@ -1032,56 +1119,6 @@ KV_TEMPLATE = '''
         bold: True
         color: T.ACCENT
         center: root.center
-
-<LangPickerScreen>:
-    canvas.before:
-        Color:
-            rgba: T.BG
-        Rectangle:
-            pos: self.pos
-            size: self.size
-    BoxLayout:
-        orientation: 'vertical'
-        padding: dp(16)
-        spacing: dp(10)
-        # ── Title ─────────────────────────────────────────────────────────
-        Label:
-            text: _('Choose your language')
-            font_size: sp(22)
-            font_name: FONT
-            bold: True
-            color: T.ACCENT
-            size_hint_y: None
-            height: dp(44)
-        # ── Search ────────────────────────────────────────────────────────
-        TextInput:
-            id: lang_search
-            hint_text: _('Type a language name...')
-            font_size: sp(16)
-            font_name: FONT
-            multiline: False
-            size_hint_y: None
-            height: dp(44)
-            background_color: T.SURFACE
-            foreground_color: T.TEXT
-            hint_text_color: T.HINT
-            cursor_color: T.ACCENT
-            padding: [dp(10), dp(10)]
-            on_text: root._on_search_text(self.text)
-        # ── Selection details (hidden until a language is picked) ─────────
-        Widget:
-            id: selection_placeholder
-            size_hint_y: None
-            height: 0
-        # ── Results ───────────────────────────────────────────────────────
-        ScrollView:
-            id: results_scroll
-            BoxLayout:
-                id: results_box
-                orientation: 'vertical'
-                size_hint_y: None
-                height: self.minimum_height
-                spacing: dp(4)
 
 <GlossRow>:
     size_hint_y: None
@@ -1379,427 +1416,6 @@ class RootScreen(Screen):
             print(f'[insets] could not read: {ex}')
 
 
-class WelcomeScreen(Screen):
-
-    def on_enter(self):
-        self._populate_projects()
-
-    def _populate_projects(self):
-        box = self.ids.get('project_list')
-        if not box:
-            return
-        box.clear_widgets()
-        app = App.get_running_app()
-        projects = app.list_projects()
-        if not projects:
-            return
-        for name, path in projects:
-            btn = Builder.load_string(
-                'RecBtn:\n'
-                f'    text: {name!r}\n'
-                '    normal_color: T.GREEN\n'
-            )
-            btn.lift_path = path
-            btn.bind(on_release=lambda b: app.load_lift(b.lift_path))
-            box.add_widget(btn)
-
-
-class LangPickerScreen(Screen):
-    """Language code picker shown when creating a new project."""
-    _langtags = None        # class-level cache: list of dicts
-    _search_index = None    # parallel list of lowered searchable strings
-    _region_names = None    # region code -> name mapping
-
-    _selected = None        # chosen langtag entry dict
-    _selected_region = ''   # chosen region code (or '')
-    _dialect_code = ''      # user-entered variant
-    _selection_box = None   # built on first use, added/removed from tree
-
-    def on_enter(self):
-        self._selected = None
-        self._selected_region = ''
-        self._dialect_code = ''
-        si = self.ids.get('lang_search')
-        if si:
-            si.text = ''
-        self._hide_selection()
-        if LangPickerScreen._langtags is None:
-            self._load_langtags()
-
-    @classmethod
-    def _load_langtags(cls):
-        import gzip, json
-        gz_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               'langtags_mini.json.gz')
-        with open(gz_path, 'rb') as f:
-            blob = json.loads(gzip.decompress(f.read()))
-        cls._langtags = blob['langs']
-        cls._region_names = blob.get('region_names', {})
-        # Build search index once
-        idx = []
-        for entry in cls._langtags:
-            parts = [entry.get('n', '').lower()]
-            if 'ln' in entry:
-                parts.append(entry['ln'].lower())
-            if 'ns' in entry:
-                parts.extend(n.lower() for n in entry['ns'])
-            if 'lns' in entry:
-                parts.extend(n.lower() for n in entry['lns'])
-            if 't' in entry:
-                parts.append(entry['t'].lower())
-            if 'i' in entry:
-                parts.append(entry['i'].lower())
-            idx.append(' '.join(parts))
-        cls._search_index = idx
-
-    def _on_search_text(self, text):
-        # Debounce: cancel previous, schedule new
-        from kivy.clock import Clock
-        if hasattr(self, '_search_ev') and self._search_ev:
-            self._search_ev.cancel()
-        self._search_ev = Clock.schedule_once(
-            lambda dt: self._do_search(text), 0.25)
-
-    def _do_search(self, text):
-        box = self.ids.get('results_box')
-        if not box:
-            return
-        box.clear_widgets()
-        if not text or len(text) < 2 or self._langtags is None:
-            return
-        q = text.lower()
-        matches = []
-        for i, searchable in enumerate(self._search_index):
-            if q in searchable:
-                matches.append(self._langtags[i])
-                if len(matches) >= 50:
-                    break
-        for entry in matches:
-            self._add_result_row(box, entry)
-
-    def _add_result_row(self, box, entry):
-        from kivy.metrics import dp, sp
-        from kivy.uix.button import Button
-        btn = Button(
-            text=self._format_entry(entry),
-            font_size=sp(13),
-            font_name='Roboto',
-            size_hint_y=None,
-            height=dp(48),
-            halign='left',
-            valign='middle',
-            background_color=theme.SURFACE,
-            background_normal='',
-            color=theme.TEXT,
-            padding=(dp(10), dp(4)),
-        )
-        btn.text_size = (None, None)
-        btn.bind(size=lambda w, s: setattr(w, 'text_size', s))
-        btn.bind(on_release=lambda w: self._select_language(entry))
-        box.add_widget(btn)
-
-    @staticmethod
-    def _format_entry(entry):
-        name = entry.get('n', '')
-        local = entry.get('ln', '')
-        tag = entry.get('t', '')
-        region = entry.get('rn', '')
-        parts = [name]
-        if local and local != name:
-            parts[0] += f'  ({local})'
-        parts.append(f'[{tag}]')
-        if region:
-            parts.append(f'- {region}')
-        return '  '.join(parts)
-
-    _SELECTION_KV = '''
-BoxLayout:
-    orientation: 'vertical'
-    size_hint_y: None
-    height: self.minimum_height
-    spacing: dp(6)
-    Label:
-        id: selected_label
-        text: ''
-        font_size: sp(15)
-        font_name: FONT
-        color: T.TEXT
-        size_hint_y: None
-        height: dp(32)
-        halign: 'left'
-        text_size: self.width, None
-    Label:
-        id: region_title
-        text: _('Select region:')
-        font_size: sp(14)
-        font_name: FONT
-        color: T.TEXT_DIM
-        size_hint_y: None
-        height: 0
-        opacity: 0
-        halign: 'left'
-        text_size: self.width, None
-    BoxLayout:
-        id: region_box
-        orientation: 'vertical'
-        size_hint_y: None
-        height: self.minimum_height
-        spacing: dp(4)
-    BoxLayout:
-        size_hint_y: None
-        height: dp(40)
-        spacing: dp(8)
-        CheckBox:
-            id: dialect_check
-            size_hint_x: None
-            width: dp(40)
-            active: False
-        Label:
-            text: _("I'm working on a dialect")
-            font_size: sp(14)
-            font_name: FONT
-            color: T.TEXT
-            halign: 'left'
-            valign: 'middle'
-            text_size: self.size
-    TextInput:
-        id: dialect_input
-        hint_text: _('Variant code (2-8 chars)')
-        font_size: sp(14)
-        font_name: FONT
-        multiline: False
-        size_hint_y: None
-        height: 0
-        opacity: 0
-        background_color: T.SURFACE
-        foreground_color: T.TEXT
-        hint_text_color: T.HINT
-        cursor_color: T.ACCENT
-        padding: [dp(10), dp(10)]
-    Label:
-        id: code_label
-        text: ''
-        font_size: sp(16)
-        font_name: FONT
-        bold: True
-        color: T.GREEN
-        size_hint_y: None
-        height: dp(28)
-        halign: 'left'
-        text_size: self.width, None
-    RecBtn:
-        id: continue_btn
-        text: _('Continue')
-        normal_color: T.GREEN
-        size_hint_y: None
-        height: dp(52)
-'''
-
-    def _get_selection_box(self):
-        """Build (once) and return the selection box widget."""
-        if self._selection_box is None:
-            self._selection_box = Builder.load_string(self._SELECTION_KV)
-            # Wire up events
-            dc = self._selection_box.ids.get('dialect_check')
-            if dc:
-                dc.bind(active=lambda w, v: self._toggle_dialect(v))
-            di = self._selection_box.ids.get('dialect_input')
-            if di:
-                di.bind(text=lambda w, t: self._update_code())
-            cb = self._selection_box.ids.get('continue_btn')
-            if cb:
-                cb.bind(on_release=lambda w: self._on_continue())
-        return self._selection_box
-
-    def _show_selection(self):
-        """Insert selection box into the layout above results."""
-        box = self._get_selection_box()
-        parent = self.ids.get('selection_placeholder').parent
-        if box.parent is None:
-            placeholder = self.ids.get('selection_placeholder')
-            idx = list(parent.children).index(placeholder)
-            parent.add_widget(box, index=idx)
-
-    def _remove_selection(self):
-        """Remove selection box from the layout."""
-        if self._selection_box and self._selection_box.parent:
-            self._selection_box.parent.remove_widget(self._selection_box)
-
-    @property
-    def _sel_ids(self):
-        """Access ids on the selection box (mirrors self.ids for selection widgets)."""
-        if self._selection_box:
-            return self._selection_box.ids
-        return {}
-
-    def _select_language(self, entry):
-        from kivy.metrics import dp, sp
-        from kivy.uix.button import Button
-        self._selected = entry
-        self._selected_region = ''
-        self._show_selection()
-        ids = self._sel_ids
-        lbl = ids.get('selected_label')
-        if lbl:
-            lbl.text = self._format_entry(entry)
-        # Clear results and search
-        box = self.ids.get('results_box')
-        if box:
-            box.clear_widgets()
-        si = self.ids.get('lang_search')
-        if si:
-            si.text = ''
-
-        # Region picker
-        regions = entry.get('rs', [])
-        primary = entry.get('r', '')
-        all_regions = []
-        if primary:
-            all_regions.append(primary)
-        for r in regions:
-            if r not in all_regions:
-                all_regions.append(r)
-
-        region_box = ids.get('region_box')
-        region_title = ids.get('region_title')
-        if region_box:
-            region_box.clear_widgets()
-        if len(all_regions) > 1:
-            if region_title:
-                region_title.height = dp(20)
-                region_title.opacity = 1
-            rnames = self._region_names or {}
-            # "All/multiple" option
-            btn = Button(
-                text=_tr('Multiple / all regions'),
-                font_size=sp(13),
-                font_name=_FONT_NAME,
-                size_hint_y=None,
-                height=dp(38),
-                background_color=theme.SURFACE_ALT,
-                background_normal='',
-                color=theme.TEXT,
-            )
-            btn.bind(on_release=lambda w: self._select_region(''))
-            region_box.add_widget(btn)
-            for rc in all_regions:
-                rn = rnames.get(rc, rc)
-                btn = Button(
-                    text=f'{rn} ({rc})',
-                    font_size=sp(13),
-                    font_name=_FONT_NAME,
-                    size_hint_y=None,
-                    height=dp(38),
-                    background_color=theme.SURFACE_ALT,
-                    background_normal='',
-                    color=theme.TEXT,
-                )
-                btn.bind(on_release=lambda w, c=rc: self._select_region(c))
-                region_box.add_widget(btn)
-        else:
-            if region_title:
-                region_title.height = 0
-                region_title.opacity = 0
-
-        self._update_code()
-        cb = ids.get('continue_btn')
-        if cb:
-            cb.disabled = False
-
-    def _select_region(self, region_code):
-        from kivy.metrics import dp
-        self._selected_region = region_code
-        # Highlight selected region in the region box
-        region_box = self._sel_ids.get('region_box')
-        if region_box:
-            for child in region_box.children:
-                if region_code and region_code in child.text:
-                    child.background_color = theme.ACCENT
-                elif not region_code and 'Multiple' in child.text:
-                    child.background_color = theme.ACCENT
-                else:
-                    child.background_color = theme.SURFACE_ALT
-        self._update_code()
-
-    def _toggle_dialect(self, active):
-        from kivy.metrics import dp
-        di = self._sel_ids.get('dialect_input')
-        if di:
-            di.height = dp(44) if active else 0
-            di.opacity = 1 if active else 0
-            if not active:
-                di.text = ''
-                self._dialect_code = ''
-        self._update_code()
-
-    def _hide_selection(self):
-        from kivy.metrics import dp
-        self._remove_selection()
-        ids = self._sel_ids
-        if not ids:
-            return
-        region_title = ids.get('region_title')
-        if region_title:
-            region_title.height = 0
-            region_title.opacity = 0
-        region_box = ids.get('region_box')
-        if region_box:
-            region_box.clear_widgets()
-        di = ids.get('dialect_input')
-        if di:
-            di.height = 0
-            di.opacity = 0
-            di.text = ''
-        dc = ids.get('dialect_check')
-        if dc:
-            dc.active = False
-        cl = ids.get('code_label')
-        if cl:
-            cl.text = ''
-        cb = ids.get('continue_btn')
-        if cb:
-            cb.disabled = True
-
-    def _update_code(self):
-        if not self._selected:
-            return
-        ids = self._sel_ids
-        code = self._selected.get('t', '')
-        if self._selected_region:
-            code += '-' + self._selected_region
-        di = ids.get('dialect_input')
-        if di and di.text.strip():
-            variant = di.text.strip().lower()
-            # Clamp to 2-8 alphanumeric chars
-            variant = ''.join(c for c in variant if c.isalnum())[:8]
-            self._dialect_code = variant
-            if len(variant) >= 2:
-                code += '-x-' + variant
-        else:
-            self._dialect_code = ''
-        cl = ids.get('code_label')
-        if cl:
-            cl.text = _tr('Language code: {code}').format(code=code)
-
-    def _assembled_code(self):
-        if not self._selected:
-            return ''
-        code = self._selected.get('t', '')
-        if self._selected_region:
-            code += '-' + self._selected_region
-        if self._dialect_code and len(self._dialect_code) >= 2:
-            code += '-x-' + self._dialect_code
-        return code
-
-    def _on_continue(self):
-        app = App.get_running_app()
-        code = self._assembled_code()
-        app._pending_vernlang = code
-        # Show overlay immediately so user knows the button worked
-        app._show_loading_overlay(_tr('Setting up wordlist for {code}...').format(code=code))
-        app.new_from_template()
-
-
 class ImagePickerScreen(Screen):
     """Image selection screen — shows all available images for the current entry."""
     _entry = None
@@ -1831,9 +1447,13 @@ class ImagePickerScreen(Screen):
         self._freesvg_page = 1
         self._wikimedia_continue = ''
 
-        # Gather URLs from CAWL image repo
+        # Gather CAWL images for this entry — local paths pulled
+        # through from the daemon via CAWLHandle (Stage 2). Other
+        # buttons (web-source fetches, user-picked files) added later
+        # carry remote URLs; _add_image_buttons / _download_and_set
+        # handle both shapes by prefix.
         db = app.recorder.db if app.recorder else None
-        urls = db.all_image_urls(entry) if db else []
+        sources = db.all_image_paths(entry) if db else []
 
         # Each image = ~1/4 of screen in a 2x2 grid
         # Use dp-based size: half screen height minus chrome
@@ -1841,12 +1461,12 @@ class ImagePickerScreen(Screen):
         self._cell_h = max(int(screen_h / 2.5), dp(200))
 
         # Use 1 column if ≤2 images, else 2
-        grid.cols = 1 if len(urls) <= 2 else 2
+        grid.cols = 1 if len(sources) <= 2 else 2
 
-        self._add_image_buttons(grid, urls, self._cell_h)
+        self._add_image_buttons(grid, sources, self._cell_h)
 
         # Auto-fetch from web sources if internet available and few images
-        if len(urls) < 10 and self._glosses:
+        if len(sources) < 10 and self._glosses:
             import threading
             threading.Thread(
                 target=self._auto_web_images, args=(self._cell_h,), daemon=True).start()
@@ -1885,48 +1505,43 @@ class ImagePickerScreen(Screen):
             target=self._download_and_set, args=(url,), daemon=True).start()
         app.go_recorder()
 
-    def _download_and_set(self, url):
-        """Background: download image, scale, save, update LIFT XML."""
-        import urllib.request
+    def _download_and_set(self, source):
+        """Background: acquire image bytes, scale, save, update LIFT XML.
+
+        *source* may be a local path (CAWL pull-through tmpfile from
+        the daemon, Stage 2; or any other local file) or an HTTP URL
+        (web-source fetches — openclipart / freesvg / wikimedia).
+        Local paths are opened directly; URLs go through urlopen.
+        Image writes route through app._save_image_for_entry which
+        handles both URI projects (MediaHandle through the daemon's
+        provider, per the 0.35.2 contract) and desktop (direct
+        filesystem write to db.images_dir)."""
         app = App.get_running_app()
         entry = self._entry
-        db = app.recorder.db
-
         try:
-            ctx = app._ssl_context()
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
-                data = resp.read()
-
-            # Determine filename from azt convention
-            filename = db.imagename(entry)
-            images_dir = db.images_dir
-            os.makedirs(images_dir, exist_ok=True)
-            dest = os.path.join(images_dir, filename)
-
-            # Scale down if larger than 1284px in either dimension
             from PIL import Image as PILImage
-            import io
-            img = PILImage.open(io.BytesIO(data))
+            if source.startswith('http://') or source.startswith('https://'):
+                import io
+                import urllib.request
+                ctx = app._ssl_context()
+                req = urllib.request.Request(source)
+                with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+                    data = resp.read()
+                img = PILImage.open(io.BytesIO(data))
+            else:
+                img = PILImage.open(source)
             max_dim = 1284
             w, h = img.size
             if w > max_dim or h > max_dim:
                 ratio = min(max_dim / w, max_dim / h)
                 img = img.resize((int(w * ratio), int(h * ratio)),
                                  PILImage.LANCZOS)
-            img.save(dest, 'PNG')
-
-            # Update LIFT XML
-            guid = entry.get('guid', '')
-            db.set_illustration(guid, filename)
-
-            # Update in-memory entry
-            entry['image_path'] = dest
-            entry['illustration_href'] = filename
-
+            dest = app._save_image_for_entry(img, entry)
+            if not dest:
+                return
             Clock.schedule_once(lambda dt: app.refresh_recorder_ui(), 0)
         except Exception as ex:
-            print(f'[image-picker] download error: {ex}')
+            print(f'[image-picker] load error: {ex}')
 
     def pick_from_file(self):
         """Let user pick an image from device storage or camera."""
@@ -2023,16 +1638,13 @@ class ImagePickerScreen(Screen):
         Clock.schedule_once(lambda dt: app.go_recorder(), 0)
 
     def _copy_and_set(self, source_path):
+        """Background: read a local-file image, scale, route through
+        app._save_image_for_entry (URI projects go through MediaHandle,
+        desktop goes through filesystem)."""
         app = App.get_running_app()
         entry = self._entry
-        db = app.recorder.db
         try:
             from PIL import Image as PILImage
-            filename = db.imagename(entry)
-            images_dir = db.images_dir
-            os.makedirs(images_dir, exist_ok=True)
-            dest = os.path.join(images_dir, filename)
-
             img = PILImage.open(source_path)
             max_dim = 1284
             w, h = img.size
@@ -2040,17 +1652,14 @@ class ImagePickerScreen(Screen):
                 ratio = min(max_dim / w, max_dim / h)
                 img = img.resize((int(w * ratio), int(h * ratio)),
                                  PILImage.LANCZOS)
-            img.save(dest, 'PNG')
-            print(f'[image-picker] saved {img.size[0]}x{img.size[1]} to {dest}')
-
-            guid = entry.get('guid', '')
-            db.set_illustration(guid, filename)
-            # Bust Kivy image cache so the new file is reloaded
+            dest = app._save_image_for_entry(img, entry)
+            if not dest:
+                return
+            # Bust Kivy image cache so the new file is reloaded for
+            # immediate display.
             from kivy.cache import Cache
             Cache.remove('kv.image', dest)
             Cache.remove('kv.texture', dest)
-            entry['image_path'] = dest
-            entry['illustration_href'] = filename
             def _update_ui(dt):
                 app.refresh_recorder_ui()
                 app._show_toast(_tr('Image updated'))
@@ -2069,16 +1678,15 @@ class ImagePickerScreen(Screen):
             target=self._do_openclipart, args=(cell_h,), daemon=True).start()
 
     def _auto_web_images(self, cell_h):
-        """Background auto-fetch from web sources if internet available."""
-        try:
-            from collab import _has_internet
-            if not _has_internet():
-                return
-        except Exception:
-            return
-        self._do_openclipart(cell_h)
-        self._do_wikimedia(cell_h)
-        self._do_freesvg(cell_h)
+        """Background auto-fetch from web sources — disabled for now.
+
+        openclipart / FreeSVG / Wikimedia auto-fetch is off because the
+        upstream APIs have been flaky / abusive lately (rate limits,
+        empty responses, slow first-byte). The manual
+        ``fetch_openclipart`` / ``fetch_freesvg`` / ``fetch_wikimedia``
+        buttons in the image picker still work; restore the auto-fetch
+        loop here when the upstream story stabilises."""
+        return
 
     # ── openclipart ───────────────────────────────────────────────────────
 
@@ -2407,14 +2015,18 @@ class ConfigScreen(Screen):
     def on_enter(self):
         app = App.get_running_app()
         self._build_lang_selector()
+        # Conserve-power selectors are peer-pref-backed (suite-wide),
+        # so they populate regardless of project state — they used to
+        # live inside db_settings_box and only filled in when a
+        # project was loaded; that was a layout accident, not a real
+        # gate.
+        self._build_audio_quality_row()
         has_db = app.recorder is not None
         # Show/hide database-dependent sections.
         # When hiding: zero height on every descendant so nothing has a
         # hit area (disabled=True alone doesn't block touches in Kivy).
-        for box_id in ('db_settings_box', 'db_nav_box'):
-            box = self.ids.get(box_id)
-            if not box:
-                continue
+        box = self.ids.get('db_settings_box')
+        if box:
             if has_db:
                 box.opacity = 1
                 Clock.schedule_once(
@@ -2423,28 +2035,22 @@ class ConfigScreen(Screen):
                 self._hide_box_tree(box)
         if not app.recorder:
             return
-        self.build_lang_toggles()
         cawl_in = self.ids.get('cawl_input')
         if cawl_in:
             cawl_in.text = app.recorder.cawl_filter or ''
         gs = self.ids.get('gloss_search_input')
         if gs:
             gs.text = app.recorder.gloss_search or ''
-        ir = self.ids.get('image_repo_input')
-        if ir:
-            ir.text = app._load_prefs().get('image_repo', '')
         # Restore show-past-work toggle (default False)
-        prefs = app._load_prefs()
-        show_past = prefs.get('show_past_work', False)
+        show_past = bool(peer_pref('show_past_work', False))
         toggle = self.ids.get('unrecorded_toggle')
         if toggle:
             toggle.active = show_past
         self.only_unrecorded = not show_past
         # All panels start collapsed
         self._update_filter_summary()
+        self._update_gloss_summary()
         self._collapse_filter_panel()
-        self._collapse_gloss_panel()
-        self._collapse_imgrepo_panel(ir)
         # Build recording options
         self._build_rec_options(app)
 
@@ -2483,14 +2089,14 @@ class ConfigScreen(Screen):
             row.add_widget(btn)
 
     def _set_ui_language(self, lang_code):
-        """Change the UI language and rebuild all screens."""
+        """Change the UI language and rebuild all screens. Persistence
+        lives in azt_collab_client.i18n ($AZT_HOME/config.json), so a
+        change here is visible to the picker / settings subprocess on
+        their next mtime poll."""
         if lang_code == current_language():
             return
         app = App.get_running_app()
         set_language(lang_code)
-        prefs = app._load_prefs()
-        prefs['ui_language'] = lang_code
-        app._save_prefs_dict(prefs)
         app.subtitle = _tr(APP_TAGLINE)
         # Rebuild all screens so translated strings take effect
         sm = app.root.ids.sm
@@ -2506,20 +2112,6 @@ class ConfigScreen(Screen):
         # Restore normal transition after rebuild
         Clock.schedule_once(lambda dt: setattr(sm, 'transition', old_transition), 0.1)
 
-    def build_lang_toggles(self):
-        app = App.get_running_app()
-        box = self.ids.get('lang_box')
-        if box is None:
-            return
-        box.clear_widgets()
-        for lang in app.recorder.all_gloss_langs:
-            t = LangToggle(
-                lang=lang,
-                active=lang in app.recorder.active_gloss_langs,
-                callback=self._toggle_lang,
-            )
-            box.add_widget(t)
-
     def _toggle_lang(self, lang, active):
         app = App.get_running_app()
         langs = set(app.recorder.active_gloss_langs)
@@ -2527,114 +2119,115 @@ class ConfigScreen(Screen):
             langs.add(lang)
         else:
             langs.discard(lang)
-        app.recorder.active_gloss_langs = sorted(langs)
+        chosen = sorted(langs)
+        app.recorder.active_gloss_langs = chosen
+        # Persist the selection across boots/installs. RecorderController
+        # filters this list against `all_gloss_langs` on next load so a
+        # project that doesn't have the saved langs falls through to
+        # the top-3 default — see RecorderController.__init__.
+        set_peer_pref('gloss_langs', chosen)
+        self._update_gloss_summary()
+
+    def _update_gloss_summary(self):
+        """Show selected gloss langs next to the button."""
+        lbl = self.ids.get('gloss_summary_label')
+        if not lbl:
+            return
+        app = App.get_running_app()
+        if not app.recorder:
+            lbl.text = ''
+            return
+        langs = list(app.recorder.active_gloss_langs)
+        names = [_lang_display_name(c) for c in langs]
+        lbl.text = ', '.join(names) if names else _tr('(none selected)')
 
     _filter_open = False
-    _gloss_open = False
-    _imgrepo_open = False
 
-    def _collapse_gloss_panel(self):
-        lang_box = self.ids.get('lang_box')
-        btn = self.ids.get('gloss_toggle_btn')
-        if lang_box:
-            lang_box.clear_widgets()
-            lang_box.height = 0
-            lang_box.opacity = 0
-        if btn:
-            btn.normal_color = theme.ACCENT
-        self._gloss_open = False
+    def _show_gloss_overlay(self):
+        """Show a modal overlay with one toggle per available gloss language."""
+        print('[gloss] _show_gloss_overlay')
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.button import Button
+        from kivy.uix.gridlayout import GridLayout
+        from kivy.uix.modalview import ModalView
+        from kivy.uix.scrollview import ScrollView
 
-    def _collapse_imgrepo_panel(self, inp=None):
-        if inp is None:
-            inp = self.ids.get('image_repo_input')
-        btn = self.ids.get('imgrepo_toggle_btn')
-        if inp:
-            inp.height = 0
-            inp.opacity = 0
-            inp.disabled = True
-            inp.focus = False
-        if btn:
-            btn.normal_color = theme.ACCENT
-        lbl = self.ids.get('imgrepo_summary_label')
-        if lbl and inp:
-            repo = inp.text.strip()
-            if '/' in repo:
-                repo = '/'.join(repo.rstrip('/').rsplit('/', 2)[-2:])
-            lbl.text = repo
-        self._imgrepo_open = False
-
-    def toggle_gloss_panel(self):
-        lang_box = self.ids.get('lang_box')
-        btn = self.ids.get('gloss_toggle_btn')
-        if not lang_box:
+        app = App.get_running_app()
+        if not app.recorder:
             return
-        if self._gloss_open:
-            lang_box.clear_widgets()
-            lang_box.height = 0
-            lang_box.opacity = 0
-            self._gloss_open = False
-            if btn:
-                btn.normal_color = theme.ACCENT
-        else:
-            self.build_lang_toggles()
-            lang_box.opacity = 1
-            self._gloss_open = True
-            if btn:
-                btn.normal_color = theme.BTN_INACTIVE
-            # Defer height read so minimum_height is recalculated after layout
-            def _set_h(dt):
-                lang_box.height = lang_box.minimum_height
-            Clock.schedule_once(_set_h, 0)
-
-    def toggle_imgrepo_panel(self):
-        inp = self.ids.get('image_repo_input')
-        btn = self.ids.get('imgrepo_toggle_btn')
-        if not inp:
+        langs = list(app.recorder.all_gloss_langs)
+        if not langs:
             return
-        if self._imgrepo_open:
-            # Save on close
-            app = App.get_running_app()
-            prefs = app._load_prefs()
-            prefs['image_repo'] = inp.text.strip()
-            app._save_prefs_dict(prefs)
-            inp.height = 0
-            inp.opacity = 0
-            inp.disabled = True
-            inp.focus = False
-            self._imgrepo_open = False
-            if btn:
-                btn.normal_color = theme.ACCENT
-            # Update summary
-            lbl = self.ids.get('imgrepo_summary_label')
-            if lbl:
-                repo = inp.text.strip()
-                # Show just owner/repo from full URL
-                if '/' in repo:
-                    repo = '/'.join(repo.rstrip('/').rsplit('/', 2)[-2:])
-                lbl.text = repo
-        else:
-            inp.height = dp(48)
-            inp.opacity = 1
-            inp.disabled = False
-            self._imgrepo_open = True
-            if btn:
-                btn.normal_color = theme.BTN_INACTIVE
+
+        cols = 3
+        rows = (len(langs) + cols - 1) // cols
+        grid_h = rows * dp(44) + max(0, rows - 1) * dp(6)
+
+        view = ModalView(
+            size_hint=(0.9, None),
+            height=min(grid_h + dp(96), Window.height * 0.85),
+            background_color=theme.OVERLAY_DARK,
+            auto_dismiss=True,
+        )
+        outer = BoxLayout(
+            orientation='vertical', spacing=dp(8),
+            padding=(dp(10), dp(10)),
+        )
+        scroll = ScrollView(size_hint=(1, 1))
+        grid = GridLayout(
+            cols=cols, spacing=dp(6),
+            size_hint_y=None,
+        )
+        grid.bind(minimum_height=grid.setter('height'))
+        for lang in langs:
+            grid.add_widget(LangToggle(
+                lang=lang,
+                active=lang in app.recorder.active_gloss_langs,
+                callback=self._toggle_lang,
+            ))
+        scroll.add_widget(grid)
+        outer.add_widget(scroll)
+
+        done_btn = Button(
+            text=_tr('Done'),
+            font_name=_FONT_NAME,
+            font_size=sp(16),
+            size_hint_y=None, height=dp(44),
+            background_color=theme.ACCENT,
+            color=theme.TEXT,
+        )
+        done_btn.bind(on_release=lambda inst: view.dismiss())
+        outer.add_widget(done_btn)
+
+        view.add_widget(outer)
+        view.open()
 
     def _expand_filter_panel(self):
         panel = self.ids.get('filter_panel')
         if not panel:
             return
         # Restore child heights before expanding
+        for cid in ('cawl_label', 'gloss_search_label'):
+            w = self.ids.get(cid)
+            if w:
+                w.height = dp(36)
         for cid in ('cawl_input', 'gloss_search_input'):
             w = self.ids.get(cid)
             if w:
                 w.height = dp(48)
                 w.disabled = False
+        bottom_row = self.ids.get('filter_bottom_row')
+        if bottom_row:
+            bottom_row.height = dp(56)
+            bottom_row.opacity = 1
         toggle = self.ids.get('unrecorded_toggle')
         if toggle:
             toggle.height = dp(56)
-            toggle.opacity = 1
-        # dp(36)*2 labels + dp(48)*2 inputs + dp(56) toggle + dp(8)*4 spacing
+        ok_btn = self.ids.get('filter_ok_btn')
+        if ok_btn:
+            ok_btn.height = dp(56)
+            ok_btn.disabled = False
+        # dp(36)*2 labels + dp(48)*2 inputs + dp(56) bottom row + dp(8)*4 spacing
         panel.height = dp(256)
         panel.opacity = 1
         self._filter_open = True
@@ -2646,17 +2239,38 @@ class ConfigScreen(Screen):
         panel = self.ids.get('filter_panel')
         if not panel:
             return
-        # Zero out TextInput heights so they can't intercept touches
+        # Zero out every child of filter_panel — when panel.height
+        # is 0 but children retain their natural heights, Kivy's
+        # vertical BoxLayout stacks them outside the panel's nominal
+        # bounds. The "CAWL number…" / "Gloss search…" Labels
+        # (height: dp(36)) were ending up inside the filter button
+        # row's y-range and blocking its on_release. Zero everything,
+        # including the Labels — and the dp(56)-tall UnrecordedToggle
+        # / OK button inside filter_bottom_row, whose
+        # `<UnrecordedToggle>:` / `<RecBtn@Button>:` root rules pin
+        # `size_hint_y: None` + an explicit height so they don't
+        # shrink with their (zeroed) parent row.
+        for cid in ('cawl_label', 'gloss_search_label'):
+            w = self.ids.get(cid)
+            if w:
+                w.height = 0
         for cid in ('cawl_input', 'gloss_search_input'):
             w = self.ids.get(cid)
             if w:
                 w.height = 0
                 w.disabled = True
                 w.focus = False
+        bottom_row = self.ids.get('filter_bottom_row')
+        if bottom_row:
+            bottom_row.height = 0
+            bottom_row.opacity = 0
         toggle = self.ids.get('unrecorded_toggle')
         if toggle:
             toggle.height = 0
-            toggle.opacity = 0
+        ok_btn = self.ids.get('filter_ok_btn')
+        if ok_btn:
+            ok_btn.height = 0
+            ok_btn.disabled = True
         panel.height = 0
         panel.opacity = 0
         self._filter_open = False
@@ -2666,6 +2280,7 @@ class ConfigScreen(Screen):
 
     def toggle_filter_panel(self):
         """Expand or collapse the word filter panel."""
+        print(f'[filter] toggle_filter_panel: _filter_open={self._filter_open}')
         if self._filter_open:
             self._collapse_filter_panel()
             self._update_filter_summary()
@@ -2674,12 +2289,29 @@ class ConfigScreen(Screen):
             if app.recorder:
                 cawl_in = self.ids.get('cawl_input')
                 if cawl_in:
-                    app.recorder.cawl_filter = cawl_in.text.strip()
+                    text = cawl_in.text.strip()
+                    app.recorder.cawl_filter = text
+                    set_peer_pref('cawl_filter', text or None)
                 gs = self.ids.get('gloss_search_input')
                 if gs:
                     app.recorder.gloss_search = gs.text.strip()
         else:
             self._expand_filter_panel()
+        # Belt-and-suspenders: force db_settings_box to recompute
+        # height after the panel size change. The KV binding
+        # `height: self.minimum_height` should handle this on its
+        # own, but Kivy's BoxLayout-inside-ScrollView relayout
+        # ordering is touchy, so we explicitly Clock.schedule_once
+        # the readback.
+        box = self.ids.get('db_settings_box')
+        if box and box.opacity > 0:
+            Clock.schedule_once(
+                lambda dt: setattr(box, 'height', box.minimum_height), 0)
+        panel = self.ids.get('filter_panel')
+        print(f'[filter] post-toggle: panel.height={panel.height if panel else None} '
+              f'panel.opacity={panel.opacity if panel else None} '
+              f'box.height={box.height if box else None} '
+              f'box.minimum_height={box.minimum_height if box else None}')
 
     def _update_filter_summary(self):
         """Show a one-line summary of active filters next to the button."""
@@ -2702,16 +2334,16 @@ class ConfigScreen(Screen):
         lbl.text = ', '.join(parts) if parts else ''
 
     def apply_cawl(self, text):
-        App.get_running_app().recorder.cawl_filter = text.strip()
+        cleaned = text.strip()
+        App.get_running_app().recorder.cawl_filter = cleaned
+        set_peer_pref('cawl_filter', cleaned or None)
 
     def toggle_show_past(self, show_past):
         self.only_unrecorded = not show_past
         app = App.get_running_app()
         if app.recorder:
             app.recorder.only_unrecorded = not show_past
-        prefs = app._load_prefs()
-        prefs['show_past_work'] = show_past
-        app._save_prefs_dict(prefs)
+        set_peer_pref('show_past_work', bool(show_past))
 
     def _build_theme_buttons(self):
         """Populate theme selector row with one button per theme."""
@@ -2739,9 +2371,7 @@ class ConfigScreen(Screen):
         if name == theme.current_theme:
             return
         app = App.get_running_app()
-        prefs = app._load_prefs()
-        prefs['theme'] = name
-        app._save_prefs_dict(prefs)
+        set_peer_pref('theme', name)
         # Update button highlights
         row = self.ids.get('theme_row')
         if row:
@@ -2775,9 +2405,7 @@ class ConfigScreen(Screen):
         )
         def _cancel(b):
             # Revert pref to current theme
-            prefs2 = app._load_prefs()
-            prefs2['theme'] = theme.current_theme
-            app._save_prefs_dict(prefs2)
+            set_peer_pref('theme', theme.current_theme)
             if row:
                 for btn in row.children:
                     btn.background_color = theme.GREEN \
@@ -2819,17 +2447,101 @@ class ConfigScreen(Screen):
         available = self._available_rec_tasks(app)
         self._rec_available = available
         # Restore saved selection (or default to citation)
-        prefs = app._load_prefs()
-        saved_key = prefs.get('rec_task', 'citation')
+        saved_key = peer_pref('rec_task', 'citation') or 'citation'
         # If saved key is no longer available, fall back to citation
         if not any(k == saved_key for k, _ in available):
             saved_key = 'citation'
-            prefs['rec_task'] = saved_key
-            app._save_prefs_dict(prefs)
+            set_peer_pref('rec_task', saved_key)
         saved_label = next((t for k, t in available if k == saved_key), available[0][1])
         btn.text = saved_label
         row.height = dp(44)
         row.opacity = 1
+        # Audio quality selector is always populated alongside the
+        # recording-task row, regardless of how many rec tasks are
+        # available.
+        self._build_audio_quality_row()
+
+    _AUDIO_QUALITY_LABELS = (
+        ('high',         'High'),
+        ('high_aac',     'High AAC'),
+        ('medium',       'Medium'),
+        ('medium_aac',   'Medium AAC'),
+        ('low',          'Low'),
+        ('low_aac',      'Low AAC'),
+        ('very_low',     'Very Low'),
+        ('very_low_aac', 'Very Low AAC'),
+    )
+
+    def _build_audio_quality_row(self):
+        """Populate audio-quality row + button text from peer_pref."""
+        row = self.ids.get('audio_quality_row')
+        btn = self.ids.get('audio_quality_btn')
+        if not row or not btn:
+            return
+        default = RecorderController._DEFAULT_AUDIO_PROFILE
+        saved = peer_pref('audio_quality', default) or default
+        # Defensive: if a stored value isn't one of the recognised
+        # profiles (e.g. a stale legacy key), fall back to the
+        # default and re-pin the pref.
+        if saved not in dict(self._AUDIO_QUALITY_LABELS):
+            saved = default
+            set_peer_pref('audio_quality', saved)
+        label = next(
+            (l for k, l in self._AUDIO_QUALITY_LABELS if k == saved),
+            saved)
+        btn.text = _tr(label)
+        row.height = dp(44)
+        row.opacity = 1
+
+    def _show_audio_quality_overlay(self):
+        """Modal picker for the audio-quality profile."""
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.button import Button
+        from kivy.uix.modalview import ModalView
+        default = RecorderController._DEFAULT_AUDIO_PROFILE
+        current = peer_pref('audio_quality', default) or default
+        options = self._AUDIO_QUALITY_LABELS
+        # If auto-degradation has pinned a ceiling, hide profiles
+        # above it — they've already failed on this device and
+        # offering them again would just re-trigger the same toast.
+        ladder = RecorderController._PROFILE_LADDER
+        ceiling = peer_pref('audio_quality_ceiling')
+        if ceiling and ceiling in ladder:
+            allowed = set(ladder[ladder.index(ceiling):])
+            options = tuple((k, l) for k, l in options if k in allowed)
+        view = ModalView(
+            size_hint=(0.85, None),
+            height=dp(52 * len(options) + 20),
+            background_color=theme.OVERLAY_DARK,
+            auto_dismiss=True,
+        )
+        box = BoxLayout(
+            orientation='vertical', spacing=dp(4),
+            padding=(dp(10), dp(10)),
+        )
+        for key, label in options:
+            is_selected = key == current
+            opt = Button(
+                text=_tr(label),
+                font_name=_FONT_NAME,
+                font_size=sp(16),
+                size_hint_y=None, height=dp(44),
+                background_color=theme.GREEN if is_selected
+                else theme.SURFACE,
+                color=theme.TEXT,
+            )
+
+            def _select(k=key, l=label, v=view):
+                set_peer_pref('audio_quality', k)
+                aq_btn = self.ids.get('audio_quality_btn')
+                if aq_btn:
+                    aq_btn.text = _tr(l)
+                v.dismiss()
+
+            opt.bind(on_release=lambda inst, cb=_select: cb())
+            box.add_widget(opt)
+        view.add_widget(box)
+        view.open()
 
     def _show_rec_overlay(self):
         """Show a modal overlay with recording task options."""
@@ -2841,9 +2553,7 @@ class ConfigScreen(Screen):
         if len(available) <= 1:
             return
 
-        app = App.get_running_app()
-        prefs = app._load_prefs()
-        current_key = prefs.get('rec_task', 'citation')
+        current_key = peer_pref('rec_task', 'citation') or 'citation'
 
         view = ModalView(
             size_hint=(0.85, None),
@@ -2869,9 +2579,7 @@ class ConfigScreen(Screen):
             )
 
             def _select(k=key, l=label, v=view):
-                prefs2 = app._load_prefs()
-                prefs2['rec_task'] = k
-                app._save_prefs_dict(prefs2)
+                set_peer_pref('rec_task', k)
                 task_btn = self.ids.get('rec_task_btn')
                 if task_btn:
                     task_btn.text = l
@@ -2939,61 +2647,39 @@ class ConfigScreen(Screen):
         if app.recorder:
             cawl_in = self.ids.get('cawl_input')
             if cawl_in:
-                app.recorder.cawl_filter = cawl_in.text.strip()
+                text = cawl_in.text.strip()
+                app.recorder.cawl_filter = text
+                set_peer_pref('cawl_filter', text or None)
             gs = self.ids.get('gloss_search_input')
             if gs:
                 app.recorder.gloss_search = gs.text.strip()
-            ir = self.ids.get('image_repo_input')
-            if ir:
-                prefs = app._load_prefs()
-                prefs['image_repo'] = ir.text.strip()
-                app._save_prefs_dict(prefs)
             app.recorder.only_unrecorded = self.only_unrecorded
             app.recorder.rebuild_queue()
             app.go_recorder()
         else:
-            app.go_welcome()
+            app.start_over()
 
 
 class CollabScreen(Screen):
 
     def on_enter(self):
         app = App.get_running_app()
-        prefs = app._load_prefs()
-        has_db = app.recorder is not None
+        from azt_collab_client import get_contributor
         w = self.ids.get('name_input')
         if w and not w.text:
-            w.text = prefs.get('collab_name', '')
-        # Derive langcode from current project's git remote, fall back to pref
-        langcode = ''
-        has_remote = False
-        if has_db:
-            langcode = self._langcode_from_project(app) or prefs.get('collab_langcode', '')
-            has_remote = bool(self._langcode_from_project(app))
-        w = self.ids.get('langcode_input')
-        if w:
-            w.text = langcode
-        # Hide publish section when no database or git remote already exists
-        pub = self.ids.get('publish_section')
-        if pub:
-            if has_remote or not has_db:
-                ConfigScreen._hide_box_tree(pub)
-            else:
-                pub.height = pub.minimum_height
-                pub.opacity = 1
-                lang_inp = self.ids.get('langcode_input')
-                if lang_inp:
-                    lang_inp.disabled = False
-                    lang_inp.height = dp(48)
-        # Restore host selection
-        host = prefs.get('collab_host', 'github')
+            w.text = get_contributor() or ''
+        # Publish / Grant collaborator surfaces moved to the daemon
+        # settings UI (CLIENT_INTEGRATION.md § 13 + Phase 3 strip-out).
+        # Restore host selection + creds state from the server-owned store
+        from azt_collab_client import get_credentials_status
+        cred_status = get_credentials_status()
+        host = cred_status.get('host', 'github')
         self.set_host(host, save=False)
         self._update_gh_status()
         # Restore GitLab fields
         gl_user = self.ids.get('gl_username_input')
         if gl_user and not gl_user.text:
-            gl_user.text = prefs.get('gl_username', '')
-        self.update_publish_url()
+            gl_user.text = cred_status.get('gitlab', {}).get('username', '')
         self._update_connect_enabled()
         # Show name overlay on first visit (blank name)
         name_w = self.ids.get('name_input')
@@ -3005,11 +2691,15 @@ class CollabScreen(Screen):
         self._save_settings()
 
     def close_collab(self):
-        """X button: go back to config (if project loaded) or welcome."""
+        """X button: go back to config (if a project is loaded);
+        otherwise relaunch the picker."""
         app = App.get_running_app()
         sm = app.root.ids.sm
         sm.transition = SlideTransition(direction='right')
-        sm.current = 'config' if app.recorder else 'welcome'
+        if app.recorder:
+            sm.current = 'config'
+        else:
+            app.start_over()
 
     def _update_connect_enabled(self):
         """Grey out connect/reconnect button when name is blank."""
@@ -3052,19 +2742,22 @@ class CollabScreen(Screen):
 
     @staticmethod
     def _langcode_from_project(app):
-        """Extract repo name (langcode) from the current project's git remote."""
+        """Ask the daemon for the current project's langcode rather
+        than opening the local repo (azt_collab_client rule: no
+        reading project state from the local filesystem). Note:
+        CollabScreen itself is unreachable since 1.37.0 — Setup
+        Collaboration delegates to open_server_ui — so this method is
+        currently dead code kept only to satisfy the screen's existing
+        on_enter contract while it lingers in the tree."""
+        if not app.recorder:
+            return ''
+        cached = getattr(app, '_current_langcode', '')
+        if cached:
+            return cached
         try:
-            project_dir = app.recorder.db.dir
-            from dulwich.repo import Repo
-            repo = Repo(project_dir)
-            remote_url = repo.get_config().get(
-                (b'remote', b'origin'), b'url'
-            ).decode('utf-8')
-            # Extract repo name from URL like https://github.com/user/langcode.git
-            name = remote_url.rstrip('/').rsplit('/', 1)[-1]
-            if name.endswith('.git'):
-                name = name[:-4]
-            return name
+            from azt_collab_client import derive_langcode
+            return derive_langcode(
+                app.recorder.db.dir, app.recorder.db.path) or ''
         except Exception:
             return ''
 
@@ -3114,16 +2807,11 @@ class CollabScreen(Screen):
                 gh_sec.opacity = 1
 
         if save:
-            app = App.get_running_app()
-            prefs = app._load_prefs()
-            prefs['collab_host'] = host
-            app._save_prefs_dict(prefs)
-        self.update_publish_url()
+            from azt_collab_client import set_collab_host
+            set_collab_host(host)
 
     def save_gitlab_credentials(self):
-        """Save GitLab PAT and username to prefs."""
-        app = App.get_running_app()
-        prefs = app._load_prefs()
+        """Save GitLab PAT and username to the server-owned credentials store."""
         token_w = self.ids.get('gl_token_input')
         user_w = self.ids.get('gl_username_input')
         token = token_w.text.strip() if token_w else ''
@@ -3131,31 +2819,30 @@ class CollabScreen(Screen):
         if not token or not username:
             self._set_log(_tr('Enter both GitLab username and token.'))
             return
-        prefs['gl_token'] = token
-        prefs['gl_username'] = username
-        app._save_prefs_dict(prefs)
+        from azt_collab_client import save_gitlab_credentials
+        save_gitlab_credentials(username, token)
         self._set_log(_tr('GitLab credentials saved for {username}').format(username=username))
-        self.update_publish_url()
 
     def _update_gh_status(self):
         """Update the GitHub connection status label and install button."""
-        app = App.get_running_app()
-        prefs = app._load_prefs()
-        username = prefs.get('gh_username', '')
-        token = prefs.get('gh_access_token', '')
+        from azt_collab_client import get_credentials_status
+        status = get_credentials_status()
+        gh = status.get('github', {})
+        username = gh.get('username', '')
+        connected = gh.get('connected', False)
         lbl = self.ids.get('gh_status_label')
         btn = self.ids.get('gh_connect_btn')
         if lbl:
-            if username and token:
+            if connected and username:
                 lbl.text = _tr('Connected as {username}').format(username=username)
                 lbl.color = theme.GREEN
             else:
                 lbl.text = _tr('Not connected')
                 lbl.color = theme.TEXT_DIM
         if btn:
-            btn.text = _tr('Reconnect') if (username and token) else _tr('Connect to GitHub')
+            btn.text = _tr('Reconnect') if connected else _tr('Connect to GitHub')
         # Hide install button + instructions if app is already installed
-        installed = prefs.get('gh_app_installed', False)
+        installed = gh.get('app_installed', False)
         install_btn = self.ids.get('install_app_btn')
         inst = self.ids.get('device_instructions_label')
         if installed:
@@ -3173,11 +2860,45 @@ class CollabScreen(Screen):
         import webbrowser
         webbrowser.open(str(url))
 
+    def open_server_ui(self):
+        """Open the standalone AZT collab settings UI.
+
+        Delegates to ``azt_collab_client.open_server_ui()``; the client
+        owns the platform branching (desktop spawn / Android intent /
+        desktop-only fallback) so peer apps stay thin."""
+        from azt_collab_client import open_server_ui as _open_server_ui
+        result = _open_server_ui()
+        if result.get('ok'):
+            self._set_log(_tr('Opened sync settings.'))
+            return
+        err = result.get('error', 'unknown')
+        if err == 'desktop_only':
+            self._set_log(_tr('Sync settings UI is desktop-only for now.'))
+        elif err == 'spawn_exited':
+            detail = (result.get('detail')
+                      or f"rc={result.get('returncode', '?')}")
+            self._set_log(_tr(
+                'Sync settings UI failed to start: {detail}')
+                          .format(detail=detail))
+        else:
+            # 'server_apk_not_installed' falls through here; bootstrap()
+            # owns the install prompt at startup, so we don't compete.
+            self._set_log(_tr('Could not open sync settings: {error}')
+                          .format(error=err))
+        # Mirror the daemon's last_crash on non-benign failures —
+        # 'spawn_exited' is the prime case.
+        if err not in ('desktop_only', 'server_apk_not_installed'):
+            _log_server_crash_if_any('open_server_ui')
+
     def open_install_page(self):
         """Open the GitHub App installation page."""
-        from collab import GITHUB_APP_INSTALL_URL
+        from azt_collab_client import github_app_install_url
+        url = github_app_install_url()
+        if not url:
+            self._set_log(_tr('GitHub App install URL not available.'))
+            return
         import webbrowser
-        webbrowser.open(GITHUB_APP_INSTALL_URL)
+        webbrowser.open(url)
 
     def copy_code(self):
         """Copy the device code to clipboard."""
@@ -3188,15 +2909,13 @@ class CollabScreen(Screen):
             self._set_log(_tr('Code copied to clipboard'))
 
     def _save_settings(self):
-        app = App.get_running_app()
-        prefs = app._load_prefs()
+        # Persists the committer name. repo_slug used to be written
+        # here too but moved to the daemon settings UI in 1.41.5 per
+        # CLIENT_INTEGRATION.md § 13 (Phase 3 strip-out).
+        from azt_collab_client import set_contributor
         w = self.ids.get('name_input')
         if w:
-            prefs['collab_name'] = w.text
-        w = self.ids.get('langcode_input')
-        if w:
-            prefs['collab_langcode'] = w.text
-        app._save_prefs_dict(prefs)
+            set_contributor(w.text)
 
     def _set_log(self, text):
         lbl = self.ids.get('log_label')
@@ -3204,46 +2923,53 @@ class CollabScreen(Screen):
             lbl.text = text
 
     def _run(self, busy_msg, func, *args):
-        """Show busy_msg, run func(*args) in a thread, show result."""
+        """Show busy_msg, run func(*args) in a thread, show result.
+        Accepts a str or a Result — Results are translated for display."""
         self._set_log(busy_msg)
-        from collab import run_async
-        run_async(func, *args, on_done=lambda result: (
-            self._set_log(result or ''),
-        ))
+        import threading
+        from azt_collab_client import translate_result, Result as _Result
+        def _worker():
+            result = func(*args)
+            if isinstance(result, _Result):
+                text = translate_result(result)
+            else:
+                text = result or ''
+            Clock.schedule_once(lambda dt: self._set_log(text), 0)
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ── Device flow ────────────────────────────────────────────────────────
 
     def start_device_flow(self):
-        """Begin GitHub device flow authentication."""
+        """Begin GitHub device flow authentication via the server."""
         # Defocus any TextInput so keyboard doesn't pop up
         name_input = self.ids.get('name_input')
         if name_input:
             name_input.focus = False
-        from collab import GITHUB_APP_CLIENT_ID
-        if not GITHUB_APP_CLIENT_ID:
+        from azt_collab_client import (
+            github_app_client_id, mark_github_app_installed)
+        if not github_app_client_id():
             self._set_log(_tr('GitHub App client_id not configured.'))
             return
         # Reset install status on reconnect
-        app = App.get_running_app()
-        prefs = app._load_prefs()
-        prefs['gh_app_installed'] = False
-        app._save_prefs_dict(prefs)
+        mark_github_app_installed(False)
         self._set_log(_tr('Starting GitHub authorization...'))
         import threading
         threading.Thread(target=self._device_flow_worker, daemon=True).start()
 
     def _device_flow_worker(self):
-        from collab import device_flow_start, device_flow_poll, \
-            get_github_username, save_tokens, check_app_installed, \
-            app_install_url, GITHUB_APP_INSTALL_URL
-        app = App.get_running_app()
+        from azt_collab_client import (
+            github_device_flow_start, github_device_flow_status,
+            github_app_install_url, translate_status, Status as _Status)
         try:
-            resp = device_flow_start()
+            resp = github_device_flow_start()
+            if not resp.get('ok'):
+                raise RuntimeError(resp.get('error', 'unknown'))
+            job_id = resp['job_id']
             user_code = resp['user_code']
-            device_code = resp['device_code']
-            verification_uri = resp.get('verification_uri', 'https://github.com/login/device')
-            interval = resp.get('interval', 5)
-            expires_in = resp.get('expires_in', 900)
+            verification_uri = resp.get(
+                'verification_uri', 'https://github.com/login/device')
+            interval = max(1, int(resp.get('interval', 5)))
+            expires_in = int(resp.get('expires_in', 900))
 
             def _show_code(dt):
                 inst = self.ids.get('device_instructions_label')
@@ -3268,24 +2994,30 @@ class CollabScreen(Screen):
                 webbrowser.open(verification_uri)
             Clock.schedule_once(_open_browser, 3)
 
-            # Poll until authorized
-            token_data = device_flow_poll(device_code, interval, expires_in)
-            access_token = token_data['access_token']
+            # Poll the server until DONE / FAILED. The server is the
+            # one talking to GitHub — peers only check the job status,
+            # so tokens never cross the client/server boundary.
+            import time
+            deadline = time.time() + expires_in + 30
+            status_resp = {}
+            while time.time() < deadline:
+                time.sleep(interval)
+                status_resp = github_device_flow_status(job_id)
+                if not status_resp.get('ok'):
+                    raise RuntimeError(
+                        status_resp.get('error', 'server_unavailable'))
+                if status_resp.get('state') in ('DONE', 'FAILED'):
+                    break
+            if status_resp.get('state') != 'DONE':
+                if status_resp.get('state') == 'FAILED':
+                    raise _DeviceFlowFailure(
+                        status_resp.get('error', 'AUTH_FAILED'),
+                        status_resp.get('error_params') or {})
+                raise RuntimeError('device_flow_timeout')
 
-            # Get the GitHub username (best-effort)
-            username = get_github_username(access_token) or 'unknown'
-
-            # Save tokens immediately so connection persists even if
-            # later network calls (app install check) fail
-            save_tokens(app._prefs_path, token_data, username)
-            prefs = app._load_prefs()
-            prefs['collab_username'] = username
-            prefs['collab_token'] = access_token
-            app._save_prefs_dict(prefs)
-
-            _url = GITHUB_APP_INSTALL_URL
-            _username = username
-            _app_installed = app._load_prefs().get('gh_app_installed', False)
+            _username = status_resp.get('username', '') or 'unknown'
+            _app_installed = bool(status_resp.get('app_installed', False))
+            _url = github_app_install_url()
             def _done(dt):
                 lbl = self.ids.get('device_code_label')
                 if lbl:
@@ -3316,12 +3048,16 @@ class CollabScreen(Screen):
                         install_btn.height = dp(48)
                         install_btn.opacity = 1
                     self._set_log(_tr('Connected as {username} \u2014 install app for repo access').format(username=_username))
-                    import webbrowser
-                    webbrowser.open(_url)
+                    if _url:
+                        import webbrowser
+                        webbrowser.open(_url)
             Clock.schedule_once(_done, 0)
 
         except Exception as ex:
-            err_msg = str(ex)
+            if isinstance(ex, _DeviceFlowFailure):
+                err_msg = translate_status(_Status(ex.code, ex.params))
+            else:
+                err_msg = str(ex)
             def _err(dt):
                 lbl = self.ids.get('device_code_label')
                 if lbl:
@@ -3341,65 +3077,6 @@ class CollabScreen(Screen):
                 self._set_log(_tr('Authorization failed: {error}').format(error=err_msg))
             Clock.schedule_once(_err, 0)
 
-    # ── Button handlers ────────────────────────────────────────────────────
-
-    def update_publish_url(self):
-        """Auto-generate the publish URL from username and language code."""
-        lbl = self.ids.get('publish_url_label')
-        if not lbl:
-            return
-        app = App.get_running_app()
-        prefs = app._load_prefs()
-        host = getattr(self, '_host', prefs.get('collab_host', 'github'))
-        lang_w = self.ids.get('langcode_input')
-        lang = lang_w.text.strip() if lang_w else ''
-        if host == 'gitlab':
-            user = prefs.get('gl_username', '')
-            domain = 'gitlab.com'
-        else:
-            user = prefs.get('gh_username', '')
-            domain = 'github.com'
-        if not user or not lang:
-            lbl.text = ''
-            return
-        lbl.text = f'https://{domain}/{user}/{lang}.git'
-
-    def _get_credentials_for_host(self):
-        """Return (username, token) for the currently selected host."""
-        app = App.get_running_app()
-        prefs = app._load_prefs()
-        host = getattr(self, '_host', prefs.get('collab_host', 'github'))
-        if host == 'gitlab':
-            return prefs.get('gl_username', ''), prefs.get('gl_token', '')
-        return app._get_gh_credentials()
-
-    def do_publish(self):
-        app = App.get_running_app()
-        if not app.recorder:
-            self._set_log(_tr('No project loaded.'))
-            return
-        self._save_settings()
-        user, token = self._get_credentials_for_host()
-        host = getattr(self, '_host', 'github')
-        if not token:
-            host_name = 'GitLab' if host == 'gitlab' else 'GitHub'
-            self._set_log(_tr('Connect to {host} first.').format(host=host_name))
-            return
-        name_w = self.ids.get('name_input')
-        name = (name_w.text.strip() if name_w else '') or 'Recorder'
-        lbl = self.ids.get('publish_url_label')
-        remote_url = lbl.text.strip() if lbl else ''
-        if not remote_url:
-            self._set_log(_tr('Enter a language code first.'))
-            return
-        # GitLab uses username + PAT directly; GitHub uses x-access-token
-        git_user = user if host == 'gitlab' else 'x-access-token'
-        from collab import init_repo
-        self._run(_tr('Publishing...'), init_repo,
-                  app.recorder.db.dir, remote_url,
-                  git_user, token,
-                  'main', name)
-
 
 
 # ── Recorder controller ────────────────────────────────────────────────────────
@@ -3414,7 +3091,10 @@ class RecorderController:
         self.db = db
         self.queue = []          # list of entry dicts
         self.index = 0
-        self.cawl_filter = ''
+        # cawl_filter persists across boots/installs: some workflows
+        # pin a CAWL range and rely on it sticking. Stored suite-wide
+        # so the same scope follows the user across peers.
+        self.cawl_filter = peer_pref('cawl_filter', '') or ''
         self.gloss_search = ''
         self.only_unrecorded = False
         self._recording = False
@@ -3422,11 +3102,58 @@ class RecorderController:
         self._pending_rerecord = False
         self._audio_path = None
         self._recorder = None
+        self._record_pfd = None
+        # Set in _start_android_recording before the JNI chain runs so
+        # the start/stop/validation failure paths know which profile
+        # to degrade. None on non-Android, where there's no ladder.
+        self._record_profile_key = None
+        # Cleared on every start; flipped to True only when the
+        # platform start path returns clean. stop_recording gates the
+        # LIFT basename write on this so a failed start cannot leave
+        # a bogus filename in <citation><form>.
+        self._record_ok = False
+        # Wall-clock monotonic timestamp stamped when mr.start() has
+        # actually returned (in _publish_start_success, not in
+        # start_recording). Read by stop_recording's min-hold-gate
+        # so the gate measures real recorded-audio duration, not
+        # wall-clock since touch-down. Reset to None after a clean
+        # stop or a cancelled start.
+        self._record_started_at = None
+        # Async-start state machine (CLIENT_INTEGRATION-style ref:
+        # main.py H2 plan, 1.41.27+):
+        # - _start_pending is True while a worker thread is running
+        #   _start_native_recording (the blocking JNI chain
+        #   openFD/prepare/start which can take 150-400ms on slow
+        #   MTK chips). Gates re-entrant start_recording calls.
+        # - _start_cancel_requested is set by stop_recording when a
+        #   touch_up lands DURING that window. The worker checks it
+        #   after mr.start() returns; if set, the just-started
+        #   MediaRecorder is torn down without writing the LIFT
+        #   reference (same end-state as the min-hold-gate path).
+        self._start_pending = False
+        self._start_cancel_requested = False
 
-        # Gloss languages
+        # Has the user changed anything on the current entry (audio
+        # recorded, image picked, etc.) since the last sync? Set by
+        # set_audio's caller and the image-pick / image-bake paths;
+        # cleared by nav_prev / nav_next after firing _auto_commit_sync.
+        # Pure browse swipes leave it False and skip the commit RPC.
+        self._dirty = False
+
+        # Gloss languages — `all_gloss_langs` is what the LIFT
+        # actually has; `active_gloss_langs` is the user's pick. The
+        # pick persists across boots/installs: if the user previously
+        # selected langs that are also present in this project, honor
+        # that. Otherwise default to up-to-three from what's available.
         self.all_gloss_langs = sorted(db.gloss_langs)
-        self.active_gloss_langs = self.all_gloss_langs[:] if len(self.all_gloss_langs) <= 3 \
-            else self.all_gloss_langs[:3]
+        saved = peer_pref('gloss_langs', None) or []
+        kept = [l for l in saved if l in self.all_gloss_langs]
+        if kept:
+            self.active_gloss_langs = kept
+        else:
+            self.active_gloss_langs = self.all_gloss_langs[:] \
+                if len(self.all_gloss_langs) <= 3 \
+                else self.all_gloss_langs[:3]
 
         self.rebuild_queue()
 
@@ -3483,14 +3210,14 @@ class RecorderController:
     def go_next(self):
         if self.index < len(self.queue) - 1:
             self._pending_rerecord = False
-            self._playing = False
+            self._stop_active_player()
             self.index += 1
             self._notify_ui()
 
     def go_prev(self):
         if self.index > 0:
             self._pending_rerecord = False
-            self._playing = False
+            self._stop_active_player()
             self.index -= 1
             self._notify_ui()
 
@@ -3523,31 +3250,41 @@ class RecorderController:
             return 'No entries'
         cawl = self.current.get('cawl', '')
         cawl_num = cawl.lstrip('0') or '0' if cawl else ''
-        total = len(self.queue)
         lang = self.db.vernlang or self.list_name
         parts = [lang]
         if cawl_num:
             parts.append(cawl_num)
-        parts.append(f'/ {total}')
+        # Right-hand side: when a CAWL filter is active, show the filter
+        # expression itself (e.g. "501-1000") so the displayed number is
+        # interpretable. Otherwise fall back to the queue length.
+        cf = self.cawl_filter.strip()
+        if cf:
+            parts.append(f'/ {cf}')
+        else:
+            parts.append(f'/ {len(self.queue)}')
         return ' '.join(parts)
 
     @property
     def has_image(self):
-        e = self.current
-        if not e:
-            return False
-        p = e.get('image_path', '')
-        if not p:
-            return False
-        # Accept both local paths and remote URLs (AsyncImage handles both)
-        return p.startswith('https://') or p.startswith('http://') or os.path.exists(p)
+        p = self.image_path
+        return bool(p) and os.path.exists(p)
 
     @property
     def image_path(self):
         e = self.current
         if not e:
             return ''
-        return e.get('image_path', '')
+        p = e.get('image_path', '')
+        if p:
+            return p
+        # Lazy resolve — _parse_entry leaves image_path empty so the
+        # potentially-slow ContentProvider read / URL lookup happens
+        # once per entry on first access (typically when the entry
+        # becomes current) rather than 1700× during load.
+        p = self.db._resolve_image_path(
+            e.get('illustration_href', ''), e.get('cawl', ''))
+        e['image_path'] = p
+        return p
 
     @property
     def has_recording(self):
@@ -3570,45 +3307,325 @@ class RecorderController:
 
     # ── Recording ──────────────────────────────────────────────────────────────
 
-    def start_recording(self):
-        if self._recording or not self.current:
+    # Minimum hold time, in seconds. Stops fired before this much
+    # has elapsed since start_recording are treated as accidental
+    # taps: the in-flight MediaRecorder is torn down without
+    # advertising the basename into the LIFT, and the user gets a
+    # "hold to record" toast. Tuned for slow MediaTek chips where
+    # MediaRecorder.prepare() can take 150-400ms by itself; the gate
+    # has to be longer than that or a slow start path looks like a
+    # short hold.
+    _MIN_HOLD_SEC = 0.4
+
+    # Android AAC quality profiles, selected via the
+    # peer_pref('audio_quality') key. Only applies to Android (iOS
+    # uses FLAC, desktop uses PCM WAV — both inherently lossless and
+    # not affected by these parameters).
+    #
+    # Eight profiles: full cross of four quality tiers × two
+    # containers (MPEG_4/.m4a vs AAC_ADTS/.aac). The temporarily-
+    # wide table is for A/B isolation in the field: when a device
+    # is rescued by switching to e.g. 'low_aac' we want to know
+    # whether the rescue came from the lower bitrate, the alternate
+    # container, or both. Expect to prune to ~3 once the data is in.
+    #
+    # Quality tiers:
+    #   high      — 256k / 48kHz   (historical 1.41.20 default)
+    #   medium    — 128k / 44.1kHz (1.41.21 default; safe everywhere)
+    #   low       —  64k / 22.05kHz (telephone-quality voice)
+    #   very_low  —  32k / 16kHz   (deep rescue, ~4KB/sec on disk)
+    #
+    # Containers:
+    #   MPEG_4   → .m4a (broadest playback support)
+    #   AAC_ADTS → .aac (bypasses MPEG_4-specific HAL bugs reported
+    #              on some mid-tier MediaTek encoders)
+    #
+    # MediaPlayer sniffs format from content (not extension), so
+    # .m4a and .aac coexist fine in the same LIFT's audio dir.
+    _AUDIO_PROFILES = {
+        'high':         {'bitrate': 256_000, 'sample_rate': 48_000,
+                         'output_format': 'MPEG_4',   'ext': '.m4a'},
+        'high_aac':     {'bitrate': 256_000, 'sample_rate': 48_000,
+                         'output_format': 'AAC_ADTS', 'ext': '.aac'},
+        'medium':       {'bitrate': 128_000, 'sample_rate': 44_100,
+                         'output_format': 'MPEG_4',   'ext': '.m4a'},
+        'medium_aac':   {'bitrate': 128_000, 'sample_rate': 44_100,
+                         'output_format': 'AAC_ADTS', 'ext': '.aac'},
+        'low':          {'bitrate':  64_000, 'sample_rate': 22_050,
+                         'output_format': 'MPEG_4',   'ext': '.m4a'},
+        'low_aac':      {'bitrate':  64_000, 'sample_rate': 22_050,
+                         'output_format': 'AAC_ADTS', 'ext': '.aac'},
+        'very_low':     {'bitrate':  32_000, 'sample_rate': 16_000,
+                         'output_format': 'MPEG_4',   'ext': '.m4a'},
+        'very_low_aac': {'bitrate':  32_000, 'sample_rate': 16_000,
+                         'output_format': 'AAC_ADTS', 'ext': '.aac'},
+    }
+    _DEFAULT_AUDIO_PROFILE = 'high'
+
+    # Order in which auto-degradation walks the profile table on
+    # repeated start/stop/validation failures. Container swap before
+    # bitrate drop: dropping bitrate is permanent fidelity loss, but
+    # MPEG_4 → AAC_ADTS dodges the MTK MPEG_4 HAL wedges noted in the
+    # _AUDIO_PROFILES comment without giving up any bits.
+    _PROFILE_LADDER = (
+        'high', 'high_aac',
+        'medium', 'medium_aac',
+        'low', 'low_aac',
+        'very_low', 'very_low_aac',
+    )
+
+    # Minimum fraction of (held_seconds * bitrate / 8) bytes we expect
+    # the on-disk encoded file to have. Real AAC/M4A overhead pushes
+    # the ratio close to 1.0 once headers are written, so a result
+    # well below 0.25 means the encoder produced essentially nothing
+    # — a silent failure mode observed on flaky MediaTek HAL builds.
+    _POST_STOP_MIN_RATIO = 0.25
+
+    def _degrade_profile(self, failed_key):
+        """Drop the audio-quality ceiling one rung below `failed_key`
+        and clamp the user-facing pref to it. Persisted via peer_pref
+        so the device-level adaptation survives crashes and reboots,
+        matching the recorder's policy of making resource decisions
+        transparently rather than as a user-tunable setting."""
+        if not failed_key:
+            return None
+        try:
+            idx = self._PROFILE_LADDER.index(failed_key)
+        except ValueError:
+            return None
+        if idx >= len(self._PROFILE_LADDER) - 1:
+            # Already at the lowest rung — nothing to drop to. The
+            # user still needs to know the take didn't make it.
+            self._toast_record_failed(at_floor=True)
+            return None
+        new_key = self._PROFILE_LADDER[idx + 1]
+        set_peer_pref('audio_quality_ceiling', new_key)
+        set_peer_pref('audio_quality', new_key)
+        print(f'[record] degraded {failed_key} → {new_key} '
+              f'(ceiling pinned)')
+        self._toast_record_failed(at_floor=False)
+        return new_key
+
+    def _toast_record_failed(self, at_floor):
+        from kivy.app import App as _App
+        app = _App.get_running_app()
+        if app is None:
             return
+        msg = (_tr('Recording failed at the lowest quality. '
+                   'Please try again.')
+               if at_floor
+               else _tr('Recording failed; quality lowered. '
+                        'Please try again.'))
+        Clock.schedule_once(
+            lambda dt: app._show_toast(msg), 0)
+
+    def start_recording(self):
+        """Spawn a worker thread to do the blocking JNI setup, return
+        to the Kivy touch dispatcher immediately. The MediaRecorder
+        prepare/start chain can take 150-400ms on slow MediaTek
+        devices; running it inline blocked the touch loop and let
+        touch_up race the setup. See the H2 plan in CHANGELOG 1.41.27
+        for the full state machine."""
+        if self._recording or self._start_pending or not self.current:
+            return
+        path = self._make_audio_path()
+        # Clear before the attempt so a previous successful flag
+        # cannot survive into a now-failing start.
+        self._record_ok = False
+        self._start_pending = True
+        self._start_cancel_requested = False
+        self._record_started_at = None
+        # Defer the "preparing" UI rebuild to the next frame so the
+        # Kivy touch dispatch that triggered us can return cleanly
+        # before refresh_recorder_ui touches widgets.
+        Clock.schedule_once(lambda dt: self._notify_ui(), 0)
+        import threading
+        threading.Thread(
+            target=self._start_worker,
+            args=(path,),
+            daemon=True,
+        ).start()
+
+    def _start_worker(self, path):
+        """Run the blocking JNI setup on a worker thread. Marshals
+        the outcome back to the main thread via Clock.schedule_once
+        — never mutates publish-relevant state (`_recording`,
+        `_record_started_at`) directly; that's the main thread's
+        job in `_publish_start_*`."""
+        try:
+            actual_path = self._start_native_recording(path)
+        except Exception as ex:
+            Clock.schedule_once(
+                lambda dt, e=ex: self._publish_start_failure(e), 0)
+            return
+        Clock.schedule_once(
+            lambda dt, p=actual_path: self._publish_start_success(p), 0)
+
+    def _publish_start_success(self, actual_path):
+        """Main-thread callback after the worker's start succeeded.
+        Stamps _record_started_at NOW (real recording duration
+        reference) and flips _recording True. If the user already
+        released the button while the worker was running, tears
+        down without writing the LIFT reference — same end-state
+        as the min-hold-gate tap path."""
+        self._start_pending = False
+        if self._start_cancel_requested:
+            print('[record] start completed but user already '
+                  'released; tearing down')
+            self._record_ok = False
+            # Clear before teardown: an immediate stop-after-start
+            # nearly always throws (no moov atom yet), and we don't
+            # want a user-cancel to count as device evidence for
+            # degrading the profile.
+            self._record_profile_key = None
+            self._stop_native_recording()
+            self._record_started_at = None
+            Clock.schedule_once(lambda dt: self._notify_ui(), 0)
+            # Coaching toast — same shape as the min-hold-gate one.
+            from kivy.app import App as _App
+            app = _App.get_running_app()
+            if app is not None:
+                Clock.schedule_once(
+                    lambda dt: app._show_toast(
+                        _tr('Hold the button to record')), 0)
+            return
+        if actual_path:
+            self._audio_path = actual_path
         self._recording = True
-        self._audio_path = self._make_audio_path()
-        self._start_native_recording(self._audio_path)
-        self._notify_ui()
+        self._record_ok = True
+        import time as _time
+        self._record_started_at = _time.monotonic()
+        Clock.schedule_once(lambda dt: self._notify_ui(), 0)
+
+    def _publish_start_failure(self, ex):
+        """Main-thread callback after the worker's start raised."""
+        print(f'Recording start failed: {ex}')
+        self._start_pending = False
+        self._record_ok = False
+        self._record_started_at = None
+        # Drop the cancel flag too so a later well-timed start
+        # doesn't inherit a stale one.
+        self._start_cancel_requested = False
+        # Auto-degrade so the next attempt has a chance. No-op on
+        # non-Android (profile key stays None).
+        self._degrade_profile(self._record_profile_key)
+        Clock.schedule_once(lambda dt: self._notify_ui(), 0)
 
     def stop_recording(self):
+        if self._start_pending:
+            # User released the button while the worker was still
+            # setting up. Flag the cancel; the publish callback
+            # will tear down the MediaRecorder once start returns.
+            # Don't proceed to the regular stop flow — there's
+            # nothing to stop yet, and the post-publish teardown
+            # handles the audio-path / LIFT bookkeeping uniformly.
+            self._start_cancel_requested = True
+            return
         if not self._recording:
+            return
+        import time as _time
+        held = _time.monotonic() - (self._record_started_at or 0)
+        if held < self._MIN_HOLD_SEC:
+            # Tap, not hold. Tear down the in-flight MediaRecorder
+            # without writing the LIFT reference — a sub-_MIN_HOLD_SEC
+            # M4A is missing the moov atom and isn't playable anyway,
+            # and the platform-specific stop path is exactly where
+            # IllegalStateException-style wedges originate.
+            print(f'[record] tap-not-hold ({held:.3f}s < '
+                  f'{self._MIN_HOLD_SEC}s); ignoring')
+            self._recording = False
+            self._record_ok = False
+            self._pending_rerecord = False
+            # Tap-not-hold is a UX signal, not device evidence — clear
+            # the profile key so the stop-exception path can't degrade
+            # off an immediate-stop wedge.
+            self._record_profile_key = None
+            self._stop_native_recording()
+            self._record_started_at = None
+            Clock.schedule_once(lambda dt: self._notify_ui(), 0)
+            # Coaching toast on the main thread.
+            from kivy.app import App as _App
+            app = _App.get_running_app()
+            if app is not None:
+                Clock.schedule_once(
+                    lambda dt: app._show_toast(
+                        _tr('Hold the button to record')), 0)
             return
         self._recording = False
         self._pending_rerecord = False
         self._stop_native_recording()
-        # Write filename into LIFT XML
-        if self._audio_path and os.path.exists(self._audio_path):
+        self._record_started_at = None
+        # Post-stop file-size validation. A successful stop() can
+        # still leave behind a zero-byte or near-empty file on flaky
+        # MTK HAL builds — the encoder discarded everything and we'd
+        # otherwise advertise the basename into the LIFT. Only runs
+        # on Android filesystem paths; SAF content URIs would need a
+        # ContentResolver stat and are skipped (scoped storage is on
+        # newer Android where MediaRecorder is more reliable anyway).
+        if (platform == 'android'
+                and self._record_ok
+                and self._audio_path
+                and not self.db.is_uri
+                and self._record_profile_key):
+            try:
+                size = os.path.getsize(self._audio_path)
+            except OSError as ex:
+                print(f'[record] post-stop stat failed: {ex}')
+                size = 0
+            profile = self._AUDIO_PROFILES.get(self._record_profile_key)
+            if profile:
+                expected = held * profile['bitrate'] / 8
+                if size < expected * self._POST_STOP_MIN_RATIO:
+                    print(f'[record] post-stop validation failed: '
+                          f'{size} bytes for {held:.2f}s '
+                          f'(expected ~{int(expected)})')
+                    self._record_ok = False
+                    try:
+                        os.remove(self._audio_path)
+                    except OSError:
+                        pass
+                    self._degrade_profile(self._record_profile_key)
+        # Write filename into LIFT XML only if both start and stop
+        # ran clean. _record_ok flips False on a stop exception so a
+        # half-finalised M4A (no moov atom, etc.) does not get
+        # advertised as the entry's canonical recording.
+        if self._audio_path and self._record_ok:
             filename = os.path.basename(self._audio_path)
             self.db.set_audio(self.current['guid'], filename)
             self.current['audio_filename'] = filename
-        self._notify_ui()
-        # Auto-play after a short delay
-        Clock.schedule_once(lambda dt: self.play_audio(), 0.5)
+            self._dirty = True
+        Clock.schedule_once(lambda dt: self._notify_ui(), 0)
+        if self._record_ok:
+            Clock.schedule_once(lambda dt: self.play_audio(), 0.5)
 
     def play_audio(self):
-        if self._playing:
-            return
+        # Defensive: tear down any stale player from a previous tap
+        # before starting a new one. The duration-based _playing reset
+        # timer is best-effort; an unfired timer (or a timer whose
+        # MediaPlayer never advanced past prepare) can leave the flag
+        # stuck and silently swallow subsequent taps. Stopping here
+        # ensures every fresh tap gets a clean MediaPlayer regardless
+        # of what state the prior one was in.
+        self._stop_active_player()
         e = self.current
         if not e or not e.get('audio_filename'):
             return
         filename = e['audio_filename']
-        # Check audio/ subdir first, then the LIFT file's own directory
-        for search_dir in (self.db.audio_dir, self.db.dir):
-            candidate = os.path.join(search_dir, filename)
-            if os.path.exists(candidate):
-                path = candidate
-                break
+        # Resolve to either a content:// URI (URI projects) or a
+        # filesystem path (desktop / iOS / legacy Android). On URI
+        # projects we don't probe existence — let the resolver fail
+        # cleanly if the daemon hasn't materialised the file yet.
+        if self.db.is_uri:
+            path = self.db.audio_target(filename)
         else:
-            print(f'Audio file not found: {filename}')
-            return
+            for search_dir in (self.db.audio_dir, self.db.dir):
+                candidate = os.path.join(search_dir, filename)
+                if os.path.exists(candidate):
+                    path = candidate
+                    break
+            else:
+                print(f'Audio file not found: {filename}')
+                return
 
         self._playing = True
 
@@ -3617,7 +3634,14 @@ class RecorderController:
                 from jnius import autoclass
                 MediaPlayer = autoclass('android.media.MediaPlayer')
                 mp = MediaPlayer()
-                mp.setDataSource(path)
+                if self.db.is_uri:
+                    Uri = autoclass('android.net.Uri')
+                    PythonActivity = autoclass(
+                        'org.kivy.android.PythonActivity')
+                    mp.setDataSource(
+                        PythonActivity.mActivity, Uri.parse(path))
+                else:
+                    mp.setDataSource(path)
                 mp.prepare()
                 mp.start()
                 self._player = mp  # keep reference alive
@@ -3688,25 +3712,63 @@ class RecorderController:
         self._pending_rerecord = True
         self._notify_ui()
 
+    def _stop_active_player(self):
+        """Release any in-flight MediaPlayer / AVAudioPlayer / SDL2
+        Sound so a fresh play_audio call starts from a known state.
+        Idempotent; safe to call when nothing is playing."""
+        player = getattr(self, '_player', None)
+        if player is not None:
+            try:
+                # Android MediaPlayer + iOS AVAudioPlayer both have
+                # stop()/release()-or-equivalent; either ignore
+                # exceptions (stale handles, already-released).
+                if hasattr(player, 'release'):
+                    try:
+                        player.stop()
+                    except Exception:
+                        pass
+                    player.release()
+                elif hasattr(player, 'stop'):
+                    player.stop()
+            except Exception:
+                pass
+            self._player = None
+        sound = getattr(self, '_sound', None)
+        if sound is not None:
+            try:
+                sound.stop()
+            except Exception:
+                pass
+            try:
+                sound.unload()
+            except Exception:
+                pass
+            self._sound = None
+        self._playing = False
+
     def _make_audio_path(self):
         e = self.current
-        audio_dir = os.path.join(self.db.dir, 'audio')
-        os.makedirs(audio_dir, exist_ok=True)
-        # Filename: {cawl}_{guid}_{en_gloss}.wav
+        # Filename: {cawl}_{guid}_{en_gloss}.wav (extension is replaced
+        # by the platform-specific recorder: .m4a on Android, .flac on
+        # iOS, .wav on desktop).
         cawl = e.get('cawl', '0000')
         guid = e.get('guid', 'unknown')[:8]
         gloss = e.get('glosses', {}).get('en', [''])[0]
         safe_gloss = ''.join(c if c.isalnum() or c in '_ ' else '_' for c in gloss)[:24].strip().replace(' ', '_')
         filename = f'{cawl}_{guid}_{safe_gloss}.wav'
-        return os.path.join(audio_dir, filename)
+        if not self.db.is_uri:
+            os.makedirs(self.db.audio_dir, exist_ok=True)
+        return self.db.audio_target(filename)
 
     def _start_native_recording(self, path):
+        """Returns the actual on-disk path/URI used (extension may
+        differ from ``path`` per platform). Raises on failure so
+        ``start_recording`` can keep recorder state in sync."""
         if platform == 'android':
-            self._start_android_recording(path)
-        elif platform == 'ios':
-            self._start_ios_recording(path)
-        else:
-            self._start_desktop_recording(path)
+            return self._start_android_recording(path)
+        if platform == 'ios':
+            return self._start_ios_recording(path)
+        return self._start_desktop_recording(path)
 
     def _stop_native_recording(self):
         if platform == 'android':
@@ -3718,70 +3780,231 @@ class RecorderController:
 
     # Android: use MediaRecorder via pyjnius for maximum quality (PCM WAV)
     def _start_android_recording(self, path):
-        try:
-            from jnius import autoclass
-            MediaRecorder = autoclass('android.media.MediaRecorder')
-            AudioSource = autoclass('android.media.MediaRecorder$AudioSource')
-            OutputFormat = autoclass('android.media.MediaRecorder$OutputFormat')
-            AudioEncoder = autoclass('android.media.MediaRecorder$AudioEncoder')
+        from jnius import autoclass
+        MediaRecorder = autoclass('android.media.MediaRecorder')
+        AudioSource = autoclass('android.media.MediaRecorder$AudioSource')
+        OutputFormat = autoclass('android.media.MediaRecorder$OutputFormat')
+        AudioEncoder = autoclass('android.media.MediaRecorder$AudioEncoder')
 
-            mr = MediaRecorder()
+        # Resolve the audio-quality profile up front — both the
+        # container (MPEG_4 → .m4a, AAC_ADTS → .aac) and the
+        # bitrate/sample-rate flow from here. See _AUDIO_PROFILES
+        # for the full table.
+        prof_key = (peer_pref('audio_quality')
+                    or self._DEFAULT_AUDIO_PROFILE)
+        # Clamp to the auto-degradation ceiling if one has been pinned
+        # by a past failure on this device. The user can still pick a
+        # higher value in the picker, but the ceiling wins here — that
+        # request was for a profile this device already proved it
+        # can't handle.
+        ceiling = peer_pref('audio_quality_ceiling')
+        if ceiling and ceiling in self._PROFILE_LADDER \
+                and prof_key in self._PROFILE_LADDER:
+            if (self._PROFILE_LADDER.index(prof_key)
+                    < self._PROFILE_LADDER.index(ceiling)):
+                print(f'[record] ceiling clamp: {prof_key} → {ceiling}')
+                prof_key = ceiling
+        # Stash for the failure handlers so they know what to degrade.
+        self._record_profile_key = prof_key
+        profile = self._AUDIO_PROFILES.get(
+            prof_key,
+            self._AUDIO_PROFILES[self._DEFAULT_AUDIO_PROFILE])
+        print(f'[record] audio profile: {prof_key} '
+              f'(bitrate={profile["bitrate"]} '
+              f'sample_rate={profile["sample_rate"]} '
+              f'container={profile["output_format"]})')
+        # Path-extension swap follows the profile: .m4a for MPEG_4,
+        # .aac for AAC_ADTS. Basename sits at the end of both a
+        # filesystem path and a content:// URI, so str.replace works.
+        ext = profile['ext']
+        aac_path = path.replace('.wav', ext)
+        mr = MediaRecorder()
+        pfd = None
+        try:
             mr.setAudioSource(AudioSource.MIC)
-            # MPEG_4/AAC gives broadest compatibility and highest quality on Android
-            mr.setOutputFormat(OutputFormat.MPEG_4)
-            # Replace extension for AAC output
-            aac_path = path.replace('.wav', '.m4a')
-            mr.setOutputFile(aac_path)
+            mr.setOutputFormat(
+                getattr(OutputFormat, profile['output_format']))
+            if self.db.is_uri:
+                # ContentResolver-acquired ParcelFileDescriptor: hand
+                # the underlying Java FileDescriptor straight to
+                # MediaRecorder. We must NOT detachFd() here — the pfd
+                # owns the fd lifetime and we close it after release.
+                Uri = autoclass('android.net.Uri')
+                PythonActivity = autoclass(
+                    'org.kivy.android.PythonActivity')
+                ctx = PythonActivity.mActivity
+                resolver = ctx.getContentResolver()
+                pfd = resolver.openFileDescriptor(Uri.parse(aac_path), 'w')
+                if pfd is None:
+                    raise IOError(
+                        f'openFileDescriptor returned null for {aac_path!r}')
+                mr.setOutputFile(pfd.getFileDescriptor())
+            else:
+                mr.setOutputFile(aac_path)
             mr.setAudioEncoder(AudioEncoder.AAC)
-            mr.setAudioEncodingBitRate(256000)   # 256 kbps
-            mr.setAudioSamplingRate(48000)        # 48 kHz
-            mr.setAudioChannels(1)                # mono for voice
+            mr.setAudioEncodingBitRate(profile['bitrate'])
+            mr.setAudioSamplingRate(profile['sample_rate'])
+            mr.setAudioChannels(1)
+            # 60-second ceiling per recording. Bounds the worst-case
+            # encoder memory footprint and gives the user a natural
+            # "max duration" stopping point on a held button.
+            mr.setMaxDuration(60_000)
             mr.prepare()
             mr.start()
-            self._recorder = mr
-            self._audio_path = aac_path
-        except Exception as ex:
-            print(f'Android recording error: {ex}')
+            # Keep the screen on while recording — a long hold with
+            # no other touch events looks like idle to aggressive
+            # OEM power-management (HiOS, MIUI, etc.); the
+            # WindowManager flag pins the activity foreground so the
+            # MediaRecorder surface doesn't get frozen mid-capture.
+            #
+            # window.addFlags mutates the view hierarchy, which
+            # Android only permits from the Activity UI thread
+            # (SDLActivity on p4a). Clock.schedule_once marshals to
+            # the *Kivy* main thread (SDLThread) — a different
+            # thread that still raises CalledFromWrongThread-
+            # Exception when it touches Window. Use p4a's
+            # android.runnable.run_on_ui_thread to dispatch to the
+            # actual UI thread. Pre-resolving LayoutParams /
+            # Activity / Window here keeps the UI-thread closure
+            # to two getters + one call.
+            try:
+                _WMLP = autoclass(
+                    'android.view.WindowManager$LayoutParams')
+                PythonActivity = autoclass(
+                    'org.kivy.android.PythonActivity')
+                _window = PythonActivity.mActivity.getWindow()
+                # FLAG_KEEP_SCREEN_ON = 0x80; using the constant via
+                # autoclass instead of the magic number so future
+                # API renames don't silently no-op.
+                _flag = _WMLP.FLAG_KEEP_SCREEN_ON
+
+                def _add_keep_screen_on(w=_window, f=_flag):
+                    try:
+                        w.addFlags(f)
+                    except Exception as ex:
+                        print(f'[record] KEEP_SCREEN_ON add (UI '
+                              f'thread) failed: {ex}')
+                try:
+                    from android.runnable import run_on_ui_thread
+                    run_on_ui_thread(_add_keep_screen_on)()
+                except ImportError:
+                    # Non-p4a environment shouldn't reach here
+                    # (the outer block is Android-only), but fall
+                    # back to a direct call for safety.
+                    _add_keep_screen_on()
+            except Exception as ex:
+                # Best-effort; never fail a record because the
+                # power-management hint didn't take.
+                print(f'[record] KEEP_SCREEN_ON setup failed: {ex}')
+        except Exception:
+            try:
+                mr.release()
+            except Exception:
+                pass
+            if pfd is not None:
+                try:
+                    pfd.close()
+                except Exception:
+                    pass
+            raise
+        self._recorder = mr
+        self._record_pfd = pfd
+        return aac_path
 
     def _stop_android_recording(self):
         if self._recorder:
             try:
                 self._recorder.stop()
-                self._recorder.release()
             except Exception as ex:
-                print(f'Android stop error: {ex}')
+                # IllegalStateException here typically means the M4A
+                # has no moov atom — file is unplayable (tap-not-hold,
+                # immediate stop after start, etc.). Don't let
+                # stop_recording advertise the basename.
+                print(f'Android stop() error: {ex}')
+                self._record_ok = False
+                # Stop-time wedges are exactly the MTK HAL failure
+                # mode the ladder exists for. Degrade so the next
+                # attempt avoids the same profile.
+                self._degrade_profile(self._record_profile_key)
             finally:
+                # release() is the cleanup pair to start() — it must
+                # run regardless of whether stop() threw. A wedged
+                # MediaRecorder left un-released holds the mic + a
+                # native buffer until GC; on slow MTK chips this has
+                # been observed to wedge subsequent record attempts.
+                # release() can itself throw on a sufficiently bad
+                # state — defend so the exception doesn't propagate
+                # up and mask whatever stop() raised.
+                try:
+                    self._recorder.release()
+                except Exception as ex:
+                    print(f'Android release() error: {ex}')
                 self._recorder = None
+        pfd = self._record_pfd
+        if pfd is not None:
+            try:
+                pfd.close()
+            except Exception:
+                pass
+            self._record_pfd = None
+        # Release the KEEP_SCREEN_ON flag set in _start_android_recording.
+        # Must run on the Activity UI thread (SDLActivity), not the Kivy
+        # main thread (SDLThread) — Clock.schedule_once routes to the
+        # latter, which still raises CalledFromWrongThreadException on
+        # window.clearFlags. Use p4a's android.runnable.run_on_ui_thread
+        # to marshal to the real UI thread. No-op if start failed before
+        # addFlags ran.
+        try:
+            from jnius import autoclass
+            _WMLP = autoclass('android.view.WindowManager$LayoutParams')
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            window = PythonActivity.mActivity.getWindow()
+            _flag = _WMLP.FLAG_KEEP_SCREEN_ON
+
+            def _clear_keep_screen_on(w=window, f=_flag):
+                try:
+                    w.clearFlags(f)
+                except Exception as ex:
+                    print(f'[record] KEEP_SCREEN_ON clear (UI '
+                          f'thread) failed: {ex}')
+            try:
+                from android.runnable import run_on_ui_thread
+                run_on_ui_thread(_clear_keep_screen_on)()
+            except ImportError:
+                _clear_keep_screen_on()
+        except Exception as ex:
+            print(f'[record] KEEP_SCREEN_ON clear setup failed: {ex}')
 
     # iOS: use AVAudioRecorder via pyobjus for maximum quality
     def _start_ios_recording(self, path):
-        try:
-            from pyobjus import autoclass, objc_dict
-            from pyobjus.dylib_manager import load_framework
-            load_framework('/System/Library/Frameworks/AVFoundation.framework')
-            NSURL = autoclass('NSURL')
-            AVAudioRecorder = autoclass('AVAudioRecorder')
-            AVFormatIDKey = 'AVFormatIDKey'
-            AVSampleRateKey = 'AVSampleRateKey'
-            AVNumberOfChannelsKey = 'AVNumberOfChannelsKey'
-            AVEncoderAudioQualityKey = 'AVEncoderAudioQualityKey'
-            AVAudioQualityMax = 127
+        from pyobjus import autoclass, objc_dict
+        from pyobjus.dylib_manager import load_framework
+        load_framework('/System/Library/Frameworks/AVFoundation.framework')
+        NSURL = autoclass('NSURL')
+        AVAudioRecorder = autoclass('AVAudioRecorder')
+        AVFormatIDKey = 'AVFormatIDKey'
+        AVSampleRateKey = 'AVSampleRateKey'
+        AVNumberOfChannelsKey = 'AVNumberOfChannelsKey'
+        AVEncoderAudioQualityKey = 'AVEncoderAudioQualityKey'
+        AVAudioQualityMax = 127
 
-            # Record as FLAC for lossless quality
-            flac_path = path.replace('.wav', '.flac')
-            url = NSURL.fileURLWithPath_(flac_path)
-            settings = objc_dict({
-                AVFormatIDKey: 1718378851,  # kAudioFormatFLAC
-                AVSampleRateKey: 48000.0,
-                AVNumberOfChannelsKey: 1,
-                AVEncoderAudioQualityKey: AVAudioQualityMax,
-            })
-            recorder, err = AVAudioRecorder.alloc().initWithURL_settings_error_(url, settings, None)
-            recorder.record()
-            self._recorder = recorder
-            self._audio_path = flac_path
-        except Exception as ex:
-            print(f'iOS recording error: {ex}')
+        # Record as FLAC for lossless quality
+        flac_path = path.replace('.wav', '.flac')
+        url = NSURL.fileURLWithPath_(flac_path)
+        settings = objc_dict({
+            AVFormatIDKey: 1718378851,  # kAudioFormatFLAC
+            AVSampleRateKey: 48000.0,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderAudioQualityKey: AVAudioQualityMax,
+        })
+        recorder, err = AVAudioRecorder.alloc().initWithURL_settings_error_(
+            url, settings, None)
+        if recorder is None:
+            raise RuntimeError(f'AVAudioRecorder init failed: {err}')
+        if not recorder.record():
+            raise RuntimeError('AVAudioRecorder.record() returned NO')
+        self._recorder = recorder
+        return flac_path
 
     def _stop_ios_recording(self):
         if self._recorder:
@@ -3789,29 +4012,35 @@ class RecorderController:
                 self._recorder.stop()
             except Exception as ex:
                 print(f'iOS stop error: {ex}')
+                self._record_ok = False
             finally:
                 self._recorder = None
 
     # Desktop fallback: sounddevice → WAV (for development/testing)
     def _start_desktop_recording(self, path):
+        import sounddevice as sd
+        self._desktop_frames = []
+        self._desktop_samplerate = 48000
+
+        def callback(indata, frames, time, status):
+            self._desktop_frames.append(indata.copy())
+
+        stream = sd.InputStream(
+            samplerate=self._desktop_samplerate,
+            channels=1,
+            dtype='int16',
+            callback=callback,
+        )
         try:
-            import sounddevice as sd
-            import numpy as np
-            self._desktop_frames = []
-            self._desktop_samplerate = 48000
-
-            def callback(indata, frames, time, status):
-                self._desktop_frames.append(indata.copy())
-
-            self._desktop_stream = sd.InputStream(
-                samplerate=self._desktop_samplerate,
-                channels=1,
-                dtype='int16',
-                callback=callback,
-            )
-            self._desktop_stream.start()
-        except Exception as ex:
-            print(f'Desktop recording error: {ex}')
+            stream.start()
+        except Exception:
+            try:
+                stream.close()
+            except Exception:
+                pass
+            raise
+        self._desktop_stream = stream
+        return path
 
     def _stop_desktop_recording(self):
         try:
@@ -3819,11 +4048,18 @@ class RecorderController:
             import numpy as np
             self._desktop_stream.stop()
             self._desktop_stream.close()
-            if self._desktop_frames:
-                data = np.concatenate(self._desktop_frames, axis=0)
-                sf.write(self._audio_path, data, self._desktop_samplerate, subtype='PCM_16')
+            if not self._desktop_frames:
+                # No samples were captured (start raced past stop, or
+                # the input device produced nothing). Don't write a
+                # zero-byte file and don't advertise a basename.
+                self._record_ok = False
+                return
+            data = np.concatenate(self._desktop_frames, axis=0)
+            sf.write(self._audio_path, data, self._desktop_samplerate,
+                     subtype='PCM_16')
         except Exception as ex:
             print(f'Desktop stop error: {ex}')
+            self._record_ok = False
 
     # ── UI notification ────────────────────────────────────────────────────────
 
@@ -3836,14 +4072,22 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.21.3'
+__version__ = '1.46.39'
 
 
 class LIFTRecorderApp(App):
     title = APP_NAME
     subtitle = StringProperty(_tr(APP_TAGLINE))
     icon = APP_ICON
-    version_string = StringProperty(f'version {__version__}')
+    # ConfigScreen top bar shows what THIS APK is shipping: the
+    # recorder app version plus the azt_collab_client snapshot baked
+    # in at build time. The daemon settings UI shows its own APK's
+    # equivalents (server APK's daemon + its bundled client); cross-
+    # comparison is by user inspection of both screens. We don't
+    # round-trip to the daemon for version info here.
+    version_string = StringProperty(
+        f'v{__version__} · '
+        f'client {azt_collab_client.__version__}')
     recorder: RecorderController = None
     config_screen: ConfigScreen = None
 
@@ -3852,74 +4096,167 @@ class LIFTRecorderApp(App):
     def _tr(msg):
         return _tr(msg)
 
-    # ── Project discovery ────────────────────────────────────────────────────
-
-    def list_projects(self):
-        """Return [(display_name, lift_path), ...] for all projects."""
-        projects_dir = os.path.join(self.user_data_dir, 'projects')
-        results = []
-        if os.path.isdir(projects_dir):
-            for name in sorted(os.listdir(projects_dir)):
-                d = os.path.join(projects_dir, name)
-                if not os.path.isdir(d):
-                    continue
-                # Find .lift files in this project dir
-                lifts = [f for f in os.listdir(d) if f.endswith('.lift')]
-                if lifts:
-                    # Prefer file matching dir name, else first alphabetically
-                    match = f'{name}.lift'
-                    lift = match if match in lifts else sorted(lifts)[0]
-                    path = os.path.join(d, lift)
-                    if os.path.getsize(path) > 50:
-                        results.append((name, path))
-        # Also check last_lift if it's outside projects/
-        prefs = self._load_prefs()
-        last = prefs.get('last_lift', '')
-        if last and os.path.isfile(last) and os.path.getsize(last) > 50:
-            if not any(p == last for _, p in results):
-                display = os.path.basename(os.path.dirname(last)) or os.path.basename(last)
-                results.append((display, last))
-        return results
-
-    # ── Preferences (last used file) ──────────────────────────────────────────
+    # ── Preferences ──────────────────────────────────────────────────────────
+    # Live peer-shared UI prefs (theme, show_past_work, rec_task,
+    # cawl_filter, gloss_langs) live in $AZT_HOME/config.json via
+    # azt_collab_client.peer_pref / set_peer_pref. The committer name
+    # lives there too via get_contributor / set_contributor.
+    # Daemon-owned state (project langcode, last_project, credentials,
+    # CAWL image_repo) is read on demand from the daemon — no peer-side
+    # mirror; see the no-daemon-owned-caches rule. The legacy peer-
+    # private prefs.json under user_data_dir is kept readable for one-
+    # shot migration only — see _migrate_prefs_to_suite_store.
 
     @property
     def _prefs_path(self):
         return os.path.join(self.user_data_dir, 'prefs.json')
 
-    def _save_prefs(self, lift_path):
-        prefs = self._load_prefs()
-        prefs['last_lift'] = lift_path
-        self._save_prefs_dict(prefs)
-
-    def _save_prefs_dict(self, prefs):
-        import json
-        try:
-            os.makedirs(self.user_data_dir, exist_ok=True)
-            with open(self._prefs_path, 'w') as f:
-                json.dump(prefs, f)
-        except Exception as ex:
-            print(f'Prefs save error: {ex}')
-
-    def _load_prefs(self):
+    def _load_legacy_prefs(self):
         import json
         try:
             with open(self._prefs_path) as f:
-                return json.load(f)
-        except Exception:
+                return json.load(f) or {}
+        except (FileNotFoundError, ValueError):
             return {}
+        except Exception as ex:
+            print(f'Legacy prefs read error: {ex}')
+            return {}
+
+    def _write_legacy_prefs(self, prefs):
+        """Write back to prefs.json — called only by the migration
+        path to drain keys after they've moved to the suite store."""
+        import json
+        try:
+            os.makedirs(self.user_data_dir, exist_ok=True)
+            tmp = self._prefs_path + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(prefs, f)
+            os.replace(tmp, self._prefs_path)
+        except Exception as ex:
+            print(f'Legacy prefs write error: {ex}')
+
+    def _migrate_prefs_to_suite_store(self):
+        """Drain the legacy peer-private prefs.json into $AZT_HOME/config.json
+        via azt_collab_client. Idempotent: keys already present in the
+        suite store are left alone (a sister app that ran first wins).
+        After drain, the keys are popped from prefs.json so subsequent
+        launches do nothing — no daemon contact, no repeated work."""
+        legacy = self._load_legacy_prefs()
+        if not legacy:
+            return
+        moved = []
+        # ui_language and last_lift were drained in 1.30.0 / 1.33.0; if
+        # any old install still has them, finish the job here.
+        legacy_lang = legacy.pop('ui_language', None)
+        if legacy_lang:
+            set_language(legacy_lang)
+            moved.append('ui_language')
+        if legacy.pop('last_lift', None) is not None:
+            moved.append('last_lift (dropped)')
+        # vernlang, collab_langcode, and image_repo were peer-side
+        # caches of daemon-owned data; 1.41.3 dropped all three. The
+        # daemon's projects.json is now the only source of truth for
+        # the project langcode, and Project.cawl_image_repo is the
+        # only source for the CAWL image repo — see the no-daemon-
+        # owned-caches rule.
+        if legacy.pop('vernlang', None) is not None:
+            moved.append('vernlang (dropped)')
+        if legacy.pop('collab_langcode', None) is not None:
+            moved.append('collab_langcode (dropped)')
+        if legacy.pop('image_repo', None) is not None:
+            moved.append('image_repo (dropped)')
+        # Committer name has a dedicated suite endpoint.
+        if 'collab_name' in legacy:
+            try:
+                from azt_collab_client import get_contributor, set_contributor
+                value = legacy.pop('collab_name')
+                if value and not get_contributor():
+                    set_contributor(value)
+                moved.append('collab_name -> contributor')
+            except Exception as ex:
+                print(f'[migrate] collab_name failed: {ex}')
+        # Generic peer-shared keys.
+        for key in ('theme', 'show_past_work', 'rec_task'):
+            if key in legacy:
+                value = legacy.pop(key)
+                if peer_pref(key) is None and value not in ('', None):
+                    set_peer_pref(key, value)
+                moved.append(key)
+        # Drop any vernlang / collab_langcode / image_repo entries
+        # that an earlier release wrote into the suite store. The keys
+        # are no longer consulted; clearing them keeps stale values
+        # from confusing an inspector reading config.json.
+        for stale in ('vernlang', 'collab_langcode', 'image_repo'):
+            if peer_pref(stale) is not None:
+                set_peer_pref(stale, None)
+                moved.append(f'{stale} (suite-store drop)')
+        if moved:
+            self._write_legacy_prefs(legacy)
+            print(f'[migrate] prefs.json -> $AZT_HOME/config.json: {moved}')
 
     # ── App lifecycle ─────────────────────────────────────────────────────────
 
     def build(self):
         try:
-            # Apply saved theme and language before KV is parsed
-            prefs = self._load_prefs()
-            theme.set_theme(prefs.get('theme', 'Ocean'))
-            set_language(prefs.get('ui_language', 'en'))
+            # Detect device RAM tier once at startup. Used to gate
+            # prewarm and to size the Kivy image cache (#3 + #5 of
+            # the "be eager when you have room to" policy). Float
+            # MB; 0 on non-Android (treated as "plenty"). Cached on
+            # the app so other heuristics can read it.
+            self._total_ram_mb = self._sample_total_ram_mb()
+            # #3 Kivy image cache size — pick a limit proportional
+            # to device memory. Defaults are Kivy's (large); on tight
+            # devices we cap to ~10 decoded images, which is plenty
+            # for one-at-a-time entry display without keeping a
+            # large LRU of textures alive.
+            try:
+                from kivy.cache import Cache
+                if 0 < self._total_ram_mb <= 3072:
+                    Cache.register(
+                        'kv.loader', limit=10, timeout=60)
+                    print(f'[low-power] image cache limit=10 '
+                          f'(total RAM {self._total_ram_mb} MB)')
+                elif 0 < self._total_ram_mb <= 6144:
+                    Cache.register(
+                        'kv.loader', limit=25, timeout=120)
+            except Exception as ex:
+                print(f'[low-power] image cache size set failed: {ex}')
+            # #5 Boot prewarm — auto-skip on tight-RAM devices.
+            # Prewarm overlaps daemon spawn with Kivy init but burns
+            # ~30MB of native memory during the splash; on a 4GB
+            # device under zram pressure that's the worst possible
+            # window. Threshold: skip if total RAM ≤ 3GB.
+            # Toggleable for measurement runs via
+            # $AZT_HOME/_no_prewarm sentinel or AZT_BOOT_PREWARM=0
+            # (handled inside prewarm() itself).
+            try:
+                if 0 < self._total_ram_mb <= 3072:
+                    print(f'[prewarm] skipped — low-RAM device '
+                          f'({self._total_ram_mb} MB)')
+                else:
+                    from azt_collab_client.ui.bootstrap import prewarm
+                    prewarm()
+            except Exception as ex:
+                print(f'[prewarm] {ex}', file=sys.stderr)
+            # Drain the legacy peer-private prefs.json into the
+            # suite-wide $AZT_HOME/config.json. Idempotent — keys
+            # already in the suite store are left alone, so a sister
+            # app that ran first wins. Apply *before* reading the theme
+            # below so a fresh upgrade still finds the user's choice.
+            self._migrate_prefs_to_suite_store()
+            theme.set_theme(peer_pref('theme', 'Ocean') or 'Ocean')
             self.subtitle = _tr(APP_TAGLINE)
             Builder.load_string(KV)
             self.root = RootScreen()
+            # Move any legacy credential keys out of prefs.json into
+            # $AZT_HOME/credentials.json. Idempotent.
+            try:
+                from azt_collab_client import migrate_from_prefs
+                summary = migrate_from_prefs(self._prefs_path)
+                if summary.get('migrated'):
+                    print(f'[migrate] credentials: {summary}')
+            except Exception as ex:
+                print(f'[migrate] error: {ex}')
             return self.root
         except Exception:
             traceback.print_exc()
@@ -3929,6 +4266,11 @@ class LIFTRecorderApp(App):
         try:
             sm = self.root.ids.sm
             self.config_screen = sm.get_screen('config')
+            # CAWL Stage 2: per-session tmp dir for image pull-throughs
+            # (durable cache moved to the daemon); one-shot purge of any
+            # leftover pre-1.41.4 durable cache at user_data_dir/image_cache.
+            self._init_session_image_cache()
+            self._purge_legacy_image_cache()
             # Bind Android activity result listener
             if platform == 'android':
                 try:
@@ -3938,96 +4280,287 @@ class LIFTRecorderApp(App):
                 except Exception as ex:
                     print(f'[app] failed to bind activity result: {ex}')
                     traceback.print_exc()
+                # Force first-time autoclass lookups onto the main
+                # thread before any worker thread can race them. See
+                # _warm_jnius_classes.
+                self._warm_jnius_classes()
+                # Diagnostic: log which presplash variant Android
+                # picked. Useful for confirming the multi-density
+                # add_resources wiring landed in the APK and that
+                # the device's DPI bucket maps to a real variant
+                # rather than the .jpg fallback. Shared helper per
+                # CLIENT_INTEGRATION.md § "Diagnostic logging —
+                # verify which bucket landed".
+                from azt_collab_client.lowpower import (
+                    log_presplash_variant)
+                log_presplash_variant(tag='presplash')
+            # The AZTCollabProvider lives in the standalone server APK
+            # (org.atoznback.aztcollab). Peers do NOT install provider
+            # callbacks here — they reach the provider through the
+            # azt_collab_client transport instead.
             # Handle Android back button / ESC key
             Window.bind(on_keyboard=self._on_back_button)
-            # Auto-load last used LIFT file if it still exists
-            prefs = self._load_prefs()
-            last = prefs.get('last_lift', '')
-            if last and os.path.isfile(last) and os.path.getsize(last) > 50:
-                Clock.schedule_once(lambda dt: self.load_lift(last), 0.3)
+            # #6 Touch-time tracking for prefetch-poll throttling.
+            # While the user is actively swiping/tapping, the
+            # cache-status poll (1Hz during prefetch) is wasted —
+            # the user wouldn't see indicator changes mid-gesture
+            # anyway. _tick_cache_status reads _last_touch_time and
+            # skips a tick if it's < 1s old.
+            self._last_touch_time = 0.0
+            Window.bind(on_touch_down=self._on_touch_record)
+            # One-shot install/update workflow. bootstrap() runs the
+            # server-APK install/update prompts and the recorder's own
+            # self-update probe in sequence; on Android only, no-op
+            # everywhere else. Schedule for next frame so the UI is
+            # up before any popup. See azt_collab_client/CLAUDE.md
+            # § Bootstrap and azt_collab_client/ui/bootstrap.py.
+            #
+            # Auto-load runs as bootstrap's on_done — client 0.28.5+
+            # only fires on_done when the daemon is reachable, so
+            # the first RPC (last_project) needs no defensive
+            # try/except; if on_done didn't fire, bootstrap is still
+            # parked on its own popup and the user hasn't yet given
+            # us a daemon to talk to.
+            Clock.schedule_once(lambda dt: self._run_bootstrap(), 0)
+            # Periodically refresh the last-sync indicator so background
+            # debounced commits (commit_project from swipes) and the
+            # daemon's scheduler-drain pushes become visible
+            # without waiting for the next manual sync. project_status
+            # is a single GET against the daemon — cheap. Retained so
+            # on_pause / on_resume can suspend the polling while the
+            # app is backgrounded (#4 of the low-power policy).
+            # § 17c Rule 4 — 5-15 s is the right range for the active
+            # project's sync badge; 10 s keeps the daemon-driven push
+            # visible promptly without burning RPCs.
+            self._sync_status_event = Clock.schedule_interval(
+                lambda dt: self._update_sync_status(), 10)
         except Exception:
             traceback.print_exc()
             raise
+
+    # ── Android lifecycle ────────────────────────────────────────────────────
+    # Without on_pause+on_resume, Kivy treats backgrounding as on_stop and the
+    # OS may kill us before MediaRecorder.stop() runs. That leaves the M4A
+    # without a moov atom — the file exists but is unplayable on next launch.
+    # Returning True from on_pause is the documented contract that says "I
+    # want to be paused, not stopped"; defining on_resume is required when
+    # on_pause is defined or Kivy still routes the event as on_stop.
+
+    def on_pause(self):
+        self._finalise_active_recording('on_pause')
+        # #4: suspend the sync-status poll while backgrounded.
+        # No reason to round-trip the daemon every 10s when the
+        # user can't see the result. Resumed in on_resume.
+        ev = getattr(self, '_sync_status_event', None)
+        if ev:
+            try:
+                ev.cancel()
+            except Exception:
+                pass
+            self._sync_status_event = None
+        return True
+
+    def on_resume(self):
+        # Project-switch reconciliation per CLIENT_INTEGRATION.md
+        # § 14a. While we were paused the user may have switched
+        # projects via the daemon settings UI's "Switch project"
+        # button (or any other path landing in
+        # daemon.set_last_langcode). last_project() is the daemon-
+        # owned source of truth; if it differs from our in-memory
+        # _current_langcode, reload before re-arming any polls so
+        # the sync-status indicator that fires next tick reflects
+        # the new project, not the old one.
+        try:
+            from azt_collab_client import last_project
+            server_langcode = (last_project() or '').strip()
+        except Exception as ex:
+            # Transport failure — leave current view alone per
+            # contract. Daemon could be down or a URI grant stale.
+            print(f'[on_resume] last_project() failed: {ex}')
+            server_langcode = ''
+        if server_langcode:
+            peer_langcode = (
+                getattr(self, '_current_langcode', '') or '').strip()
+            if server_langcode != peer_langcode:
+                print(f'[on_resume] project switched externally: '
+                      f'peer={peer_langcode!r} → '
+                      f'server={server_langcode!r}; reloading')
+                # _auto_load_last_project pulls last_project() itself
+                # and runs the full open_project → load_lift path —
+                # the same code path the initial load uses, which is
+                # what the contract requires ("reuse that path").
+                self._auto_load_last_project()
+        # Re-arm the sync-status poll suspended in on_pause.
+        # Idempotent — if we were never paused, the event will
+        # have stayed alive and we skip.
+        if not getattr(self, '_sync_status_event', None):
+            # § 17c Rule 4 — match the build-time cadence (10 s).
+            self._sync_status_event = Clock.schedule_interval(
+                lambda dt: self._update_sync_status(), 10)
+            # Immediate refresh so the user sees a fresh state on
+            # foreground rather than waiting up to 10s.
+            Clock.schedule_once(
+                lambda dt: self._update_sync_status(), 0)
+        return True
+
+    def on_stop(self):
+        self._finalise_active_recording('on_stop')
+        # Stop the cache-progress polling if it's still running.
+        event = getattr(self, '_cache_status_event', None)
+        if event:
+            try:
+                event.cancel()
+            except Exception:
+                pass
+            self._cache_status_event = None
+        # Best-effort cleanup of the per-session CAWL tmp dir. If the
+        # process is killed before this runs (typical on Android),
+        # the OS reclaims tempfile.gettempdir() eventually; not a
+        # durability concern since nothing here is canonical.
+        tmp_dir = getattr(self, '_session_image_cache_dir', '')
+        if tmp_dir and os.path.isdir(tmp_dir):
+            import shutil
+            try:
+                shutil.rmtree(tmp_dir)
+            except Exception as ex:
+                print(f'[on_stop] tmp cleanup skipped: {ex}')
+
+    def _finalise_active_recording(self, where):
+        if self.recorder and getattr(self.recorder, '_recording', False):
+            try:
+                self.recorder.stop_recording()
+            except Exception as ex:
+                print(f'[{where}] stop_recording failed: {ex}')
+
+    def _warm_jnius_classes(self):
+        """Force first-time autoclass lookups onto the Kivy main thread so
+        worker threads (image-download, picker callback, sync) don't race
+        the documented PyJNI ClassLoader-scope hazard
+        (memory: feedback_pyjnius_threading.md). Once autoclass has cached
+        the proxy on the main thread, worker-thread lookups are safe."""
+        if platform != 'android':
+            return
+        try:
+            from jnius import autoclass
+        except Exception:
+            return
+        for cls in (
+                'android.app.ActivityManager',
+                'android.app.ActivityManager$MemoryInfo',
+                'android.content.Context',
+                'android.content.Intent',
+                'android.media.MediaPlayer',
+                'android.media.MediaRecorder',
+                'android.media.MediaRecorder$AudioEncoder',
+                'android.media.MediaRecorder$AudioSource',
+                'android.media.MediaRecorder$OutputFormat',
+                'android.net.ConnectivityManager',
+                'android.net.Uri',
+                'android.os.ParcelFileDescriptor',
+                'android.view.WindowManager$LayoutParams',
+                'java.io.ByteArrayOutputStream',
+                'java.io.FileOutputStream',
+                'org.kivy.android.PythonActivity',
+        ):
+            try:
+                autoclass(cls)
+            except Exception as ex:
+                print(f'[jnius warm] {cls}: {ex}')
+
+    def _auto_load_last_project(self):
+        """Resolve the suite-wide last-opened project's current
+        path/URI via the daemon and load it. Falls through to the
+        picker (start_over) if no project is recorded or the daemon
+        doesn't know it.
+
+        Wired as bootstrap()'s on_done. Client 0.28.5+ guarantees
+        on_done only fires when the daemon is reachable, so the
+        daemon RPCs below (last_project, open_project) need no
+        defensive try/except — if the daemon weren't there,
+        on_done wouldn't have fired and we wouldn't be here."""
+        from azt_collab_client import last_project, open_project
+        langcode = last_project()
+        if not langcode:
+            self.start_over()
+            return
+        project = open_project(langcode)
+        if project is None or not project.lift_path:
+            self.start_over()
+            return
+        # Cache the langcode so _register_current_project doesn't
+        # re-derive — the daemon just told us authoritatively.
+        self._current_langcode = langcode
+        self.load_lift(project.lift_path)
+
+    def _run_bootstrap(self):
+        """Drive the suite-wide install/update workflow.
+
+        Delegates to ``azt_collab_client.ui.bootstrap`` so the
+        server-APK install/update prompts and the recorder's own
+        self-update probe share one canonical implementation across
+        every peer. Status strings land in the collab-screen log so
+        the user can see "Checking installation…", "Downloading
+        45%…", etc.; popups marshal to the UI thread inside the
+        helper. Non-Android hosts no-op (on_done fires immediately).
+
+        on_done is wired to ``_auto_load_last_project`` so the
+        recorder's first daemon-touching RPC only fires once
+        bootstrap has confirmed the daemon is reachable (client
+        0.28.5+ contract). No defensive try/except needed around
+        that RPC — if the daemon weren't there, on_done wouldn't
+        have fired."""
+        from azt_collab_client.ui import bootstrap
+        from appinfo import APP_NAME
+        bootstrap(
+            peer_repo='kent-rasmussen/azt-recorder',
+            peer_version=__version__,
+            # peer_asset_filename omitted — derived at runtime from
+            # the Activity's package name (= aztrecorder.apk). See
+            # azt_collab_client.ui.update.default_asset_filename.
+            peer_display_name=APP_NAME,
+            on_status=self._log_bootstrap_status,
+            on_done=self._auto_load_last_project,
+            on_error=self._log_bootstrap_status,
+            font_name=_FONT_NAME,
+        )
+
+    def _log_bootstrap_status(self, message):
+        """Surface bootstrap progress / errors. Logs to the collab
+        screen's status bar if it's available, and prints to stderr
+        so desktop devs and Android logcat see it too."""
+        print(f'[bootstrap] {message}', file=sys.stderr)
+        try:
+            sm = self.root.ids.sm
+            collab = sm.get_screen('collab')
+            collab._set_log(message)
+        except Exception:
+            pass
+
+    def _on_touch_record(self, window, touch):
+        """Stamp _last_touch_time on every touch_down. Cheap;
+        only used by _tick_cache_status to throttle during user
+        interaction (#6). Returns False so the touch event
+        continues to its real handler."""
+        import time as _time
+        self._last_touch_time = _time.monotonic()
+        return False
 
     def _on_back_button(self, window, key, *args):
         """Handle Android back button (keycode 27) to navigate back."""
         if key != 27:
             return False
         sm = self.root.ids.sm
-        if sm.current == 'welcome':
-            return False  # let the system close the app
         if sm.current == 'recorder':
             return False  # let the system close the app
         elif sm.current in ('config', 'collab'):
             sm.transition = SlideTransition(direction='right')
-            sm.current = 'recorder' if self.recorder else 'welcome'
-        elif sm.current == 'langpicker':
-            sm.transition = SlideTransition(direction='right')
-            sm.current = 'welcome'
+            sm.current = 'recorder'
         elif sm.current == 'imagepicker':
             sm.transition = SlideTransition(direction='right')
             sm.current = 'recorder'
         else:
             return False
         return True
-
-    def open_file(self):
-        if platform == 'android':
-            self._open_file_android()
-        elif platform == 'ios':
-            self._open_file_ios()
-        else:
-            self._open_file_desktop()
-
-    # ── Open from URL ──────────────────────────────────────────────────────────
-
-    def open_url_dialog(self):
-        """Show a dialog where the user can paste a URL to a .lift file."""
-        from kivy.uix.popup import Popup
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.textinput import TextInput
-        from kivy.uix.button import Button
-        from kivy.uix.label import Label
-
-        content = BoxLayout(orientation='vertical', spacing=dp(12), padding=dp(12))
-        content.add_widget(Label(
-            text=_tr('Paste the URL to a .lift file:'),
-            size_hint_y=None, height=dp(30),
-            font_size=sp(14), color=theme.TEXT,
-        ))
-        url_input = TextInput(
-            text='', hint_text='https://example.com/path/to/file.lift',
-            multiline=False, size_hint_y=None, height=dp(44),
-            font_size=sp(14),
-        )
-        content.add_widget(url_input)
-        btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
-        cancel_btn = Button(text=_tr('Cancel'), font_size=sp(14))
-        open_btn = Button(text=_tr('Open'), font_size=sp(14),
-                          background_color=theme.ACCENT)
-        btn_row.add_widget(cancel_btn)
-        btn_row.add_widget(open_btn)
-        content.add_widget(btn_row)
-
-        popup = Popup(
-            title=_tr('Open LIFT from URL'),
-            content=content,
-            size_hint=(0.9, None), height=dp(220),
-            auto_dismiss=True,
-        )
-        cancel_btn.bind(on_release=popup.dismiss)
-        open_btn.bind(on_release=lambda *a: self._do_open_url(
-            url_input.text.strip(), popup))
-        popup.open()
-
-    def _do_open_url(self, url, popup):
-        """Download a .lift file from *url* to user_data_dir and open it."""
-        popup.dismiss()
-        if not url:
-            return
-        import threading
-        threading.Thread(
-            target=self._download_and_open, args=(url,), daemon=True).start()
 
     @staticmethod
     def _ssl_context():
@@ -4062,101 +4595,6 @@ class LIFTRecorderApp(App):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
-
-    @staticmethod
-    def _parse_git_url(url):
-        """If url is a raw GitHub/GitLab file URL, return (clone_url, None).
-        Returns (None, None) if not recognisable as a git-hosted file."""
-        import re
-        # GitHub raw: https://raw.githubusercontent.com/OWNER/REPO/BRANCH/path
-        m = re.match(
-            r'https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/', url)
-        if m:
-            return f'https://github.com/{m.group(1)}/{m.group(2)}.git', None
-        # GitHub blob: https://github.com/OWNER/REPO/blob/BRANCH/path
-        m = re.match(
-            r'https://github\.com/([^/]+)/([^/]+)/blob/', url)
-        if m:
-            return f'https://github.com/{m.group(1)}/{m.group(2)}.git', None
-        # GitLab raw: https://gitlab.com/OWNER/REPO/-/raw/BRANCH/path
-        m = re.match(
-            r'https://gitlab\.com/([^/]+)/([^/]+)/-/raw/', url)
-        if m:
-            return f'https://gitlab.com/{m.group(1)}/{m.group(2)}.git', None
-        return None, None
-
-    def _download_and_open(self, url):
-        """Background: download a .lift file and schedule load on main thread.
-        If the URL points to a file inside a git repo, clone the repo instead."""
-        import urllib.request
-        try:
-            # When creating from template with a vernlang, use it as dir and filename
-            vernlang = getattr(self, '_pending_vernlang', '')
-
-            # Check if URL is from a git repo — clone instead of downloading
-            clone_url, _ = self._parse_git_url(url)
-            if clone_url and not vernlang:
-                # Clone the whole repo
-                repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')
-                dest = os.path.join(self.user_data_dir, 'projects', repo_name)
-                git_user, token = self._get_sync_credentials()
-                from collab import clone_repo
-                lift_path, log = clone_repo(clone_url, dest, git_user, token)
-                if lift_path:
-                    Clock.schedule_once(lambda dt: self.load_lift(lift_path), 0)
-                else:
-                    Clock.schedule_once(
-                        lambda dt: self._show_error(log), 0)
-                return
-
-            if vernlang:
-                project_dir = os.path.join(self.user_data_dir, 'projects', vernlang)
-                os.makedirs(project_dir, exist_ok=True)
-                dest = os.path.join(project_dir, f'{vernlang}.lift')
-                # Pre-fill the language code for publish
-                prefs = self._load_prefs()
-                prefs['collab_langcode'] = vernlang
-                self._save_prefs_dict(prefs)
-            else:
-                filename = url.rstrip('/').split('/')[-1]
-                if not filename.endswith('.lift'):
-                    filename = 'downloaded.lift'
-                name = filename.replace('.lift', '')
-                project_dir = os.path.join(self.user_data_dir, 'projects', name)
-                os.makedirs(project_dir, exist_ok=True)
-                dest = os.path.join(project_dir, filename)
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, context=self._ssl_context()) as resp:
-                content = resp.read()
-            if not content or len(content) < 50:
-                raise RuntimeError(f'Download returned {len(content)} bytes')
-            with open(dest, 'wb') as f:
-                f.write(content)
-            Clock.schedule_once(lambda dt: self.load_lift(dest), 0)
-        except Exception as ex:
-            msg = f'Could not download:\n{ex}'
-            print(f'URL download error: {ex}')
-            Clock.schedule_once(lambda dt: self._dismiss_loading_overlay(), 0)
-            Clock.schedule_once(lambda dt: self._show_error(msg), 0)
-
-    # ── New from SILCAWL template ──────────────────────────────────────────────
-
-    _SILCAWL_URL = ('https://raw.githubusercontent.com/'
-                    'kent-rasmussen/lift_templates/main/SILCAWL.lift')
-
-    def new_from_template(self):
-        """Show language picker first, then download the SILCAWL template."""
-        if not getattr(self, '_pending_vernlang', ''):
-            # First call: navigate to language picker
-            sm = self.root.ids.sm
-            sm.transition = SlideTransition(direction='left')
-            sm.current = 'langpicker'
-            return
-        # Called from LangPickerScreen._on_continue with code set
-        import threading
-        threading.Thread(
-            target=self._download_and_open,
-            args=(self._SILCAWL_URL,), daemon=True).start()
 
     def _show_loading_overlay(self, msg):
         """Show a modal overlay that stays until dismissed."""
@@ -4201,19 +4639,39 @@ class LIFTRecorderApp(App):
             self._loading_overlay = None
             self._loading_detail = None
 
-    def _show_toast(self, msg, duration=1.5):
-        """Show a brief overlay message that auto-dismisses."""
+    def _show_toast(self, msg, duration=None):
+        """Show a brief overlay message that auto-dismisses.
+
+        Width is capped at min(85% of window, dp(320)); the label
+        wraps and the box grows vertically to fit. Duration scales
+        with message length (~25 chars/sec read speed, 1.5s floor,
+        8s cap) so longer status messages (e.g. AUTH_REFRESH_STALE's
+        "...current access expires in N minute(s). Open GitHub
+        Connect and tap Re-authenticate.") get enough time to read.
+        Pass an explicit ``duration`` to override.
+        """
         from kivy.uix.label import Label
         from kivy.uix.modalview import ModalView
+        if duration is None:
+            duration = max(1.5, min(8.0, len(msg) / 25.0))
+        pad = dp(20)
+        box_w = min(Window.width * 0.85, dp(320))
+        lbl = Label(
+            text=msg, font_size=sp(14), font_name=_FONT_NAME,
+            color=theme.TEXT,
+            halign='center', valign='middle',
+            text_size=(box_w - pad, None),
+            size_hint=(None, None),
+        )
+        lbl.texture_update()
+        lbl.size = (box_w, lbl.texture_size[1] + pad)
         view = ModalView(
-            size_hint=(None, None), size=(dp(250), dp(50)),
+            size_hint=(None, None),
+            size=(box_w, max(dp(50), lbl.height)),
             background_color=theme.OVERLAY,
             auto_dismiss=True,
         )
-        view.add_widget(Label(
-            text=msg, font_size=sp(14), font_name=_FONT_NAME,
-            color=theme.TEXT,
-        ))
+        view.add_widget(lbl)
         view.open()
         Clock.schedule_once(lambda dt: view.dismiss(), duration)
 
@@ -4228,17 +4686,28 @@ class LIFTRecorderApp(App):
         popup.open()
 
     def _project_has_remote(self):
-        """Check if the current project's git repo has a configured remote."""
+        """Check whether the daemon has a remote URL stored for the
+        current project. Goes through project_status(langcode) per
+        azt_collab_client/CLAUDE.md hard rule #2 ("no reading project
+        state from the local filesystem"). The previous
+        dulwich.Repo(working_dir).get_config() check falsely returned
+        False on Android — the daemon's working_dir lives in the
+        standalone server APK's private filesDir and peer processes
+        have no UID-level read on it — which fired the spurious
+        "data isn't being backed up" warning even after a successful
+        publish, and (more importantly) gates auto-sync flows that
+        check this method silently skipped their work on Android."""
         if not self.recorder:
             return False
+        langcode = getattr(self, '_current_langcode', '')
+        if not langcode:
+            return False
         try:
-            from dulwich.repo import Repo
-            repo = Repo(self.recorder.db.dir)
-            url = repo.get_config().get(
-                (b'remote', b'origin'), b'url')
-            return bool(url)
+            from azt_collab_client import project_status
+            ps = project_status(langcode)
         except Exception:
             return False
+        return bool(ps and (ps.remote_url or '').strip())
 
     def _show_backup_warning(self):
         """Show overlay warning that data isn't being backed up."""
@@ -4318,23 +4787,6 @@ class LIFTRecorderApp(App):
         btn.bind(on_release=_go)
         popup.open()
 
-    def _open_file_android(self):
-        """Use Android file picker intent."""
-        try:
-            from android.storage import primary_external_storage_path
-            from jnius import autoclass, cast
-            Intent = autoclass('android.content.Intent')
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            Uri = autoclass('android.net.Uri')
-
-            intent = Intent(Intent.ACTION_GET_CONTENT)
-            intent.setType('*/*')
-            intent.addCategory(Intent.CATEGORY_OPENABLE)
-            PythonActivity.mActivity.startActivityForResult(intent, 1001)
-            # Result handled in on_activity_result
-        except Exception as ex:
-            print(f'Android file picker error: {ex}')
-
     def _on_activity_result_wrapper(self, request_code, result_code, intent):
         """Wrapper for android.activity.bind — runs off main thread.
         Extract data from intent here (Java refs may not survive thread hop),
@@ -4343,15 +4795,7 @@ class LIFTRecorderApp(App):
         if result_code != -1:  # not RESULT_OK
             print(f'[activity-result] not RESULT_OK, ignoring')
             return
-        if request_code == 1001:
-            try:
-                uri = intent.getData()
-                path = self._uri_to_path(uri)
-                if path:
-                    Clock.schedule_once(lambda dt: self.load_lift(path), 0)
-            except Exception as ex:
-                print(f'Activity result error: {ex}')
-        elif request_code == 1002:
+        if request_code == 1002:
             try:
                 uri = intent.getData()
                 path = self._uri_to_image_path(uri)
@@ -4434,180 +4878,553 @@ class LIFTRecorderApp(App):
             print(f'Save bitmap error: {ex}')
             return None
 
-    def _uri_to_path(self, uri):
-        try:
-            from jnius import autoclass
-            context = autoclass('org.kivy.android.PythonActivity').mActivity
-            cursor = context.getContentResolver().query(uri, None, None, None, None)
-            cursor.moveToFirst()
-            idx = cursor.getColumnIndex('_data')
-            if idx >= 0:
-                path = cursor.getString(idx)
-                cursor.close()
-                return path
-            cursor.close()
-            # Fallback: copy to cache
-            import shutil
-            stream = context.getContentResolver().openInputStream(uri)
-            cache = os.path.join(self.user_data_dir, 'tmp.lift')
-            with open(cache, 'wb') as f:
-                buf = stream.read()
-                f.write(buf)
-            return cache
-        except Exception as ex:
-            print(f'URI to path error: {ex}')
-            return None
-
-    def _open_file_ios(self):
-        """Use UIDocumentPickerViewController on iOS."""
-        try:
-            from pyobjus import autoclass as objc_class
-            from pyobjus.dylib_manager import load_framework
-            load_framework('/System/Library/Frameworks/UIKit.framework')
-            load_framework('/System/Library/Frameworks/MobileCoreServices.framework')
-            UIDocumentPickerVC = objc_class('UIDocumentPickerViewController')
-            UTType = objc_class('NSString')
-            # kUTTypeItem — picks any file
-            picker = UIDocumentPickerVC.alloc() \
-                .initWithDocumentTypes_inMode_([UTType.stringWithString_('public.item')], 0)
-            UIApplication = objc_class('UIApplication')
-            root_vc = UIApplication.sharedApplication().keyWindow.rootViewController
-            root_vc.presentViewController_animated_completion_(picker, True, None)
-            # Poll for result — pyobjus doesn't support delegate callbacks
-            # directly, so use a scheduled check
-            self._ios_doc_picker = picker
-            Clock.schedule_interval(self._poll_ios_doc_picker, 0.3)
-        except Exception as ex:
-            print(f'iOS file picker error: {ex}')
-
-    def _poll_ios_doc_picker(self, dt):
-        """Check if the iOS document picker has been dismissed with a result."""
-        try:
-            picker = self._ios_doc_picker
-            if picker.presentingViewController is not None:
-                return  # still presented
-            Clock.unschedule(self._poll_ios_doc_picker)
-            urls = picker.URLs
-            if urls and urls.count() > 0:
-                url = urls.objectAtIndex_(0)
-                path = url.path.UTF8String()
-                if path:
-                    # Copy to app sandbox in case it's a security-scoped URL
-                    dest = os.path.join(self.user_data_dir, 'tmp.lift')
-                    import shutil
-                    shutil.copy2(path, dest)
-                    self.load_lift(dest)
-            self._ios_doc_picker = None
-        except Exception as ex:
-            print(f'iOS doc picker poll error: {ex}')
-            Clock.unschedule(self._poll_ios_doc_picker)
-            self._ios_doc_picker = None
-
-    def _open_file_desktop(self):
-        """Use tkinter file dialog on desktop."""
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root_tk = tk.Tk()
-            root_tk.withdraw()
-            path = filedialog.askopenfilename(
-                title=_tr('Open LIFT file'),
-                filetypes=[('LIFT files', '*.lift'), ('All files', '*.*')],
-            )
-            root_tk.destroy()
-            if path:
-                self.load_lift(path)
-        except Exception as ex:
-            print(f'Desktop file dialog error: {ex}')
-
-    def _image_repo(self):
-        """Return the configured image repo, or default."""
-        return self._load_prefs().get('image_repo', '')
-
     def _get_image_cache_dir(self):
-        """Return the image cache directory (not in git, for offline use)."""
-        return os.path.join(self.user_data_dir, 'image_cache')
+        """Return the per-session ephemeral image tmp dir.
+
+        Set up once at app startup via _init_session_image_cache;
+        used for CAWL pull-throughs and URI-project image pulls.
+        Nothing here is durable — the daemon owns the canonical
+        CAWL cache (`$AZT_HOME/cawl/<owner>/<repo>/images/`) shared
+        across peers per CAWL Stage 2."""
+        return getattr(self, '_session_image_cache_dir', '') or ''
+
+    def _init_session_image_cache(self):
+        """Create the per-session tmp dir on first call. Idempotent."""
+        if getattr(self, '_session_image_cache_dir', ''):
+            return
+        import tempfile
+        self._session_image_cache_dir = tempfile.mkdtemp(
+            prefix='azt_recorder_imgcache_')
+
+    def _purge_legacy_image_cache(self):
+        """One-shot rmtree of the pre-1.41.4 durable image cache at
+        <user_data_dir>/image_cache/. Pre-Stage-2 peers wrote CAWL
+        bytes here on every prefetch; Stage 2 made that the daemon's
+        job, so the directory's contents are dead weight (and on
+        Android they're per-app sandboxed, so they don't even survive
+        a reinstall). Best-effort; silent on failure."""
+        legacy = os.path.join(self.user_data_dir, 'image_cache')
+        if not os.path.isdir(legacy):
+            return
+        import shutil
+        try:
+            shutil.rmtree(legacy)
+            print(f'[cawl] purged legacy image cache: {legacy}')
+        except Exception as ex:
+            print(f'[cawl] legacy cache purge skipped: {ex}')
 
     def _start_image_prefetch(self):
-        """Silently pre-fetch all CAWL images to cache dir in background."""
-        if not self.recorder:
-            return
-        import threading
-        db = self.recorder.db
-        cache_dir = self._get_image_cache_dir()
-        os.makedirs(cache_dir, exist_ok=True)
-        threading.Thread(
-            target=self._prefetch_images_worker,
-            args=(db, cache_dir), daemon=True).start()
+        """Hand the daemon this project's CAWL working-set and start
+        the cache-progress poll.
 
-    def _prefetch_images_worker(self, db, cache_dir):
-        """Download all CAWL images to cache_dir (skips existing)."""
-        try:
-            url_map = db.all_cawl_urls()
-        except Exception:
-            return  # no internet or resolver failed
-        if not url_map:
+        Per CLIENT_INTEGRATION.md § 10's daemon-driven prefetch
+        update: the peer no longer iterates CAWLHandle on its own.
+        It computes the working-set (one variant per CAWL id), hands
+        the list to ``cawl_prefetch`` once, and the daemon iterates
+        in its own background thread. That lets the daemon know the
+        actual work size so ``cawl_cache_status`` returns a
+        meaningful denominator (otherwise progress plateaus far short
+        of "100%" because the index counts every variant per CAWL
+        id but the peer only ever fetches the preferred one).
+
+        On-demand fetches (CAWLHandle.open_read for the current swipe
+        target, etc.) still work — they hit the same daemon cache the
+        bulk warm populates."""
+        if not self.recorder:
+            print('[image-prefetch] no recorder; skipping')
             return
-        import urllib.request
-        ctx = self._ssl_context()
-        count = 0
-        for cawl, url in url_map.items():
-            # Skip if already cached
-            already = False
-            for ext in ('.png', '.jpg', '.jpeg'):
-                if os.path.exists(os.path.join(cache_dir, cawl + ext)):
-                    already = True
-                    break
-            if already:
-                continue
+        langcode = getattr(self, '_current_langcode', '') or ''
+        if not langcode:
+            print('[image-prefetch] no langcode; cache-progress '
+                  'indicator will not poll')
+            return
+        try:
+            paths = self.recorder.db.all_cawl_paths()
+        except Exception as ex:
+            print(f'[image-prefetch] all_cawl_paths failed: {ex}')
+            return
+        if not paths:
+            print('[image-prefetch] no paths to warm '
+                  '(resolver returned empty)')
+            return
+        # "Be eager when you have room to" — sample the OS-level
+        # memory and network signals once before kicking the
+        # daemon-side warm. If the device is tight, skip bulk
+        # prefetch entirely; on-demand CAWLHandle.open_read still
+        # fetches the displayed image (just no progress indicator,
+        # no daemon-side bulk fill). Project switch re-samples
+        # naturally via the load_lift → _start_image_prefetch path.
+        ok, reason = self._have_room_for_prefetch()
+        if not ok:
+            print(f'[image-prefetch] skipped — {reason}; '
+                  f'on-demand only this session')
+            return
+        from azt_collab_client import cawl_prefetch
+        try:
+            resp = cawl_prefetch(langcode, paths)
+        except Exception as ex:
+            print(f'[image-prefetch] cawl_prefetch failed: {ex}')
+            return
+        print(f'[image-prefetch] daemon warm started: '
+              f'requested={resp.get("requested")} '
+              f'completed={resp.get("completed")} '
+              f'finished={resp.get("finished")}')
+        self._start_cache_status_poll(langcode)
+
+    def _sample_total_ram_mb(self):
+        """One-shot total-RAM read at startup, in MB. Used for
+        device-class decisions (image cache size, prewarm gate).
+        Returns 0 on non-Android — treated as "plenty" by gates."""
+        if platform != 'android':
+            return 0
+        try:
+            from jnius import autoclass
+            Context = autoclass('android.content.Context')
+            ActivityManager = autoclass('android.app.ActivityManager')
+            MemoryInfo = autoclass(
+                'android.app.ActivityManager$MemoryInfo')
+            PythonActivity = autoclass(
+                'org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            am = activity.getSystemService(Context.ACTIVITY_SERVICE)
+            mi = MemoryInfo()
+            am.getMemoryInfo(mi)
+            return int(mi.totalMem / (1024 * 1024))
+        except Exception as ex:
+            print(f'[low-power] totalMem sample failed: {ex}')
+            return 0
+
+    def _sample_memory_state(self):
+        """Live memory snapshot. Returns
+        ``(low_memory_flag, avail_ratio, avail_mb)`` or
+        ``(False, 1.0, 0)`` on non-Android / JNI failure (treated
+        as "plenty of headroom" by the kill-switches that read it)."""
+        if platform != 'android':
+            return False, 1.0, 0
+        try:
+            from jnius import autoclass
+            Context = autoclass('android.content.Context')
+            ActivityManager = autoclass('android.app.ActivityManager')
+            MemoryInfo = autoclass(
+                'android.app.ActivityManager$MemoryInfo')
+            PythonActivity = autoclass(
+                'org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            am = activity.getSystemService(Context.ACTIVITY_SERVICE)
+            mi = MemoryInfo()
+            am.getMemoryInfo(mi)
+            total = max(mi.totalMem, 1)
+            return (bool(mi.lowMemory),
+                    mi.availMem / total,
+                    int(mi.availMem / (1024 * 1024)))
+        except Exception as ex:
+            print(f'[low-power] memory sample failed: {ex}')
+            return False, 1.0, 0
+
+    def _is_low_memory(self):
+        """True iff the OS reports memory pressure right now, or
+        free-RAM ratio is below 15%. Single source of truth for
+        the runtime "is this a moment to back off?" question."""
+        low, ratio, _ = self._sample_memory_state()
+        return low or ratio < 0.15
+
+    def _downsample_for_display(self, src_path):
+        """If the device reports memory pressure, return a path to a
+        downsampled (max 720px) copy of ``src_path`` in a session-
+        local side cache. Otherwise return ``src_path`` unchanged.
+
+        Lazy: only downsamples when actually called (on display)
+        and only if the side cache doesn't already have an entry.
+        The side cache lives under ``<session tmp>/_lowres/`` and
+        is GC'd with the rest of the per-session image cache on
+        app close.
+
+        Returns ``src_path`` on any failure — the original is
+        always a valid fallback."""
+        if not src_path or not os.path.exists(src_path):
+            return src_path
+        if not self._is_low_memory():
+            return src_path
+        try:
+            tmp_root = self._get_image_cache_dir()
+            if not tmp_root:
+                return src_path
+            lowres_dir = os.path.join(tmp_root, '_lowres')
+            os.makedirs(lowres_dir, exist_ok=True)
+            base = os.path.basename(src_path)
+            dest = os.path.join(lowres_dir, base)
+            if (os.path.exists(dest)
+                    and os.path.getmtime(dest)
+                    >= os.path.getmtime(src_path)):
+                return dest
+            from PIL import Image as PILImage
+            with PILImage.open(src_path) as im:
+                w, h = im.size
+                max_dim = 720
+                if max(w, h) <= max_dim:
+                    # Already small enough — just point at the
+                    # original; no need to copy.
+                    return src_path
+                ratio = max_dim / max(w, h)
+                resized = im.resize(
+                    (int(w * ratio), int(h * ratio)),
+                    PILImage.LANCZOS)
+                # Preserve the source's format; fall back to PNG.
+                fmt = im.format or 'PNG'
+                resized.save(dest, fmt)
+            return dest
+        except Exception as ex:
+            print(f'[low-power] downsample {src_path!r}: {ex}')
+            return src_path
+
+    def _have_room_for_prefetch(self):
+        """Return ``(ok, reason)``. ``ok=True`` iff the device has
+        headroom to bulk-warm the CAWL cache.
+
+        Three OR'd kill-switches, all peer-side OS signals:
+
+        - ``ActivityManager.MemoryInfo.lowMemory`` — the OS's own
+          "I'm under memory pressure" boolean.
+        - ``availMem / totalMem < 15%`` — secondary memory check
+          (catches just before lowMemory fires).
+        - Active network is metered (cellular, typically) — don't
+          burn the user's data plan on a background warm.
+
+        Desktop / iOS always return ``(True, '')``."""
+        if platform != 'android':
+            return True, ''
+        low, ratio, _ = self._sample_memory_state()
+        if low:
+            return False, 'lowMemory flag set by OS'
+        if ratio < 0.15:
+            return False, f'free RAM {ratio:.1%} < 15%'
+        try:
+            from jnius import autoclass
+            Context = autoclass('android.content.Context')
+            PythonActivity = autoclass(
+                'org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            cm = activity.getSystemService(
+                Context.CONNECTIVITY_SERVICE)
+            active = cm.getActiveNetwork()
+            if active is not None:
+                caps = cm.getNetworkCapabilities(active)
+                if caps is not None:
+                    # NET_CAPABILITY_NOT_METERED = 11.
+                    if not caps.hasCapability(11):
+                        return False, 'metered network'
+        except Exception as ex:
+            print(f'[prefetch] network-sample failed; '
+                  f'defaulting eager: {ex}')
+        return True, ''
+
+    # ── CAWL cache-progress indicator ────────────────────────────────────
+    # Per CLIENT_INTEGRATION.md § 10.5: while a CAWL prefetch is in
+    # flight (the daemon is fetching ~1700 image binaries from
+    # upstream GitHub, which can take many minutes on a slow link),
+    # surface "Caching images: M / N (network in use)" so the user
+    # doesn't disconnect Wi-Fi mid-warm and end up with a half-cache.
+
+    def _start_cache_status_poll(self, langcode):
+        """Begin a 1-second poll of the daemon's CAWL cache status.
+        Idempotent: an already-running poll is replaced (langcode may
+        have changed via project switch). Stops on its own once the
+        cache catches up to the index."""
+        if getattr(self, '_cache_status_event', None):
             try:
-                req = urllib.request.Request(url)
-                with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
-                    data = resp.read()
-                # Determine extension from URL
-                low = url.lower()
-                if low.endswith('.jpg') or low.endswith('.jpeg'):
-                    ext = '.jpg'
-                else:
-                    ext = '.png'
-                dest = os.path.join(cache_dir, cawl + ext)
-                with open(dest, 'wb') as f:
-                    f.write(data)
-                count += 1
+                self._cache_status_event.cancel()
             except Exception:
-                pass  # silently skip — spotty internet is expected
-        if count:
-            print(f'[image-prefetch] cached {count} new images')
+                pass
+            self._cache_status_event = None
+        self._cache_status_langcode = langcode
+        # Reset the state-change tracker so the first poll always
+        # logs (subsequent identical polls don't, per the contract).
+        # Tuple is (cached, total, offline, circuit_open) — flag flips
+        # without count changes still need to produce one log line so
+        # logcat shows when the daemon transitioned to
+        # offline-skipped / paused state.
+        self._cache_status_last = (-1, -1, False, False)
+        self._logged_total_zero = False
+        # Prevent overlapping daemon round-trips when the worker takes
+        # longer than the 1s tick. Without this gate, two workers can
+        # race to "cache warm" and double the RPC rate plus the log
+        # line. Cleared by the worker once its dispatch lands.
+        self._cache_tick_in_flight = False
+        # Latches on the first cached>=total dispatch so any late
+        # worker (started before cancel ran) becomes a no-op.
+        self._cache_status_warmed = False
+        print(f'[cache-status] poll starting for langcode={langcode!r}')
+        self._cache_status_event = Clock.schedule_interval(
+            lambda _dt: self._tick_cache_status(), 1.0)
+        self._tick_cache_status()
+
+    def _tick_cache_status(self):
+        """One poll iteration. Runs the daemon RPC on a worker so the
+        UI thread isn't pinned waiting for the cache_status response;
+        marshals the label update back to the main thread.
+
+        #6: skip the tick if the user is actively interacting (touch
+        within the last second). The 1Hz poll burns a daemon round-
+        trip and an indicator-text re-render — wasted during a
+        swipe gesture where the user can't perceive the indicator
+        anyway."""
+        import time as _time
+        if _time.monotonic() - getattr(
+                self, '_last_touch_time', 0.0) < 1.0:
+            return
+        langcode = getattr(self, '_cache_status_langcode', '') or ''
+        if not langcode:
+            self._hide_cache_indicator()
+            return
+        # Skip if a worker from a prior tick is still resolving — the
+        # cancel that fires on cached>=total runs inside
+        # _apply_cache_status on the main thread, so without this gate
+        # a slow daemon means tick N+1 spawns a second worker that
+        # also reaches "cache warm" and double-fires the log + RPC.
+        if getattr(self, '_cache_tick_in_flight', False):
+            return
+        self._cache_tick_in_flight = True
+        import threading
+
+        def _worker():
+            try:
+                from azt_collab_client import cawl_cache_status
+                status = cawl_cache_status(langcode)
+            except Exception as ex:
+                print(f'[cache-status] poll failed: {ex}')
+                self._cache_tick_in_flight = False
+                return
+            cached = int(status.get('cached') or 0)
+            total = int(status.get('total') or 0)
+            # `offline` / `circuit_open` are additive flags from
+            # daemon 0.41.21 — `.get()` with False default keeps the
+            # pre-0.41.21 path working (active-progress branch).
+            offline = bool(status.get('offline'))
+            circuit_open = bool(status.get('circuit_open'))
+            # Log only on state change so a 1 Hz poll doesn't fill
+            # logcat with identical lines (contract § 10). State
+            # includes the flags so a flag flip still produces one
+            # log even when the counts didn't move.
+            last = getattr(self, '_cache_status_last',
+                           (-1, -1, False, False))
+            key = (cached, total, offline, circuit_open)
+            if key != last:
+                print(f'[cache-status] cached={cached} total={total} '
+                      f'offline={offline} circuit_open={circuit_open} '
+                      f'image_repo={status.get("image_repo")!r}')
+                self._cache_status_last = key
+            Clock.schedule_once(
+                lambda dt, c=cached, t=total, o=offline, x=circuit_open:
+                    self._apply_cache_status(c, t, o, x), 0)
+            self._cache_tick_in_flight = False
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_cache_status(self, cached, total,
+                            offline=False, circuit_open=False):
+        """Render the indicator (or hide it) based on the latest
+        cached / total counts plus the `offline` / `circuit_open`
+        flags. Cancels the polling Clock event once the cache
+        catches up. Diagnostic prints fire only on the first
+        occurrence of each terminal state — _tick already rate-
+        limits per-tick logs.
+
+        Polling continues during offline / circuit_open per contract
+        § 10 — the daemon's scheduler watcher fires
+        `cawl.on_online_edge()` on the offline→online transition
+        which re-fires `auto_prefetch`; the running 1 Hz poll is
+        what lets the banner flip back to live progress
+        automatically when that happens."""
+        # Defence in depth: if a worker started before cancel ran is
+        # arriving late with cached>=total, drop it so we don't print
+        # "cache warm" twice or re-hide an already-hidden indicator.
+        if getattr(self, '_cache_status_warmed', False):
+            return
+        if total == 0:
+            if not getattr(self, '_logged_total_zero', False):
+                self._logged_total_zero = True
+                print('[cache-status] total=0 → hiding indicator '
+                      '(no index entries: endpoint missing on this '
+                      'server APK, no image_repo configured, or the '
+                      'index transport is broken)')
+            self._hide_cache_indicator()
+            return
+        if cached >= total:
+            self._cache_status_warmed = True
+            print(f'[cache-status] cache warm: {cached}/{total}; '
+                  'hiding + stopping poll')
+            self._hide_cache_indicator()
+            event = getattr(self, '_cache_status_event', None)
+            if event:
+                try:
+                    event.cancel()
+                except Exception:
+                    pass
+                self._cache_status_event = None
+            return
+        # Shared msgids with azt_collab_client/locales (the daemon
+        # settings UI uses the same three indicator strings) so the
+        # recorder inherits translations via the gettext fallback
+        # chain — no peer-side duplicate.
+        if offline:
+            msg = _tr(
+                'Image cache: {cached} / {total} '
+                '(offline — will resume when online)'
+            ).format(cached=cached, total=total)
+        elif circuit_open:
+            msg = _tr(
+                'Image cache: {cached} / {total} '
+                '(paused — connectivity lost)'
+            ).format(cached=cached, total=total)
+        else:
+            msg = _tr(
+                'Caching images: {cached} / {total} '
+                '(network in use — please stay online)'
+            ).format(cached=cached, total=total)
+        self._show_cache_indicator(msg)
+
+    def _show_cache_indicator(self, text):
+        try:
+            lbl = self.root.ids.sm.get_screen('recorder').ids.get(
+                'cache_status_label')
+        except Exception:
+            return
+        if not lbl:
+            return
+        lbl.text = text
+        lbl.height = dp(22)
+        lbl.opacity = 1
+
+    def _show_severe_alert(self, text):
+        """Show the sticky red banner used for the never-silenced
+        sync codes (CLIENT_INTEGRATION.md § 17: DATA_LOSS_RISK +
+        COMMIT_REPEATEDLY_FAILED). Tap-to-dismiss via the banner's
+        on_release. Replaces the previous _show_toast call for
+        these codes — a 1.5s toast wasn't long enough for the user
+        to read the multi-line maintainer-contact wording.
+
+        ``text`` is the already-translated message (markup OK)."""
+        try:
+            btn = self.root.ids.sm.get_screen('recorder').ids.get(
+                'severe_alert_banner')
+        except Exception:
+            return
+        if not btn:
+            return
+        btn.text = text
+        # Fixed height fits ~4-5 lines of sp(12) wrapped text;
+        # the daemon translations land around 4 lines on a typical
+        # phone width. Wrap drops further text on overflow —
+        # acceptable for an emergency banner, the action is the
+        # same regardless of which file count is shown.
+        btn.height = dp(80)
+        btn.opacity = 1
+
+    def _dismiss_severe_alert(self):
+        """Hide the severe-alert banner. Wired to the banner's
+        on_release in KV. The daemon will re-emit the underlying
+        status code (DATA_LOSS_RISK / COMMIT_REPEATEDLY_FAILED)
+        on the next sync if the condition persists, so dismissing
+        doesn't actually silence anything — the next poll-job /
+        do_sync cycle will surface it again if still applicable."""
+        try:
+            btn = self.root.ids.sm.get_screen('recorder').ids.get(
+                'severe_alert_banner')
+        except Exception:
+            return
+        if not btn:
+            return
+        btn.text = ''
+        btn.height = 0
+        btn.opacity = 0
+
+    def _hide_cache_indicator(self):
+        try:
+            lbl = self.root.ids.sm.get_screen('recorder').ids.get(
+                'cache_status_label')
+        except Exception:
+            return
+        if not lbl:
+            return
+        lbl.text = ''
+        lbl.height = 0
+        lbl.opacity = 0
 
     def load_lift(self, path):
         self._dismiss_loading_overlay()
-        path = os.path.abspath(path)
+        # The picker can return either a filesystem path (desktop / open
+        # file) or a content:// URI (Android server-APK model). Only
+        # apply abspath when we genuinely have a filesystem path.
+        from azt_collab_client import is_content_uri
+        if not is_content_uri(path):
+            path = os.path.abspath(path)
+            # Sweep the stale `.cawl_image_urls.json` that the desktop
+            # AZT app used to drop next to the LIFT. CAWL image URLs
+            # are daemon-owned now (CLIENT_INTEGRATION.md § 10); a
+            # peer-side mirror is exactly the kind of "just-in-case"
+            # cache the suite contract forbids. URI projects (Android)
+            # skip — the recorder doesn't own that directory.
+            try:
+                stale = os.path.join(os.path.dirname(path),
+                                     '.cawl_image_urls.json')
+                if os.path.exists(stale):
+                    os.unlink(stale)
+                    print(f'[load_lift] removed stale {stale}')
+            except OSError as ex:
+                print(f'[load_lift] stale CAWL cache cleanup skipped: '
+                      f'{ex}')
         try:
-            db = LIFTDatabase(path, image_repo=self._image_repo(),
+            db = LIFTDatabase(path,
                               image_cache_dir=self._get_image_cache_dir())
         except Exception as ex:
             self._show_error(_tr('Could not open file:\n{error}').format(error=ex))
             return
-        self._save_prefs(path)
-        # Apply language code: from picker, from prefs, or from filename
+        # vernlang priority:
+        #   1. _current_langcode — server-authoritative langcode for
+        #      this project (set by _handle_pick AND by
+        #      _auto_load_last_project before reaching load_lift).
+        #      This is what drives db.vernlang so progress_text and
+        #      downstream LIFT writes use the same code the daemon
+        #      stores under.
+        #   2. _pending_vernlang — set only by new-from-template flows;
+        #      its real semantic is "also run clean_template()."
+        # No third-tier peer-side cache: the recorder never persists
+        # daemon-owned state locally. If neither is set we're past a
+        # broken load path; let downstream surface that rather than
+        # paper over it with a stale cache.
+        authoritative = getattr(self, '_current_langcode', '')
         pending = getattr(self, '_pending_vernlang', '')
-        if pending:
+        if authoritative:
+            db.set_vernlang(authoritative)
+        elif pending:
             db.set_vernlang(pending)
-            db.clean_template()
-            self._pending_vernlang = ''
-            prefs = self._load_prefs()
-            prefs['vernlang'] = pending
-            self._save_prefs_dict(prefs)
-        else:
-            prefs = self._load_prefs()
-            saved_vern = prefs.get('vernlang', '')
-            if saved_vern:
-                db.set_vernlang(saved_vern)
+        if pending:
+            try:
+                db.clean_template()
+            except Exception as ex:
+                # _save() inside clean_template writes the LIFT file
+                # — on Android URI projects that goes through the
+                # daemon's ContentProvider and can fail with a stale
+                # URI grant or transient daemon state. clean_template
+                # is best-effort cleanup of template-stub forms; a
+                # failure here must not abort the load (which would
+                # crash the app on the main thread, since Select
+                # Project's _handle_pick → load_lift runs there).
+                print(f'[load_lift] clean_template failed: {ex}')
+        self._pending_vernlang = ''
+        # Drop any last_commit_seen baseline carried over from a
+        # previous project — otherwise the first _update_sync_status
+        # tick after this load would compare the new project's
+        # last_commit against the old project's value and fire a
+        # spurious _reload_and_restore on top of the load we just did.
+        self._last_commit_seen = None
         self.recorder = RecorderController(db)
         # Apply persisted show-past-work preference (default: hide past work)
-        show_past = self._load_prefs().get('show_past_work', False)
+        show_past = bool(peer_pref('show_past_work', False))
         self.recorder.only_unrecorded = not show_past
         self.recorder.rebuild_queue()
+        # Register this project with the sync backend so future ops can
+        # be addressed by langcode.
+        self._register_current_project()
         sm = self.root.ids.sm
         sm.transition = SlideTransition(direction='left')
         sm.current = 'recorder'
@@ -4621,22 +5438,75 @@ class LIFTRecorderApp(App):
         elif not self._project_has_remote():
             Clock.schedule_once(lambda dt: self._show_backup_warning(), 0.5)
 
+    def _register_current_project(self):
+        """Tell the backend about the project currently loaded. Returns the
+        langcode the backend is tracking it under (empty string on error).
+
+        The langcode is server-supplied: every load path threads the
+        daemon's canonical ``projects.json`` key into
+        ``_current_langcode`` before reaching here — the picker emits
+        it in its result (``_handle_pick``), and the startup auto-load
+        reads it from ``azt_collab_client.recent`` and resolves the
+        path via ``open_project`` (``_auto_load_last_project``).
+        ``derive_langcode`` is left as a defensive fallback for any
+        future load path that doesn't yet wire the langcode through;
+        it's a server RPC, but going through it is wasteful when we
+        already have the answer."""
+        if not self.recorder:
+            return ''
+        try:
+            from azt_collab_client import (
+                derive_langcode, register_project)
+            working_dir = self.recorder.db.dir
+            lift_path = self.recorder.db.path
+            langcode = getattr(self, '_current_langcode', '')
+            if not langcode:
+                langcode = derive_langcode(working_dir, lift_path)
+            if not langcode:
+                return ''
+            register_project(langcode, working_dir, lift_path)
+            self._current_langcode = langcode
+            return langcode
+        except Exception as ex:
+            print(f'[register_project] error: {ex}')
+            return ''
+
+    def _current_langcode_or_register(self):
+        """Return the cached langcode for the current project, registering
+        on demand if we haven't yet."""
+        code = getattr(self, '_current_langcode', '')
+        if code:
+            return code
+        return self._register_current_project()
+
     def _reload_and_restore(self, guid):
-        """Reload the LIFT file and restore position to the entry with *guid*."""
+        """Reload the LIFT file and restore position to the entry with
+        *guid*, refreshing the recorder UI in place per
+        CLIENT_INTEGRATION.md § 14. Same anchor (entry guid), fresh
+        content (re-parsed from disk).
+
+        If the saved guid would be hidden by a client-side filter
+        after the refresh (e.g. only_unrecorded is on and another
+        contributor just recorded the entry), suspend the filters
+        for this view so the user's anchor stays visible per § 14's
+        filter-suspension rule. If the entry is genuinely gone from
+        the new model (real upstream deletion), let the natural
+        next-entry / empty-queue render so the change is visible."""
         if not self.recorder:
             return
         path = self.recorder.db.path
         try:
-            db = LIFTDatabase(path, image_repo=self._image_repo(),
+            db = LIFTDatabase(path,
                               image_cache_dir=self._get_image_cache_dir())
         except Exception as ex:
             print(f'Reload failed: {ex}')
             return
-        # Re-apply saved vernlang
-        prefs = self._load_prefs()
-        saved_vern = prefs.get('vernlang', '')
-        if saved_vern:
-            db.set_vernlang(saved_vern)
+        # Re-apply the server-authoritative _current_langcode set when
+        # the project was loaded. No local fallback — see load_lift's
+        # comment on the no-daemon-owned-caches rule.
+        authoritative = getattr(self, '_current_langcode', '')
+        if authoritative:
+            db.set_vernlang(authoritative)
         old_settings = (
             self.recorder.cawl_filter,
             self.recorder.gloss_search,
@@ -4647,186 +5517,599 @@ class LIFTRecorderApp(App):
         self.recorder.cawl_filter, self.recorder.gloss_search, \
             self.recorder.only_unrecorded, self.recorder.active_gloss_langs = old_settings
         self.recorder.rebuild_queue()
-        # Restore position by guid
         if guid:
             for i, e in enumerate(self.recorder.queue):
                 if e.get('guid') == guid:
                     self.recorder.index = i
-                    break
+                    self.refresh_recorder_ui()
+                    return
+            # Anchor not in current queue. If the new model still
+            # has the entry, a client-side filter is hiding it; per
+            # § 14 drop the filters for this view so the user's
+            # anchor stays present even though the data clock moved.
+            # ConfigScreen.on_enter re-reads the recorder's filter
+            # state into the input fields, so no extra UI sync.
+            in_model = any(
+                e.get('guid') == guid for e in self.recorder.db.entries)
+            if in_model:
+                self.recorder.cawl_filter = ''
+                self.recorder.gloss_search = ''
+                self.recorder.only_unrecorded = False
+                self.recorder.rebuild_queue()
+                for i, e in enumerate(self.recorder.queue):
+                    if e.get('guid') == guid:
+                        self.recorder.index = i
+                        break
+            # else: real upstream deletion — index is clamped to
+            # [0, len(queue)-1] by rebuild_queue, so the user lands
+            # on whatever's at the same slot. Per § 14 let the
+            # natural propagation render; no toast.
         self.refresh_recorder_ui()
 
-    def _get_gh_credentials(self):
-        """Return (username, access_token) with auto-refresh. Uses device flow tokens."""
-        from collab import get_valid_token
-        return get_valid_token(self._prefs_path)
-
-    def _try_auto_publish(self):
-        """If git credentials and langcode are configured, publish automatically."""
-        prefs = self._load_prefs()
-        langcode = prefs.get('collab_langcode', '')
-        if not (langcode and self.recorder):
-            return
-        host = prefs.get('collab_host', 'github')
-        git_user, token = self._get_sync_credentials()
-        if not token:
-            return
-        if host == 'gitlab':
-            user = prefs.get('gl_username', '')
-            domain = 'gitlab.com'
-        else:
-            user = prefs.get('gh_username', '')
-            domain = 'github.com'
-        if not user:
-            return
-        remote_url = f'https://{domain}/{user}/{langcode}.git'
-        name = prefs.get('collab_name', '') or 'Recorder'
+    def _clone_via_server(self, clone_url, dest_dir, on_progress=None):
+        """Drive a server-side clone job to completion. Schedules
+        ``self.load_lift(lift_path)`` on success and ``self._show_error``
+        on failure. ``on_progress(line)`` is called on the Kivy main
+        thread for each new progress line if provided. Always dismisses
+        any loading overlay before reporting."""
+        from azt_collab_client import (
+            clone_project_start, clone_project_status, translate_result, S)
         import threading
+        import time
+
         def _worker():
             try:
-                from collab import init_repo
-                result = init_repo(self.recorder.db.dir, remote_url,
-                                   git_user, token, 'main', name)
-                print(f'[auto-publish] {result}')
+                kicked = clone_project_start(clone_url, dest_dir)
+                if not kicked.get('ok'):
+                    err = kicked.get('error', 'unknown')
+                    Clock.schedule_once(
+                        lambda dt: (self._dismiss_loading_overlay(),
+                                    self._show_error(err)), 0)
+                    return
+                job_id = kicked['job_id']
+                last_index = 0
+                while True:
+                    time.sleep(0.5)
+                    resp = clone_project_status(job_id, last_index)
+                    if not resp.get('ok'):
+                        err = resp.get('error', 'server_unavailable')
+                        Clock.schedule_once(
+                            lambda dt, e=err: (
+                                self._dismiss_loading_overlay(),
+                                self._show_error(e)), 0)
+                        return
+                    last_index = resp.get('next_index', last_index)
+                    if on_progress:
+                        for line in resp.get('progress', []):
+                            Clock.schedule_once(
+                                lambda dt, ln=line: on_progress(ln), 0)
+                    state = resp.get('state', 'CLONING')
+                    if state == 'DONE':
+                        lift_path = resp.get('lift_path', '')
+                        result = resp.get('result')
+                        log = (translate_result(result)
+                               if result is not None else '')
+                        if lift_path:
+                            Clock.schedule_once(
+                                lambda dt: self.load_lift(lift_path), 0)
+                        else:
+                            # Daemon attaches CLONE_AUTH_REQUIRED to the
+                            # Result when a CLONE_FAILED looks auth-shaped
+                            # (server.py:_clone_failed_looks_auth). Branch
+                            # on the structured code instead of substring-
+                            # matching translated error text.
+                            if result and result.has(S.CLONE_AUTH_REQUIRED):
+                                Clock.schedule_once(
+                                    lambda dt: (
+                                        self._dismiss_loading_overlay(),
+                                        self._show_collab_prompt()), 0)
+                            else:
+                                Clock.schedule_once(
+                                    lambda dt, e=log: (
+                                        self._dismiss_loading_overlay(),
+                                        self._show_error(e)), 0)
+                        return
+                    if state == 'FAILED':
+                        err = resp.get('error', 'clone_failed')
+                        Clock.schedule_once(
+                            lambda dt, e=err: (
+                                self._dismiss_loading_overlay(),
+                                self._show_error(e)), 0)
+                        return
+            except Exception as ex:
+                # No structured Result on this path (transport blew
+                # up before the daemon got to emit one). Auth-shape
+                # detection here would have to substring-match a
+                # locale-dependent string — skip it; the daemon-emitted
+                # CLONE_AUTH_REQUIRED branch above handles real auth
+                # failures.
+                print(f'[clone] error: {ex}')
+                Clock.schedule_once(
+                    lambda dt, e=str(ex): (
+                        self._dismiss_loading_overlay(),
+                        self._show_error(e)), 0)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _try_auto_publish(self):
+        """If git credentials and a project langcode are configured,
+        publish automatically. The server runs the publish using its
+        own credentials store; the peer just tells it the working
+        dir + remote URL.
+
+        Per CLIENT_INTEGRATION.md § 11 the repo name is
+        ``project.repo_slug or langcode`` — empty repo_slug falls back
+        to the langcode (typical case)."""
+        langcode = getattr(self, '_current_langcode', '') or ''
+        if not (langcode and self.recorder):
+            return
+        from azt_collab_client import (
+            get_credentials_status, init_project, open_project,
+            translate_result)
+        slug = ''
+        try:
+            project = open_project(langcode)
+            if project is not None:
+                slug = project.repo_slug or ''
+        except Exception as ex:
+            print(f'[auto-publish] open_project repo_slug read: {ex}')
+        repo_name = slug or langcode
+        status = get_credentials_status()
+        host = status.get('host', 'github')
+        if host == 'gitlab':
+            gl = status.get('gitlab', {})
+            user = gl.get('username', '')
+            token_ok = gl.get('connected', False)
+            domain = 'gitlab.com'
+        else:
+            gh = status.get('github', {})
+            user = gh.get('username', '')
+            token_ok = gh.get('connected', False)
+            domain = 'github.com'
+        if not (user and token_ok):
+            return
+        remote_url = f'https://{domain}/{user}/{repo_name}.git'
+        import threading
+
+        def _worker():
+            try:
+                # § 12: contributor is daemon-owned; no longer passed
+                # on the wire. init_project resolves it from the store.
+                result = init_project(
+                    self.recorder.db.dir, remote_url, 'main')
+                print(f'[auto-publish] {translate_result(result)}')
             except Exception as ex:
                 print(f'[auto-publish] error: {ex}')
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _record_sync_time(self):
-        """Save current time as last successful sync."""
-        import time
-        prefs = self._load_prefs()
-        prefs['last_sync'] = time.time()
-        self._save_prefs_dict(prefs)
-        Clock.schedule_once(lambda dt: self._update_sync_status(), 0)
+    def _not_backed_up_text(self, status):
+        """Pick a 'not backed up' variant that hints at the *blocker* so
+        a tap on the indicator lands the user where they can actually
+        fix it. Probes in the order go_collab presents them: contributor
+        name → GitHub sign-in → project remote. Each _tr literal is
+        spelled out so xgettext can extract it."""
+        try:
+            from azt_collab_client import (
+                get_contributor, get_credentials_status)
+            if not (get_contributor() or '').strip():
+                return _tr('add name to back up')
+            cred = get_credentials_status() or {}
+            host = cred.get('host', 'github')
+            connected = bool(cred.get(host, {}).get('connected', False))
+            if not connected:
+                return _tr('sign in to back up')
+            if not (getattr(status, 'remote_url', '') or '').strip():
+                return _tr('publish to back up')
+        except Exception:
+            pass
+        return _tr('not backed up')
 
-    def _sync_status_text(self):
-        """Return human-readable sync age: '' if today, 'yesterday', '-N days'."""
-        import time, datetime
-        prefs = self._load_prefs()
-        ts = prefs.get('last_sync', 0)
-        if not ts:
-            return ''
-        dt_sync = datetime.datetime.fromtimestamp(ts)
+    def _sync_status_info(self):
+        """Return (text, last_sync, last_commit) for the current project.
+
+        ``text`` is what goes in the sync indicator:
+          - ``''`` if no langcode or the server is unreachable
+          - ``'not backed up'`` when last_sync is 0 (no successful push
+            yet — see ProjectStatus semantics in
+            azt_collab_client/projects.py)
+          - ``'HH:MM (+n)'`` / ``'HH:MM (OK)'`` otherwise, where *n*
+            is the number of commits ahead of the remote that haven't
+            been pushed yet (ProjectStatus.commits_ahead). ``(OK)``
+            when commits_ahead is 0.
+          - Work-offline mode appends ``' · offline'`` per
+            CLIENT_INTEGRATION.md § 17b: the daemon-side toggle is
+            on, so pending commits won't be pushed even when online.
+
+        Date prefixes (``'yesterday HH:MM'`` / ``'N days ago HH:MM'``)
+        prepend the time when last_sync is older than today.
+
+        ``last_sync`` (push timestamp) is returned raw so callers
+        like do_sync can branch behaviour without re-querying.
+        ``last_commit`` (most recent local commit timestamp) lets
+        _update_sync_status detect external mutations between polls
+        per CLIENT_INTEGRATION.md § 14.
+        """
+        import datetime
+        langcode = getattr(self, '_current_langcode', '')
+        if not langcode:
+            return ('', 0.0, 0.0)
+        from azt_collab_client import project_status
+        status = project_status(langcode)
+        if status is None:
+            return ('', 0.0, 0.0)
+        last_sync = float(getattr(status, 'last_sync', 0.0) or 0.0)
+        last_commit = float(getattr(status, 'last_commit', 0.0) or 0.0)
+        commits_ahead = int(getattr(status, 'commits_ahead', 0) or 0)
+        unshared_commits = int(
+            getattr(status, 'unshared_commits', commits_ahead) or 0)
+        n_changes = int(getattr(status, 'n_changes', 0) or 0)
+        work_offline = bool(getattr(status, 'work_offline', False))
+        lan_allow_sync = bool(getattr(status, 'lan_allow_sync', False))
+        # Always render the uncommitted-file count in red when
+        # n_changes > 0. We started with a >60 s persistence gate
+        # to avoid flashing during normal record-and-commit cycles,
+        # but the user wants to see the count empirically — short
+        # flashes during transient dirty windows are acceptable
+        # tuition; a steady non-zero red is the data-loss-risk
+        # signal we want users to learn to read.
+        show_dirty_red = n_changes > 0
+        # Four-cell matrix per CLIENT_INTEGRATION.md § 17b:
+        #   work_offline=off, lan=*   → no suffix
+        #   work_offline=on,  lan=off → "offline" (commits accumulate)
+        #   work_offline=on,  lan=on  → "LAN-only" (paired phones
+        #                               still receive; github push
+        #                               suspended)
+        if work_offline and lan_allow_sync:
+            offline_tag = f' · {_tr("LAN-only")}'
+        elif work_offline:
+            offline_tag = f' · {_tr("offline")}'
+        else:
+            offline_tag = ''
+        # Suffix encodes "commits ahead of github" + LAN-shared
+        # breakdown per CLIENT_INTEGRATION.md § 17b
+        # (ProjectStatus.unshared_commits, daemon 0.45.0+):
+        #   commits_ahead == 0                              → "OK"
+        #   commits_ahead > 0, unshared == 0                → "LANOK +N"
+        #     (N ahead of github, but all already on LAN —
+        #      device could be wiped without losing data)
+        #   commits_ahead > 0, 0 < unshared < commits_ahead → "+M/N"
+        #     (M unshared / N total ahead — partial LAN coverage)
+        #   commits_ahead > 0, unshared == commits_ahead    → "+N"
+        #     (none on LAN; same as pre-LAN world)
+        # Computed regardless of last_sync: per § 17b the LANOK
+        # signal derives from commits_ahead / unshared_commits
+        # only — NOT from whether github has ever seen the
+        # project. A LAN-only project (last_sync == 0,
+        # commits_ahead > 0, unshared_commits == 0) must still
+        # surface LANOK so the user sees their data lives on a
+        # paired phone even before github push succeeds.
+        if commits_ahead == 0:
+            suffix = 'OK'
+        elif unshared_commits == 0:
+            suffix = f'LANOK +{commits_ahead}'
+        elif unshared_commits >= commits_ahead:
+            suffix = f'+{commits_ahead}'
+        else:
+            suffix = f'+{unshared_commits}/{commits_ahead}'
+        if show_dirty_red:
+            suffix = f'{suffix} [color=ff4444]+{n_changes}[/color]'
+        # Prefix: timestamp when github has accepted a push for
+        # this project; a call-to-action message otherwise. The
+        # suffix still rides along when there are commits or
+        # dirty files to report.
+        if not last_sync:
+            base = self._not_backed_up_text(status)
+            if commits_ahead == 0:
+                # Nothing committed yet; the suffix would be
+                # "OK" (plus any dirty red) which misleadingly
+                # implies safety before any push. Surface the
+                # uncommitted-work signal on the prefix instead.
+                if show_dirty_red:
+                    base = f'{base} [color=ff4444]+{n_changes}[/color]'
+                return (f'{base}{offline_tag}', 0.0, last_commit)
+            return (f'{base} ({suffix}){offline_tag}',
+                    0.0, last_commit)
+        dt_sync = datetime.datetime.fromtimestamp(last_sync)
         now = datetime.datetime.now()
-        today = now.date()
         sync_date = dt_sync.date()
         time_str = dt_sync.strftime('%H:%M')
-        days = (today - sync_date).days
+        days = (now.date() - sync_date).days
         if days == 0:
-            return time_str
+            base = time_str
         elif days == 1:
-            return f'yesterday {time_str}'
+            base = f'yesterday {time_str}'
         else:
-            return f'{days} days ago {time_str}'
+            base = f'{days} days ago {time_str}'
+        # Examples on the rendered indicator:
+        #   (OK)                  — committed + pushed, all clean
+        #   (+3)                  — 3 commits ahead of remote, none on LAN
+        #   (LANOK +3)            — 3 ahead of github, all on LAN already
+        #   (+1/3)                — 3 ahead, 1 unshared, 2 on LAN
+        #   (OK <red>+5</red>)    — 5 dirty files awaiting commit
+        #   (+1 <red>+5</red>)    — both: unpushed commit AND dirty
+        #   (+1) · offline        — work-offline on, LAN-share off:
+        #                           daemon won't push; commits accumulate
+        #   (LANOK +1) · LAN-only — work-offline on, LAN-share on:
+        #                           paired phones still receive locally;
+        #                           github push suspended
+        #   (LANOK +1 <red>+2</red>) · LAN-only
+        #                         — LAN-only mode with 1 commit on a
+        #                           paired phone but not on github, and
+        #                           2 dirty files still to commit
+        #   not backed up (LANOK +3)
+        #                         — never github-pushed yet, but the 3
+        #                           local commits all exist on a paired
+        #                           phone
+        #   not backed up <red>+2</red>
+        #                         — never committed; 2 dirty files
+        #                           present but no LAN/github safety
+        #                           to claim
+        #   not backed up (LANOK +1 <red>+2</red>) · LAN-only
+        #                         — 1 commit on a paired phone but not
+        #                           on github, 2 dirty files, github
+        #                           push suspended by work-offline +
+        #                           LAN-share toggle
+        return (f'{base} ({suffix}){offline_tag}',
+                last_sync, last_commit)
 
     def _update_sync_status(self):
-        """Push sync status text into the recorder top bar."""
+        """Push sync status text into the recorder top bar, and
+        detect external mutations (another peer's push, a daemon-
+        driven debounced sync) by watching project_status.last_commit
+        across polls. On a change, refresh the recorder UI in place
+        per CLIENT_INTEGRATION.md § 14 — same anchor entry, fresh
+        content.
+
+        Also polls the most recent auto-commit job (if any) for
+        DATA_LOSS_RISK statuses per CLIENT_INTEGRATION.md § 17 —
+        commit_project is fire-and-forget so this is the only
+        seam where the eventual Result becomes observable for the
+        auto-commit context."""
+        self._check_data_loss_risk_async()
+        text, _last_sync, last_commit = self._sync_status_info()
         sm = self.root.ids.sm
         rec_screen = sm.get_screen('recorder')
         lbl = rec_screen.ids.get('sync_status_label')
         if lbl:
-            lbl.text = self._sync_status_text()
+            lbl.text = text
+        seen = getattr(self, '_last_commit_seen', None)
+        # Pin the new seen-value BEFORE calling _reload_and_restore.
+        # The reload path eventually schedules refresh_recorder_ui,
+        # which re-enters this method; if we updated _last_commit_seen
+        # only after the reload returned, the nested call would still
+        # see the old value, detect last_commit > seen again, and
+        # fire another reload — an infinite chain that pegged the UI
+        # thread with back-to-back LIFTDatabase reconstructions.
+        self._last_commit_seen = last_commit
+        if (self.recorder and seen is not None
+                and last_commit > seen and last_commit > 0):
+            guid = (self.recorder.current.get('guid', '')
+                    if self.recorder.queue else '')
+            self._reload_and_restore(guid)
 
     def _mark_gh_app_installed(self):
-        """Mark GitHub App as installed after a successful push."""
-        prefs = self._load_prefs()
-        if not prefs.get('gh_app_installed'):
-            prefs['gh_app_installed'] = True
-            self._save_prefs_dict(prefs)
-
-    def _get_sync_credentials(self):
-        """Return (git_username, token) for sync, respecting host toggle."""
-        prefs = self._load_prefs()
-        host = prefs.get('collab_host', 'github')
-        if host == 'gitlab':
-            user = prefs.get('gl_username', '')
-            token = prefs.get('gl_token', '')
-            return user, token
-        from collab import get_valid_token
-        _, token = get_valid_token(self._prefs_path)
-        return 'x-access-token', token
+        """Record that the GitHub App has been installed after a successful push."""
+        from azt_collab_client import mark_github_app_installed
+        mark_github_app_installed(True)
 
     def _auto_commit_sync(self):
-        """Background: pull + commit new audio/.lift changes + push."""
+        """Fire-and-forget: ask the server to commit the current
+        group of changes. The peer's job is to mark the boundary
+        between meaningful chunks of work (one swipe = one entry's
+        worth of changes); the daemon's scheduler-drain loop decides
+        when to push (online + post_online_grace_s + !work_offline).
+        Commit happens regardless of connectivity. The UI refreshes
+        its sync indicator after a short delay.
+
+        Per CLIENT_INTEGRATION.md § 17b (0.43.0+): this RPC NEVER
+        emits PUSHED — push is daemon-driven. Peer surface for
+        "are we pushed up?" reads ProjectStatus.commits_ahead /
+        ProjectStatus.work_offline."""
         if not self.recorder:
             return
-        prefs = self._load_prefs()
-        name = prefs.get('collab_name', '') or 'Recorder'
-        project_dir = self.recorder.db.dir
-        git_user, token = self._get_sync_credentials()
-        if not token:
+        langcode = self._current_langcode_or_register()
+        if not langcode:
             return
-        saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''
+        # § 17c Rule 1 — share the in-flight guard with do_sync. While
+        # sync_project holds the daemon-side project_lock, a parallel
+        # commit_project would hit S.BUSY and the peer would pile up
+        # redundant calls. Drop, do NOT queue — commit_project is a
+        # debounced boundary marker; the next swipe's commit will
+        # cover whatever this one would have done. (The flag clears
+        # within milliseconds for the commit_project-only case since
+        # the RPC returns a job_id immediately.)
+        in_flight = getattr(self, '_sync_in_flight', {})
+        if in_flight.get(langcode):
+            return
+        in_flight[langcode] = True
+        self._sync_in_flight = in_flight
+        try:
+            from azt_collab_client import commit_project, ServerUnavailable
+            # § 12: contributor is daemon-owned, no longer on the wire.
+            job_id = commit_project(langcode)
+            # Stash for the data-loss-risk poller in
+            # _update_sync_status. commit_project is fire-and-forget,
+            # so DATA_LOSS_RISK on this code path can only be
+            # observed by poll_job-ing the eventual Result. The
+            # daemon's debounce collapses bursts into one run, so
+            # only the latest job_id matters — overwriting on each
+            # request is the right dedupe.
+            if job_id:
+                self._latest_sync_job_id = job_id
+        except ServerUnavailable as ex:
+            # Per azt_collab_client/CLAUDE.md "Peer contract: routing
+            # on sync results", auto-sync on SERVER_UNAVAILABLE /
+            # SERVER_ERROR is **silent** — log only, no UI surface.
+            # Daemon will be reachable again next time; user is
+            # mid-something-else and shouldn't be derailed.
+            print(f'[auto-sync] sync service unavailable: {ex}',
+                  file=sys.stderr, flush=True)
+            _log_server_crash_if_any('auto_sync')
+            return
+        except Exception as ex:
+            print(f'[auto-sync] error: {ex}',
+                  file=sys.stderr, flush=True)
+            return
+        finally:
+            self._sync_in_flight[langcode] = False
+        # Refresh the recorder's sync status indicator slightly after
+        # the debounce window so a successful job's last_sync is in
+        # place.
+        Clock.schedule_once(lambda dt: self._update_sync_status(), 1.5)
+
+    def _check_data_loss_risk_async(self):
+        """Poll the most recent ``commit_project`` job for
+        never-silenced sync signals (``S.DATA_LOSS_RISK`` and
+        ``S.COMMIT_REPEATEDLY_FAILED``) per CLIENT_INTEGRATION.md
+        § 17.
+
+        Auto-commit goes through ``commit_project``
+        (fire-and-forget, daemon-debounced), which only returns a
+        job_id — not a Result. The eventual Result becomes
+        observable via ``poll_job(job_id)``, which is what this
+        method does. Called from ``_update_sync_status`` (every
+        30s tick + on events that already touch the status
+        indicator).
+
+        DATA_LOSS_RISK is never silenced per contract — render
+        the translated toast as soon as we see it. Drops the
+        stashed job_id once we observe a terminal state so we
+        don't poll the same finished job forever; the next
+        ``commit_project`` will stash a fresh one."""
+        job_id = getattr(self, '_latest_sync_job_id', '')
+        if not job_id:
+            return
+        try:
+            from azt_collab_client import poll_job, translate_status, S
+        except ImportError:
+            return
+        try:
+            info = poll_job(job_id)
+        except Exception as ex:
+            print(f'[auto-sync] poll_job({job_id!r}) failed: {ex}',
+                  file=sys.stderr)
+            return
+        if info is None:
+            # Unknown job — daemon evicted it. Stop polling.
+            self._latest_sync_job_id = ''
+            return
+        state = info.get('state', '')
+        if state in ('PENDING', 'RUNNING'):
+            return  # check again next tick
+        result = info.get('result')
+        # Terminal — DONE or otherwise. Drop the job_id so we don't
+        # re-observe the same Result on every status tick. Next
+        # commit_project will stash a fresh one.
+        self._latest_sync_job_id = ''
+        if result is None:
+            return
+        # Surface both never-silenced codes per
+        # CLIENT_INTEGRATION.md § 17 routing table. Banner, not
+        # toast — see _show_severe_alert for rationale.
+        for _severe_code in (S.DATA_LOSS_RISK,
+                             S.COMMIT_REPEATEDLY_FAILED):
+            _severe = next((s for s in result.statuses
+                            if s.code == _severe_code), None)
+            if _severe is None:
+                continue
+            msg = translate_status(_severe)
+            print(f'[auto-sync] {_severe_code}: {msg}',
+                  file=sys.stderr, flush=True)
+            Clock.schedule_once(
+                lambda dt, m=msg: self._show_severe_alert(m), 0)
+
+    def start_over(self):
+        """Spawn the picker directly. Runs the auto-commit/sync and
+        the picker call in the same worker so the tap returns
+        immediately — keeping the main thread free for the picker's
+        own UI-thread JNI dispatch (Clock.schedule_once'd inside
+        pick_project on Android)."""
+        from azt_collab_client import pick_project
         import threading
+
         def _worker():
             try:
-                from collab import sync_repo
-                result = sync_repo(project_dir, git_user, token, name)
-                print(f'[auto-sync] {result}')
-                if 'pushed' in result.lower() or 'pulled' in result.lower():
-                    Clock.schedule_once(lambda dt: self._record_sync_time(), 0)
-                    if 'pushed' in result.lower():
-                        self._mark_gh_app_installed()
-                if 'pulled' in result.lower():
-                    Clock.schedule_once(
-                        lambda dt: self._reload_and_restore(saved_guid), 0)
+                self._auto_commit_sync()
             except Exception as ex:
-                print(f'[auto-sync] error: {ex}')
+                print(f'[start_over] auto_commit_sync failed: {ex}')
+            result = pick_project()
+            Clock.schedule_once(
+                lambda dt: self._handle_pick(result), 0)
         threading.Thread(target=_worker, daemon=True).start()
 
-    def show_start_over(self):
-        """Show template/image repo info, then navigate to welcome screen."""
-        from kivy.uix.popup import Popup
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.label import Label
-        from kivy.uix.button import Button
-
-        content = BoxLayout(orientation='vertical', spacing=dp(6), padding=dp(6))
-        template = ''
-        image_repo = ''
-        if self.recorder:
-            template = self.recorder.db.list_type or '(unknown)'
-            image_repo = self.recorder.db.image_repo or 'https://github.com/kent-rasmussen/images_CAWL'
-        content.add_widget(Label(
-            text=f'Template: {template}\nImage repo: {image_repo}',
-            font_size=sp(14), font_name=_FONT_NAME,
-            color=theme.TEXT,
-            size_hint_y=None, height=dp(60),
-            halign='left', valign='top',
-            text_size=(dp(280), None),
-        ))
-        content.add_widget(Label(
-            text=_tr('Start a new wordlist with this template?'),
-            font_size=sp(14), font_name=_FONT_NAME,
-            color=theme.TEXT_DIM,
-            size_hint_y=None, height=dp(30),
-        ))
-        btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
-        cancel_btn = Button(text=_tr('Cancel'), font_size=sp(14))
-        go_btn = Button(text=_tr('Yes'), font_size=sp(14),
-                        background_color=theme.ACCENT)
-        btn_row.add_widget(go_btn)
-        btn_row.add_widget(cancel_btn)
-        content.add_widget(btn_row)
-
-        popup = Popup(
-            title=_tr('Start a new wordlist'),
-            content=content,
-            size_hint=(0.9, None), height=dp(240),
-            auto_dismiss=True,
-        )
-        cancel_btn.bind(on_release=popup.dismiss)
-        def _go(*a):
-            popup.dismiss()
-            self.new_from_template() #was go_welcome() #< should be langpicker
-        go_btn.bind(on_release=_go)
-        popup.open()
-
-    def go_welcome(self):
-        self._auto_commit_sync()
-        sm = self.root.ids.sm
-        sm.transition = SlideTransition(direction='right')
-        sm.current = 'welcome'
+    def _handle_pick(self, result):
+        if result.get('ok'):
+            langcode = result.get('langcode', '')
+            if langcode:
+                # Picker emits langcode for both new-from-template and
+                # existing-project selections (picker.py post-0.17.x
+                # adds the existing-project case). Cache as the daemon
+                # registry key so _register_current_project can skip
+                # the derive_langcode round-trip.
+                #
+                # We deliberately do NOT also set _pending_vernlang
+                # here. _pending_vernlang is the "this is a fresh
+                # template clone, run clean_template" signal — set by
+                # the langpicker UI before the new-from-template flow
+                # reaches the picker (langpicker.py _on_continue).
+                # Overwriting it on every pick caused existing-project
+                # opens to run a full clean_template + re-parse + save
+                # round-trip on every load.
+                self._current_langcode = langcode
+                # Suite-wide "last opened project" state: any peer
+                # opening next lands here too.
+                try:
+                    from azt_collab_client import set_last_project
+                    set_last_project(langcode)
+                except Exception as ex:
+                    print(f'[recent] set_last_project: {ex}')
+            self.load_lift(result['path'])
+            return
+        err = result.get('error', 'unknown')
+        if err == 'cancelled':
+            # CLIENT_INTEGRATION.md § 14a: picker-cancel writes
+            # nothing to the daemon, so the discriminator for
+            # "first-setup exit" vs "user changed their mind" is
+            # peer-side state, NOT the daemon's last_project().
+            # The contract phrases this as "_current_langcode is
+            # None *and* picker came back without a selection".
+            # We're already in the cancelled branch, so the second
+            # condition is implicit; check self.recorder (the
+            # recorder's peer-specific equivalent of "I have a
+            # project loaded").
+            #
+            # § 14a "Exception — first-boot picker-cancel: App.stop()
+            # is correct" carves this out as the only legit stop()
+            # in any picker / on_resume flow. Anywhere else, an
+            # exit would lose the user's place and look like a
+            # crash (Android does NOT auto-restart on App.stop()).
+            #
+            # Daemon-side invariants since 0.43.5: an empty
+            # last_project() is impossible outside first-boot — so
+            # the bootstrap-race tiebreaker below should never fire
+            # in practice; if it does, log so a daemon regression
+            # is visible.
+            if self.recorder is not None:
+                return
+            try:
+                from azt_collab_client import last_project
+                resume = last_project()
+            except Exception:
+                resume = ''
+            if not resume:
+                self.stop()
+                return
+            print('[peer] picker cancel with last_project='
+                  f'{resume!r} but no peer-side recorder; '
+                  'falling through — daemon regression suspected '
+                  '(§ 14a invariant since 0.43.5)')
+            return
+        # 'server_apk_not_installed' falls through to the generic
+        # error below; bootstrap() owns the install prompt at startup
+        # and we don't compete with it.
+        self._show_error(_tr(
+            'Could not open project picker: {error}')
+                .format(error=err))
 
     def go_config(self):
         self._auto_commit_sync()
@@ -4835,88 +6118,298 @@ class LIFTRecorderApp(App):
         sm.current = 'config'
 
     def go_collab(self):
-        self._auto_commit_sync()
-        sm = self.root.ids.sm
-        sm.transition = SlideTransition(direction='left')
-        sm.current = 'collab'
+        """Open the server's collab settings UI. The recorder no
+        longer hosts its own setup screen — there's one canonical
+        settings UI in the suite, owned by azt_collabd, reached via
+        azt_collab_client.open_server_ui(). _auto_commit_sync runs
+        in a worker so a slow commit_project RPC can't freeze the tap
+        (same pattern as start_over)."""
+        from azt_collab_client import open_server_ui as _open_server_ui
+        import threading
+
+        def _worker():
+            try:
+                self._auto_commit_sync()
+            except Exception as ex:
+                print(f'[go_collab] auto_commit_sync failed: {ex}')
+            result = _open_server_ui(
+                on_status=lambda m: print(f'[go_collab] {m}'))
+            if result.get('ok') or result.get('prompted'):
+                return
+            err = result.get('error', 'unknown')
+            if err == 'desktop_only':
+                msg = _tr('Sync settings UI is desktop-only for now.')
+            else:
+                # 'server_apk_not_installed' falls through; bootstrap()
+                # owns the install prompt at startup.
+                msg = _tr(
+                    'Could not open sync settings: {error}'
+                ).format(error=err)
+            # If the failure isn't one of the benign environment
+            # cases, the daemon may have a crash worth surfacing.
+            # 'spawn_exited' especially — that's exactly the case
+            # the daemon's crash.log was written for.
+            if err not in ('desktop_only', 'server_apk_not_installed'):
+                _log_server_crash_if_any('go_collab')
+            Clock.schedule_once(lambda dt: self._show_toast(msg), 0)
+        threading.Thread(target=_worker, daemon=True).start()
 
     def share_apk(self):
-        """Share the running APK via Android's share sheet using MediaStore content:// URI."""
-        if platform == 'android':
-            try:
-                from jnius import autoclass, cast
-                PythonActivity = autoclass('org.kivy.android.PythonActivity')
-                Intent = autoclass('android.content.Intent')
-                ContentValues = autoclass('android.content.ContentValues')
-                MediaStoreDownloads = autoclass(
-                    'android.provider.MediaStore$Downloads')
-                activity = PythonActivity.mActivity
-                context = cast('android.content.Context', activity)
-                pm = context.getPackageManager()
-                app_info = pm.getApplicationInfo(
-                    context.getPackageName(), 0)
-                apk_path = app_info.sourceDir
-                # Insert into MediaStore Downloads to get a content:// URI
-                values = ContentValues()
-                values.put('_display_name', 'azt_recorder.apk')
-                values.put('mime_type',
-                           'application/vnd.android.package-archive')
-                resolver = context.getContentResolver()
-                uri = resolver.insert(
-                    MediaStoreDownloads.EXTERNAL_CONTENT_URI, values)
-                if not uri:
-                    self._show_error(_tr('Share failed: could not create MediaStore entry'))
-                    return
-                # Copy APK bytes into the MediaStore entry
-                fos = resolver.openOutputStream(uri)
-                with open(apk_path, 'rb') as f:
-                    while True:
-                        chunk = f.read(65536)
-                        if not chunk:
-                            break
-                        fos.write(chunk)
-                fos.close()
-                intent = Intent(Intent.ACTION_SEND)
-                intent.setType('application/vnd.android.package-archive')
-                intent.putExtra(Intent.EXTRA_STREAM,
-                                cast('android.os.Parcelable', uri))
-                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                chooser = Intent.createChooser(
-                    intent,
-                    autoclass('java.lang.String')('Share app'))
-                activity.startActivity(chooser)
-            except Exception as ex:
-                print(f'Share APK error: {ex}')
-                self._show_error(_tr('Could not share APK:\n{error}').format(error=ex))
-        else:
-            self._show_error(_tr('APK sharing is only available on Android.'))
+        from azt_collab_client.ui import share_running_apk
+        share_running_apk(on_error=self._show_error)
+
+    def share_log(self):
+        """Share the recorder's log file via Android's share sheet.
+
+        Delegates to ``azt_collab_client.ui.share.share_log_file``
+        (shipped daemon-side 0.41.19). The helper bundles the
+        current session plus the rotated `<path>.prev` previous
+        session into one text/plain blob, inserts via MediaStore
+        Downloads, and dispatches ACTION_SEND."""
+        # Imported via the module path because share_log_file isn't
+        # re-exported from azt_collab_client.ui.__init__ yet — keeps
+        # this peer-side call working independent of when the daemon
+        # team adds the convenience re-export.
+        from azt_collab_client.ui.share import share_log_file
+        share_log_file(
+            log_path=_LOG_PATH,
+            prev_path=(_LOG_PATH + '.prev') if _LOG_PATH else None,
+            on_error=self._show_error,
+        )
 
     def do_sync(self):
         if not self.recorder:
             return
-        prefs = self._load_prefs()
-        name = prefs.get('collab_name', '') or 'Recorder'
-        git_user, token = self._get_sync_credentials()
-        from collab import sync_repo, run_async
+        from azt_collab_client import (
+            sync_project, translate_result, translate_status, S)
+        langcode = self._current_langcode_or_register()
+        if not langcode:
+            return
+        # If nothing has ever been pushed (last_sync == 0), the
+        # indicator reads "not backed up" and the user's tap is really
+        # asking to set up backup, not to sync. Route to the server's
+        # collab UI directly so they land where Publish lives.
+        _, last_sync, _last_commit = self._sync_status_info()
+        if not last_sync:
+            self.go_collab()
+            return
+        # CLIENT_INTEGRATION.md § 17c Rule 3 — peer-side debounce on
+        # the Sync button (250 ms). sync_project is NOT debounced
+        # server-side, so a fast double-tap fires two parallel calls;
+        # Rule 1 below drops the second silently but the debounce
+        # avoids even queuing the second worker thread.
+        import time as _time
+        now = _time.monotonic()
+        last_tap = getattr(self, '_last_sync_tap_at', {})
+        if now - last_tap.get(langcode, 0.0) < 0.25:
+            return
+        last_tap[langcode] = now
+        self._last_sync_tap_at = last_tap
+        # § 17c Rule 1 — single in-flight guard per (RPC, project).
+        # Drop, do NOT queue, while a prior mutating RPC for this
+        # project is still in flight. Shared with _auto_commit_sync
+        # so commit_project also defers while sync_project holds the
+        # daemon-side project_lock (would otherwise hit S.BUSY).
+        in_flight = getattr(self, '_sync_in_flight', {})
+        if in_flight.get(langcode):
+            return
+        in_flight[langcode] = True
+        self._sync_in_flight = in_flight
+        import threading
 
         saved_guid = self.recorder.current.get('guid', '') if self.recorder.queue else ''
-        def _sync_and_reload(project_dir, username, pw, contributor):
-            result = sync_repo(project_dir, username, pw, contributor)
-            Clock.schedule_once(
-                lambda dt: self._reload_and_restore(saved_guid), 0)
-            return result
+        # Mutable container so the retry branch can ask finally NOT to
+        # release the flag — the retry worker re-enters _on_sync_done
+        # (retried=True) and that invocation's finally does the release.
+        _keep_held = [False]
 
-        def _on_sync_done(result):
-            print(f'Sync: {result}')
-            if result and 'not a git repository' in result.lower():
+        def _on_sync_done(result, retried=False):
+            try:
+                _on_sync_done_inner(result, retried)
+            finally:
+                # § 17c Rule 1 — clear the in-flight flag on the "post"
+                # branch unless we just spawned a JOB_INTERRUPTED retry;
+                # in that case the retried=True invocation's own finally
+                # clears it instead.
+                if not _keep_held[0]:
+                    self._sync_in_flight[langcode] = False
+                _keep_held[0] = False
+
+        def _on_sync_done_inner(result, retried=False):
+            print(f'[do_sync] {translate_result(result)}')
+            # Structure per azt_collab_client/CLAUDE.md "Peer contract:
+            # routing on sync results" (do_sync example, lines 389-430):
+            #
+            # 0. DATA_LOSS_RISK — never silenced (CLIENT_INTEGRATION.md
+            #    § 17, since 0.41.13). The daemon emits this when files
+            #    written by this peer aren't reaching git — surface
+            #    BEFORE any routing branch consumes the result so the
+            #    warning can't be hidden by a benign code that lands
+            #    in the same Result. Auto/user distinction does NOT
+            #    apply; both contexts must render the translated
+            #    toast / banner with the maintainer-contact wording.
+            #
+            # 1. AUTH_REFRESH_STALE — toast first, no return. It
+            #    piggybacks on the primary code, so the deadline
+            #    warning must surface before any routing branch
+            #    consumes the result.
+            # 2. Routing branches (elif chain) on the primary code:
+            #    NOT_A_REPO/NO_REMOTE  → publish settings
+            #    AUTH_REQUIRED         → GitHub Connect
+            #    APP_NOT_INSTALLED /
+            #    APP_SUSPENDED /
+            #    REPO_NOT_AUTHORIZED   → open params['url']
+            #                            (fallback: GitHub Connect)
+            #    SERVER_UNAVAILABLE /
+            #    SERVER_ERROR          → transient toast
+            #    JOB_INTERRUPTED       → silent one-shot retry; toast
+            #                            on second failure
+            # 3. Success path (else): PUSHED / PULLED / NOTHING_TO_COMMIT
+            #    etc. Refresh the sync indicator + recorder-specific
+            #    follow-ups (PULLED reload per CLIENT_INTEGRATION § 14,
+            #    PUSHED app-installed mark).
+            #
+            # In this peer the server's one-size-fits-all settings UI
+            # (go_collab) hosts both Publish and GitHub Connect — so
+            # NOT_A_REPO/NO_REMOTE/AUTH_REQUIRED all route there.
+            # DATA_LOSS_RISK + COMMIT_REPEATEDLY_FAILED are the two
+            # never-silenced signals — surface BOTH before any
+            # routing branch consumes the result. Both are
+            # data-loss-class per CLIENT_INTEGRATION.md § 17
+            # routing table; COMMIT_REPEATEDLY_FAILED specifically
+            # catches the catchup-commit pattern (one fat commit
+            # after a streak of local-commit failures) — distinct
+            # from network-out, where push fails but commit
+            # succeeds.
+            for _severe_code in (S.DATA_LOSS_RISK,
+                                 S.COMMIT_REPEATEDLY_FAILED):
+                _severe = next((s for s in result.statuses
+                                if s.code == _severe_code), None)
+                if _severe is not None:
+                    _severe_msg = translate_status(_severe)
+                    # Sticky banner, not toast — these messages
+                    # tell the user to share the daemon log and
+                    # 1.5s isn't long enough to read the
+                    # instruction. The banner persists until tap.
+                    Clock.schedule_once(
+                        lambda dt, m=_severe_msg:
+                            self._show_severe_alert(m), 0)
+            stale = next((s for s in result.statuses
+                          if s.code == S.AUTH_REFRESH_STALE), None)
+            if stale is not None:
+                _stale_msg = translate_status(stale)
+                Clock.schedule_once(
+                    lambda dt, m=_stale_msg: self._show_toast(m), 0)
+
+            if result.has_any(S.NOT_A_REPO, S.NO_REMOTE):
                 Clock.schedule_once(lambda dt: self.go_collab(), 0)
                 return
-            if 'Pushed' in (result or ''):
-                self._record_sync_time()
+            if result.has(S.AUTH_REQUIRED):
+                Clock.schedule_once(lambda dt: self.go_collab(), 0)
+                return
+            if result.has(S.CONTRIBUTOR_UNSET):
+                # § 12: daemon refuses commit-issuing endpoints when no
+                # contributor name is set. Route through go_collab —
+                # same App-level entry every other config-class branch
+                # in this table uses (AUTH_REQUIRED above, NOT_A_REPO,
+                # NO_REMOTE below). go_collab handles the settings-UI
+                # dispatch + the desktop-only fallback message.
+                _msg = translate_result(result)
+                Clock.schedule_once(
+                    lambda dt, m=_msg: self._show_toast(m), 0)
+                Clock.schedule_once(lambda dt: self.go_collab(), 0)
+                return
+            if result.has(S.WORK_OFFLINE_ENABLED):
+                # Daemon-wide work-offline toggle is on; sync_project
+                # refused without attempting any push. Per
+                # CLIENT_INTEGRATION.md § 17 routing, toast + route
+                # to the daemon settings UI so the user can flip the
+                # toggle. Same shape as AUTH_REQUIRED / NOT_A_REPO.
+                _msg = translate_result(result)
+                Clock.schedule_once(
+                    lambda dt, m=_msg: self._show_toast(m), 0)
+                from azt_collab_client import open_server_ui
+                Clock.schedule_once(lambda dt: open_server_ui(), 0)
+                return
+            if result.has_any(S.APP_NOT_INSTALLED, S.APP_SUSPENDED,
+                              S.REPO_NOT_AUTHORIZED):
+                _url = next(
+                    (s.params.get('url', '') for s in result.statuses
+                     if s.code in (S.APP_NOT_INSTALLED,
+                                   S.APP_SUSPENDED,
+                                   S.REPO_NOT_AUTHORIZED)),
+                    '')
+                if _url:
+                    import webbrowser
+                    webbrowser.open(_url)
+                else:
+                    Clock.schedule_once(
+                        lambda dt: self.go_collab(), 0)
+                return
+            if result.has_any(S.SERVER_UNAVAILABLE, S.SERVER_ERROR):
+                _unavail_msg = translate_result(result)
+                Clock.schedule_once(
+                    lambda dt, m=_unavail_msg: self._show_toast(m), 0)
+                _log_server_crash_if_any('do_sync')
+                return
+            if result.has(S.JOB_INTERRUPTED):
+                if retried:
+                    Clock.schedule_once(lambda dt: self._show_toast(
+                        _tr('Sync interrupted, please try again.')), 0)
+                    return
+                # Silent one-shot retry on a fresh worker thread.
+                # Tell the outer finally to hold the in-flight flag —
+                # the retry's _on_sync_done(retried=True) clears it.
+                _keep_held[0] = True
+                def _retry_worker():
+                    # § 12: contributor is daemon-owned.
+                    try:
+                        r = sync_project(langcode)
+                        Clock.schedule_once(
+                            lambda dt, rr=r:
+                                _on_sync_done(rr, retried=True),
+                            0)
+                    except Exception as ex:
+                        # Same belt-and-suspenders as the initial
+                        # _worker: don't strand the in-flight flag.
+                        print(f'[do_sync] retry worker error: {ex}',
+                              file=sys.stderr, flush=True)
+                        self._sync_in_flight[langcode] = False
+                threading.Thread(
+                    target=_retry_worker, daemon=True).start()
+                return
+
+            # Success path: PUSHED / PULLED / NOTHING_TO_COMMIT /
+            # CONFLICTS / etc. Refresh the sync indicator regardless
+            # of outcome — the server may have stamped a new last_sync
+            # even on partial success, and a no-op result still
+            # benefits from re-reading project_status in case another
+            # peer pushed since we loaded.
+            self._update_sync_status()
+            # Per CLIENT_INTEGRATION.md § 14, only refresh the
+            # recorder UI when on-disk bytes actually changed — i.e.
+            # remote→local was pulled. Local→remote-only pushes don't
+            # invalidate our in-memory model, so skip the reparse.
+            if result.has(S.PULLED):
+                self._reload_and_restore(saved_guid)
+            if result.has(S.PUSHED) or result.has(S.COMMITTED_AND_PUSHED):
                 self._mark_gh_app_installed()
-        run_async(_sync_and_reload,
-                  self.recorder.db.dir, git_user, token, name,
-                  on_done=_on_sync_done)
+
+        def _worker():
+            # § 12: contributor is daemon-owned, no longer on the wire.
+            try:
+                result = sync_project(langcode)
+                Clock.schedule_once(lambda dt: _on_sync_done(result), 0)
+            except Exception as ex:
+                # Belt-and-suspenders: if sync_project raises something
+                # the client didn't wrap into a Result, _on_sync_done
+                # never runs and its finally never clears the in-flight
+                # flag — the user would be locked out of Sync forever.
+                # Clear here and surface the error in the log.
+                print(f'[do_sync] worker error: {ex}',
+                      file=sys.stderr, flush=True)
+                self._sync_in_flight[langcode] = False
+        threading.Thread(target=_worker, daemon=True).start()
 
     def show_image_picker(self):
         if not self.recorder or not self.recorder.current:
@@ -4942,48 +6435,154 @@ class LIFTRecorderApp(App):
             self.recorder.stop_recording()
 
     def nav_prev(self):
-        if self.recorder:
+        if not self.recorder:
+            return
+        # Only bake images and trigger a sync if the user actually
+        # changed something on the current entry. Pure browse swipes
+        # are free.
+        if self.recorder._dirty:
             self._save_remote_image()
-            self.recorder.go_prev()
             self._auto_commit_sync()
+            self.recorder._dirty = False
+        self.recorder.go_prev()
 
     def nav_next(self):
-        if self.recorder:
+        if not self.recorder:
+            return
+        if self.recorder._dirty:
             self._save_remote_image()
-            self.recorder.go_next()
             self._auto_commit_sync()
+            self.recorder._dirty = False
+        self.recorder.go_next()
+
+    def _save_image_for_entry(self, pil_img, entry, fmt='PNG'):
+        """Write *pil_img* as *entry*'s canonical illustration into the
+        project. Handles both URI projects (via MediaHandle through the
+        daemon's provider, per the contract that shipped in 0.35.2) and
+        desktop / iOS (direct filesystem write into db.images_dir).
+        Updates the LIFT XML's <illustration href> via set_illustration
+        and mirrors the path/href onto the entry dict for immediate
+        display. Marks the recorder dirty so the surrounding nav_next /
+        nav_prev fires _auto_commit_sync. Returns the local display
+        path or '' on failure.
+
+        Safe to call from a background thread — the LIFT write inside
+        set_illustration / _save tolerates that on URI projects
+        (ContentProvider open is JNI-thread-safe), and the entry dict
+        updates here aren't Kivy properties so don't need the main
+        thread."""
+        if not self.recorder:
+            return ''
+        db = self.recorder.db
+        filename = db.imagename(entry)
+        guid = entry.get('guid', '')
+        if getattr(db, 'is_uri', False):
+            import io
+            from azt_collab_client import MediaHandle
+            buf = io.BytesIO()
+            try:
+                pil_img.save(buf, fmt)
+            except Exception as ex:
+                print(f'[image-save] PIL serialize failed: {ex}')
+                return ''
+            data = buf.getvalue()
+            uri = db.image_target(filename)
+            try:
+                # atomic_open_write on URI POSTs to the daemon's
+                # /v1/projects/<lang>/atomic_commit (since 0.36.0),
+                # which serialises against daemon merge-output writes
+                # and any concurrent peer atomic_commit — non-torn
+                # cross-process semantics, per the contract's
+                # "atomic_open_write — when peers need cross-process
+                # atomicity" section.
+                with MediaHandle(uri, 'image').atomic_open_write() as f:
+                    f.write(data)
+            except Exception as ex:
+                print(f'[image-save] URI write failed: {ex}')
+                return ''
+            # Prime the local URI-image cache so the next display read
+            # doesn't re-fetch through the provider.
+            dest = ''
+            try:
+                cache_dir = self._get_image_cache_dir()
+                if cache_dir:
+                    sub = os.path.join(cache_dir, '_uri_images')
+                    os.makedirs(sub, exist_ok=True)
+                    dest = os.path.join(sub, filename)
+                    with open(dest, 'wb') as f:
+                        f.write(data)
+                    db._uri_image_cache[filename] = dest
+            except Exception as ex:
+                print(f'[image-save] cache prime failed: {ex}')
+                dest = ''
+        else:
+            if not db.images_dir:
+                return ''
+            try:
+                os.makedirs(db.images_dir, exist_ok=True)
+                dest = os.path.join(db.images_dir, filename)
+                pil_img.save(dest, fmt)
+            except Exception as ex:
+                print(f'[image-save] filesystem save failed: {ex}')
+                return ''
+        try:
+            db.set_illustration(guid, filename)
+        except Exception as ex:
+            print(f'[image-save] set_illustration failed: {ex}')
+            return ''
+        entry['image_path'] = dest
+        entry['illustration_href'] = filename
+        if self.recorder:
+            self.recorder._dirty = True
+        print(f'[image-save] wrote {filename} for guid {guid[:8]}')
+        return dest
 
     def _save_remote_image(self):
-        """If the current entry's image is from cache or remote URL, copy/save
-        it to the git images/ dir so it gets committed on swipe."""
+        """Bake the current entry's displayed image into the project so
+        it commits with the surrounding swipe. No-op if no image is
+        displayed, if the entry already has its canonical project image
+        (idempotency), or if a usable image source can't be obtained.
+        Called from nav_next / nav_prev only when the recorder is
+        dirty — pure browse never invokes this."""
         if not self.recorder:
             return
         entry = self.recorder.current
         if not entry:
             return
-        img_path = entry.get('image_path', '')
+        # Go through the lazy property so an unresolved image_path
+        # gets filled in here on first access, not by parse.
+        img_path = self.recorder.image_path
         if not img_path:
             return  # no image
-        # Already in git images/ dir
         db = self.recorder.db
-        if img_path.startswith(db.images_dir):
-            return
         filename = db.imagename(entry)
-        dest = os.path.join(db.images_dir, filename)
-        if os.path.exists(dest):
-            return  # already saved locally
-        # If image is from cache, just copy the file
-        cache_dir = self._get_image_cache_dir()
-        if img_path.startswith(cache_dir) and os.path.exists(img_path):
-            import threading, shutil
+        # Idempotency: if the entry already references the canonical
+        # project filename, the image is already in the repo. Skip.
+        if entry.get('illustration_href') == filename:
+            return
+        # On filesystem projects we can also short-circuit on a
+        # direct path match.
+        if not getattr(db, 'is_uri', False) and db.images_dir:
+            dest_fs = os.path.join(db.images_dir, filename)
+            if img_path.startswith(db.images_dir) or os.path.exists(dest_fs):
+                return
+        # Stage 2: img_path is always a local file now (project's own
+        # images/, an Android URI-project pull-through, or a CAWL
+        # pull-through tmpfile from the daemon). Two paths remain:
+        #
+        #   - The file is on disk → copy bytes through PIL into the
+        #     project's images/ via _save_image_for_entry.
+        #   - The file isn't on disk (pull failed, file deleted under
+        #     us) → fall back to the displayed texture, which Kivy is
+        #     still rendering from earlier.
+        import threading
+        if os.path.exists(img_path):
             threading.Thread(
                 target=self._copy_cached_to_images,
-                args=(img_path, dest, entry), daemon=True).start()
+                args=(img_path, filename, entry), daemon=True).start()
             return
-        # Remote URL — try texture first, then download
-        if not img_path.startswith('http'):
-            return
-        import threading
+        # Texture-fallback for the race where the pull-through file
+        # vanished between display and save.
         sm = self.root.ids.sm
         rec_screen = sm.get_screen('recorder')
         img_widget = rec_screen.ids.get('entry_image')
@@ -4991,25 +6590,20 @@ class LIFTRecorderApp(App):
             tex = img_widget.texture
             pixels = tex.pixels
             w, h = tex.size
-            # Kivy textures from file/URL loaders may have uvpos[1]==0
-            # (already top-down) or uvpos[1]!=0 (OpenGL bottom-up)
             needs_flip = (tex.uvpos[1] == 0)
             threading.Thread(
                 target=self._save_texture_to_file,
-                args=(pixels, w, h, dest, entry, needs_flip),
+                args=(pixels, w, h, filename, entry, needs_flip),
                 daemon=True).start()
-        else:
-            threading.Thread(
-                target=self._download_remote_image,
-                args=(img_path, dest, entry), daemon=True).start()
 
-    def _copy_cached_to_images(self, src, dest, entry):
-        """Copy a cached image to images/ dir and update LIFT XML."""
+    def _copy_cached_to_images(self, src, filename, entry):
+        """Worker: read a cached image from *src* (local file path),
+        rescale if needed, route through _save_image_for_entry (which
+        handles both URI projects via MediaHandle and desktop direct
+        writes). *filename* is informational; the helper recomputes
+        it from imagename()."""
         try:
-            import shutil
             from PIL import Image as PILImage
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            # Scale if needed
             img = PILImage.open(src)
             w, h = img.size
             max_dim = 1284
@@ -5017,65 +6611,27 @@ class LIFTRecorderApp(App):
                 ratio = min(max_dim / w, max_dim / h)
                 img = img.resize((int(w * ratio), int(h * ratio)),
                                  PILImage.LANCZOS)
-                img.save(dest, 'PNG')
-            else:
-                shutil.copy2(src, dest)
-            entry['image_path'] = dest
-            entry['illustration_href'] = os.path.basename(dest)
-            guid = entry.get('guid', '')
-            self.recorder.db.set_illustration(guid, os.path.basename(dest))
-            print(f'[image-save] copied from cache to {dest}')
+            self._save_image_for_entry(img, entry)
         except Exception as ex:
             print(f'[image-save] cache copy error: {ex}')
 
-    def _save_texture_to_file(self, pixels, w, h, dest, entry, needs_flip=True):
-        """Save raw RGBA pixel data to a PNG file."""
+    def _save_texture_to_file(self, pixels, w, h, filename, entry,
+                              needs_flip=True):
+        """Worker: build a PIL image from raw RGBA pixel data and
+        route through _save_image_for_entry."""
         try:
             from PIL import Image as PILImage
             img = PILImage.frombytes('RGBA', (w, h), pixels)
             if needs_flip:
                 img = img.transpose(PILImage.FLIP_TOP_BOTTOM)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
             max_dim = 1284
             if w > max_dim or h > max_dim:
                 ratio = min(max_dim / w, max_dim / h)
                 img = img.resize((int(w * ratio), int(h * ratio)),
                                  PILImage.LANCZOS)
-            img.save(dest, 'PNG')
-            entry['image_path'] = dest
-            entry['illustration_href'] = os.path.basename(dest)
-            guid = entry.get('guid', '')
-            self.recorder.db.set_illustration(guid, os.path.basename(dest))
-            print(f'[image-save] saved from texture to {dest}')
+            self._save_image_for_entry(img, entry)
         except Exception as ex:
             print(f'[image-save] texture save error: {ex}')
-
-    def _download_remote_image(self, url, dest, entry):
-        """Fallback: download a remote image to local images/ dir."""
-        try:
-            import urllib.request
-            ctx = self._ssl_context()
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
-                data = resp.read()
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            from PIL import Image as PILImage
-            import io
-            img = PILImage.open(io.BytesIO(data))
-            max_dim = 1284
-            w, h = img.size
-            if w > max_dim or h > max_dim:
-                ratio = min(max_dim / w, max_dim / h)
-                img = img.resize((int(w * ratio), int(h * ratio)),
-                                 PILImage.LANCZOS)
-            img.save(dest, 'PNG')
-            entry['image_path'] = dest
-            entry['illustration_href'] = os.path.basename(dest)
-            guid = entry.get('guid', '')
-            self.recorder.db.set_illustration(guid, os.path.basename(dest))
-            print(f'[image-save] downloaded remote image to {dest}')
-        except Exception as ex:
-            print(f'[image-save] download error: {ex}')
 
     def play_audio(self):
         if self.recorder:
@@ -5087,7 +6643,9 @@ class LIFTRecorderApp(App):
             self.recorder.clear_audio()
 
     def show_goto_dialog(self):
-        """Popup to jump to a specific entry number. OK goes, Clear resets filter."""
+        """Popup to jump to a specific entry by its list number (the same
+        number shown in the progress label, e.g. SILCAWL). Falls back to
+        queue position when the current wordlist has no list numbers."""
         if not self.recorder:
             return
         from kivy.uix.popup import Popup
@@ -5095,11 +6653,45 @@ class LIFTRecorderApp(App):
         from kivy.uix.textinput import TextInput
         from kivy.uix.button import Button
 
-        total = len(self.recorder.queue)
+        r = self.recorder
+        total = len(r.queue)
+        if total == 0:
+            return
+
+        # Map list-number → queue index for entries that carry one.
+        num_to_idx = {}
+        for idx, e in enumerate(r.queue):
+            cawl = e.get('cawl', '')
+            if not cawl:
+                continue
+            try:
+                num_to_idx.setdefault(int(cawl), idx)
+            except ValueError:
+                continue
+
+        has_list_numbers = bool(num_to_idx)
+        list_label = r.db.list_type or _tr('list')
+
+        if has_list_numbers:
+            nums = sorted(num_to_idx)
+            lo, hi = nums[0], nums[-1]
+            cur_cawl = r.current.get('cawl', '') if r.current else ''
+            try:
+                initial = str(int(cur_cawl))
+            except (TypeError, ValueError):
+                initial = str(lo)
+            title = _tr('Go to {label} number ({lo}-{hi})').format(
+                label=list_label, lo=lo, hi=hi)
+            hint = f'{lo}-{hi}'
+        else:
+            initial = str(r.index + 1)
+            title = _tr('Go to entry (1-{total})').format(total=total)
+            hint = f'1-{total}'
+
         content = BoxLayout(orientation='vertical', spacing=dp(12), padding=dp(12))
         num_input = TextInput(
-            text=str(self.recorder.index + 1),
-            hint_text=f'1-{total}',
+            text=initial,
+            hint_text=hint,
             multiline=False, size_hint_y=None, height=dp(48),
             font_size=sp(18), input_filter='int',
         )
@@ -5113,7 +6705,7 @@ class LIFTRecorderApp(App):
         content.add_widget(btn_row)
 
         popup = Popup(
-            title=_tr('Go to entry (1-{total})').format(total=total),
+            title=title,
             content=content,
             size_hint=(0.8, None), height=dp(180),
             auto_dismiss=True,
@@ -5124,124 +6716,34 @@ class LIFTRecorderApp(App):
             if text:
                 try:
                     n = int(text)
-                    n = max(1, min(n, total))
-                    self.recorder.index = n - 1
-                    self.recorder._pending_rerecord = False
-                    self.recorder._notify_ui()
                 except ValueError:
-                    pass
+                    popup.dismiss()
+                    return
+                if has_list_numbers:
+                    if n in num_to_idx:
+                        r.index = num_to_idx[n]
+                    else:
+                        closest = min(num_to_idx, key=lambda k: abs(k - n))
+                        r.index = num_to_idx[closest]
+                else:
+                    n = max(1, min(n, total))
+                    r.index = n - 1
+                r._pending_rerecord = False
+                r._notify_ui()
             popup.dismiss()
 
         def _clear(*args):
-            self.recorder.cawl_filter = ''
-            self.recorder.gloss_search = ''
-            self.recorder.only_unrecorded = False
-            self.recorder.rebuild_queue()
+            r.cawl_filter = ''
+            r.gloss_search = ''
+            r.only_unrecorded = False
+            set_peer_pref('cawl_filter', None)
+            set_peer_pref('show_past_work', True)
+            r.rebuild_queue()
             popup.dismiss()
 
         clear_btn.bind(on_release=_clear)
         ok_btn.bind(on_release=_go)
         num_input.bind(on_text_validate=_go)
-        popup.open()
-
-    def clone_dialog(self):
-        """Popup with a single URL field for cloning a repository."""
-        from kivy.uix.popup import Popup
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.textinput import TextInput
-        from kivy.uix.button import Button
-        from kivy.uix.label import Label
-
-        content = BoxLayout(orientation='vertical', spacing=dp(10), padding=dp(12))
-        content.add_widget(Label(
-            text=_tr('Clone a git repository containing a LIFT file:'),
-            size_hint_y=None, height=dp(30),
-            font_size=sp(13), color=theme.TEXT,
-        ))
-
-        url_input = TextInput(
-            text='',
-            hint_text=_tr('Paste the repository URL here'),
-            multiline=False, size_hint_y=None, height=dp(48),
-            font_size=sp(14),
-        )
-        content.add_widget(url_input)
-
-        btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
-        cancel_btn = Button(text=_tr('Cancel'), font_size=sp(14))
-        clone_btn = Button(text=_tr('Clone'), font_size=sp(14),
-                           background_color=theme.ACCENT)
-        btn_row.add_widget(cancel_btn)
-        btn_row.add_widget(clone_btn)
-        content.add_widget(btn_row)
-
-        popup = Popup(
-            title=_tr('Clone Repository'),
-            content=content,
-            size_hint=(0.9, None), height=dp(240),
-            auto_dismiss=True,
-        )
-
-        def _do_clone(*args):
-            clone_url = url_input.text.strip()
-            popup.dismiss()
-            if not clone_url:
-                return
-            # Ensure URL ends with .git for dulwich
-            if not clone_url.endswith('.git'):
-                clone_url += '.git'
-            git_user, token = self._get_sync_credentials()
-
-            repo_name = clone_url.rstrip('/').split('/')[-1].replace('.git', '')
-            dest = os.path.join(self.user_data_dir, 'projects', repo_name)
-
-            self._show_loading_overlay(_tr('Cloning repository...'))
-            import threading
-            from collab import clone_repo
-
-            def _on_progress(line):
-                Clock.schedule_once(
-                    lambda dt, t=line: self._update_loading_detail(t), 0)
-
-            def _worker():
-                try:
-                    # Try with credentials first
-                    lift_path, log = clone_repo(
-                        clone_url, dest, git_user, token,
-                        on_progress=_on_progress)
-                    # If credential error, retry without credentials (public repo)
-                    if not lift_path and 'credential' in log.lower():
-                        print('[clone] retrying without credentials...')
-                        lift_path, log = clone_repo(
-                            clone_url, dest, '', '',
-                            on_progress=_on_progress)
-                    print(f'[clone] result: {log}')
-                    if lift_path:
-                        Clock.schedule_once(lambda dt: self.load_lift(lift_path), 0)
-                    elif 'credential' in log.lower() or 'auth' in log.lower():
-                        Clock.schedule_once(
-                            lambda dt: (self._dismiss_loading_overlay(),
-                                        self._show_collab_prompt()), 0)
-                    else:
-                        Clock.schedule_once(
-                            lambda dt: (self._dismiss_loading_overlay(),
-                                        self._show_error(log)), 0)
-                except Exception as ex:
-                    print(f'[clone] error: {ex}')
-                    err = str(ex).lower()
-                    if 'credential' in err or 'auth' in err:
-                        Clock.schedule_once(
-                            lambda dt: (self._dismiss_loading_overlay(),
-                                        self._show_collab_prompt()), 0)
-                    else:
-                        Clock.schedule_once(
-                            lambda dt: (self._dismiss_loading_overlay(),
-                                        self._show_error(str(ex))), 0)
-
-            threading.Thread(target=_worker, daemon=True).start()
-
-        cancel_btn.bind(on_release=popup.dismiss)
-        clone_btn.bind(on_release=_do_clone)
         popup.open()
 
     def refresh_recorder_ui(self):
@@ -5265,6 +6767,12 @@ class LIFTRecorderApp(App):
             img = ids.entry_image
             if r.has_image:
                 new_src = r.image_path
+                # #2 On lowMemory devices, hand AsyncImage a
+                # downsampled side-cache path instead of the full-
+                # resolution original. Reduces texture-upload memory
+                # and Kivy's decode cost. No-op on devices with
+                # headroom — full-res displayed.
+                new_src = self._downsample_for_display(new_src)
                 if img.source != new_src:
                     img.source = new_src
                     img.opacity = 1
