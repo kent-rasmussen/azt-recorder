@@ -1,5 +1,328 @@
 CHANGELOG — A-Z+T Recorder
 
+1.47.7
+  CAWL filter (Filter words): switch input_type from 'tel'
+  to 'number'. Gives the digit keypad with ``-`` and ``,``
+  accessible without the symbol-toggle dance the 'tel'
+  keypad required for ``,``. No input_filter — 'int' would
+  block ``-`` and ``,`` characters that CAWL range syntax
+  needs (``1-500,42`` style); apply_cawl's parser handles
+  validation.
+
+1.47.6
+  Fix crash-on-startup introduced by 1.47.5: Kivy's
+  TextInput.input_type is an OptionProperty that only
+  accepts 'null', 'text', 'number', 'url', 'mail',
+  'datetime', 'tel', 'address'. The 'numbersAndPunctuation'
+  value (an iOS UIKeyboardType name) raised
+  ValueError at kv-parse time when the app's root widget
+  was instantiated, causing the app to crash before
+  the splash even cleared. Replaced with 'tel' (phone-style
+  numeric keypad) which is the closest valid value for the
+  CAWL filter's digit + ``-`` + ``,`` use case — gives
+  the digit grid and hyphen natively, with the IME's
+  ``!?#`` symbol toggle for ``,`` and other punctuation.
+
+1.47.5
+  CAWL filter input ("Filter words" panel) now requests the
+  ``numbersAndPunctuation`` Android keyboard on focus instead
+  of the full alphanumeric soft keyboard. Maps to
+  ``TYPE_CLASS_NUMBER | NUMBER_FLAG_DECIMAL | NUMBER_FLAG_SIGNED``
+  → digits + ``-`` + locale-dependent decimal separator.
+  In comma-as-decimal locales (French, DRC), the user gets
+  digits + ``-`` + ``,`` natively for range expressions like
+  ``1-200, 400-500``. US English users get ``.`` for the
+  decimal slot and need the symbols toggle for ``,``; the
+  CAWL parser already handles either separator.
+
+  Audit of other TextInputs: ``gloss_search_input`` (gloss
+  text search), ``name_input`` (contributor name),
+  ``gl_token_input`` (GitLab PAT, password mode),
+  ``gl_username_input`` (GitLab username) all stay on the
+  default text keyboard — they're free-text by purpose.
+
+1.47.4
+  Go-to-entry dialog's number input now requests Android's
+  numeric keypad on focus instead of the full alphanumeric
+  soft keyboard. Adds ``input_type='number'`` (maps to
+  InputType.TYPE_CLASS_NUMBER) alongside the existing
+  ``input_filter='int'``. No-op on desktop.
+
+1.47.3
+  sync_status_label: add ``shorten: True`` /
+  ``shorten_from: 'right'`` to prevent v0.47.0 long labels
+  from word-wrapping into clipped tail lines. Field
+  symptom (2026-05-27): with work_offline=on and
+  lan_allow_sync=off, the daemon was correctly reporting
+  wan_unshared=113 / lan_unshared=1 / at_risk=1 / n_changes=1
+  → text rendered as "WAN-113 LAN-1 +1 · offline" (26 chars)
+  → Kivy wrapped to multiple lines in a dp(128)-wide
+  dp(40)-tall label → wrap+valign='middle' clipped the
+  leading lines and only the tail "· offline" was visible.
+  With shorten=True the text stays on one line and gets
+  ellipsised from the right when it overflows, so the
+  load-bearing WAN-N / LAN-N state is always visible even
+  if the suffix gets cut.
+
+1.47.2
+  Uncommitted-changes badge: render `+N` (in red), not
+  `R(+N)`. Per CLIENT_INTEGRATION.md § 17b's corrected
+  rendering recipe, `R(+N)` was design-notes shorthand for
+  "the red uncommitted badge with value N" — that's
+  notation, not output text. 1.47.0 took the shorthand
+  literally and rendered "R(+5)" in the badge; fix
+  restores the contract-correct `+5`. Updated
+  _sync_status_info, docs/StatusCodes.md, and the sample
+  outputs in docs/StashedCode.md.
+
+1.47.1
+  Add docs/StashedCode.md with a one-edit restoration recipe
+  for the timestamp prefix dropped from _sync_status_info in
+  1.47.0. The user wanted to see the v0.47.0 badge without
+  the timestamp before deciding whether to keep it; the
+  stash file makes bringing it back a copy-paste rather than
+  a git-history dig (git history mixes the drop with other
+  contract-conformance changes from the same commit). Also
+  catalogued the pre-1.47.0 _not_backed_up_text variants for
+  completeness, though those are unlikely to need
+  resurrection — the v0.47.0 WAN-N count surfaces the same
+  blockers.
+
+1.47.0
+  Adopt the v0.47.0 sync-status rendering model
+  (CLIENT_INTEGRATION.md § 17b). The pre-v0.47.0
+  LANOK / +N / +u/N model and its commits_ahead /
+  unshared_commits inputs are gone from the daemon
+  (MIN_SERVER_VERSION enforces). Recorder follows.
+
+  _sync_status_info now reads three independent count
+  fields off ProjectStatus — wan_unshared / lan_unshared /
+  at_risk — and produces one of five labels per the
+  contract recipe:
+    OK / WAN-{n} / LAN-{n} / WAN-{w}_LAN-{l} / WAN-{w} LAN-{l}
+
+  Per-channel red coloring follows the "settings allow
+  this to be stored but it isn't yet" rule:
+    WAN-{n} red iff work_offline OFF
+    LAN-{n} red iff lan_allow_sync ON
+    R(+{n}) always red
+  Compound labels (WAN-x_LAN-y / WAN-x LAN-y) color each
+  part independently; the separator is black.
+
+  Dropped: the timestamp prefix (today HH:MM / yesterday /
+  N days ago), the not-backed-up call-to-action prefix
+  family ("not backed up" / "sign in to back up" /
+  "publish to back up" / "add name to back up"), the
+  · LAN-only mode-tag suffix, and the _not_backed_up_text
+  helper that produced them. The v0.47.0 model encodes
+  the same information through the WAN-N count itself —
+  a LAN-only project with no origin URL walks from HEAD
+  so wan_unshared equals the whole history, surfacing
+  as intentional friction.
+
+  Suffix: only " · offline" surfaces now, for the
+  "phone in the forest" mode (work_offline=on AND
+  lan_allow_sync=off). The asymmetric toggle states
+  imply their own mode visible elsewhere in the UI.
+
+  do_sync()'s last_sync==0 → go_collab routing is
+  unchanged; the badge text shifted but the tap-routing
+  trigger is independent of display wording.
+
+  docs/StatusCodes.md rewritten end-to-end for the new
+  model.
+
+1.46.48
+  File NOTES_TO_DAEMON.md item: LAN-cloned project (no github
+  remote) never shows LANOK. § 20 hard rule 4 promises a
+  LANOK badge for such projects but the § 17b rendering
+  recipe gates LANOK on commits_ahead > 0, which the daemon
+  reports as 0 for any NOT_A_REPO project regardless of how
+  many LAN-pushed commits exist. Field evidence (2026-05-26):
+  en-001-x-kent's badge shows "<prefix> +1 · LAN-only"
+  indefinitely even though [lan-push] advanced confirms the
+  paired phone received the commit. Three fix shapes proposed
+  daemon-side; recorder isn't shipping a peer-side workaround
+  to avoid recipe drift.
+
+1.46.47
+  Two changes:
+
+  1. Drop the peer-side CharisSIL discovery workaround from
+     1.46.46. Upstream fix landed in
+     azt_collab_client/ui/fonts.py: the broken hard-coded
+     Android candidate is gone and the source-tree-relative
+     candidate (client_dir/../fonts) is in. main.py now
+     just calls register_charis() and prints the result; the
+     workaround function and _client_fonts cache priming are
+     removed.
+
+  2. Conform to CLIENT_INTEGRATION.md § 17b's tightened
+     "Background refresh obligation — peer MUST re-poll AND
+     re-read content on HEAD advance" (renamed from "Badge
+     refresh obligation"). _sync_status_info now returns
+     head_sha alongside last_sync / last_commit;
+     _update_sync_status uses head_sha (since daemon 0.45.45)
+     as the primary content-advance signal, falling back to
+     last_commit only when head_sha is empty (legacy daemons).
+     head_sha catches incoming LAN receive-packs from paired
+     peers, which last_commit alone misses (closed the field
+     symptom from 2026-05-26: phone A's recording landed on
+     phone B's working tree via [lan-push] but B kept
+     rendering the pre-receive LIFT until manual re-entry).
+     Reload is deferred while the user is mid-recording; the
+     next post-stop_recording poll catches the still-pending
+     diff and applies it. Baseline reset on project load now
+     covers both _last_head_sha and _last_commit_seen.
+
+1.46.46
+  Workaround for boxes-instead-of-Lingala-text: pre-register
+  CharisSIL from the recorder's own fonts/ dir before calling
+  azt_collab_client.ui.register_charis(). Upstream helper
+  hardcodes the Android candidate path with the wrong
+  package name (org.atoznback.azt_recorder with underscore,
+  but actual is aztrecorder no underscore per
+  buildozer.spec.tmpl); all other candidates miss on Android
+  too, so the helper silently fell back to Roboto and Lingala
+  ɛ/ɔ + combining tone marks rendered as boxes. main.py now
+  discovers the TTFs via os.path.dirname(__file__) + '/fonts'
+  (deterministic, no package-name dependency) and primes
+  _client_fonts._CACHED_FONT_NAME so downstream client UI
+  (popups, settings) also gets CharisSIL. New
+  '[font] CharisSIL=loaded|MISSING (peer_path_hit=...)'
+  startup log line makes future incidents diagnosable from
+  logcat directly. Upstream fix request filed at
+  azt_collab_client/NOTES_TO_DAEMON.md; recorder will drop
+  the workaround once it lands.
+
+1.46.45
+  Fix the actual "recorder won't shut off" wedge: stop
+  rebuilding the RecordButton on every refresh_recorder_ui
+  call. ``btn_area.clear_widgets()`` on every refresh
+  (main.py:6907+) destroyed the RecordButton instance the
+  user was currently pressing — twice per recording, once
+  on the record_start-driven refresh and once on the
+  _publish_start_success-driven refresh. Kivy's
+  ``touch.grab_list`` holds only weak refs to grabbed
+  widgets; Python GC could collect the old button before
+  the user's touch_up arrived, the grab dispatch then found
+  a dead weakref and silently skipped, and the touch_up
+  routed to the freshly-built button whose grab was never
+  set → ``record_stop`` was never called → recording ran
+  to the _MAX_DURATION_BACKSTOP_S ceiling (60.71 s in the
+  field log from 2026-05-26 09:15). Non-deterministic
+  because GC timing varies — same gesture sometimes worked,
+  sometimes hung.
+
+  Refresh now updates the existing RecordButton's
+  ``recording`` BooleanProperty in place when the layout
+  state is unchanged, and only ``clear_widgets`` on actual
+  transitions (record-button ↔ play+redo). The grabbed
+  widget survives every refresh during a press → touch_up
+  reliably fires record_stop. The #1 grab pattern from
+  1.46.44 is preserved on the rebuild path.
+
+  Also: ``_publish_start_success`` now prints
+  ``[record] publish_start_success: audio_path=...`` so the
+  next incident log can show whether the success callback
+  ran (the 2026-05-26 incident log had no marker for this
+  and reading the trace required inference).
+
+1.46.44
+  Five wedge / freaking-out fixes around record/stop:
+
+  #1 — Slide-off-button no longer leaves the recorder
+  stuck. RecordButton's touch binding (refresh_recorder_ui,
+  main.py:6920+) now uses the Kivy grab pattern: touch_down
+  grabs the touch onto the widget; touch_up fires record_stop
+  whenever grab_current matches, regardless of finger
+  position. Pre-fix, a finger sliding off the button before
+  release skipped record_stop silently — the single most
+  likely cause of the recent "recorder not shutting off"
+  reports.
+
+  #2 — _degrade_profile no longer crashes stop_recording
+  when set_peer_pref hits ServerUnavailable. The persist
+  failure is logged and the in-memory degrade still applies;
+  next successful pref write catches up the ceiling. Without
+  this, a post-stop file-size-validation failure during a
+  daemon outage propagated the exception out of
+  stop_recording, skipping _notify_ui and wedging the UI.
+
+  #3 — Start-pending watchdog. start_recording now bumps a
+  _record_attempt token and schedules _start_watchdog
+  (default 5 s) to force-cancel if the worker's publish
+  callback never fires. Stale callbacks that arrive after a
+  watchdog cleanup are gated at the top of
+  _publish_start_success / _publish_start_failure — the
+  success path tears down its leaked MediaRecorder so the
+  mic isn't held by a stuck-start ghost. Closes the "tap
+  record, see 'preparing' forever, button looks dead"
+  failure mode on devices where MediaRecorder.prepare /
+  start hangs.
+
+  #4 — setMaxDuration(60_000) backstop. _poll_recording
+  (new, 500 ms cadence, armed in _publish_start_success and
+  cancelled at the top of stop_recording) tracks elapsed
+  monotonic time and force-stops once past
+  _MAX_DURATION_BACKSTOP_S (60.5 s). Pre-fix, the encoder's
+  internal cap fired silently and the peer state machine
+  stayed _recording=True; subsequent record-button presses
+  early-returned and the button looked dead.
+
+  C — Silent-input diagnostic. _poll_recording also tracks
+  MediaRecorder.getMaxAmplitude on Android. If the peak
+  stays below _SILENT_AMP_THRESHOLD (100, vs. 0-32767 scale)
+  over a held > 1.0 s recording, stop_recording clears
+  _record_ok, removes the silent file, and surfaces a
+  toast: "No audio detected — another app may have the
+  microphone. Close any recording / call apps and try
+  again." Closes the Zoom-demo confusion where Android
+  parks the second mic-claiming app on a zero stream and
+  the recorder writes a correctly-sized but silent M4A.
+
+1.46.43
+  Auto-retry stranded LIFT saves against the existing on-disk
+  audio file — no re-recording required. RecorderController
+  now carries a _pending_lift_saves dict keyed by entry guid;
+  stop_recording stashes (guid, filename) on a set_audio
+  failure, and retry_pending_lift_saves (called from the
+  App's 10 s _update_sync_status tick) walks the dict and
+  re-runs set_audio against each stranded entry. Successful
+  retries pop the entry from the queue; for the currently-
+  displayed entry, the audio_filename is mirrored back onto
+  self.current and _notify_ui is scheduled so playback works
+  without a project reload. Idempotent (set_audio against an
+  already-written entry is a no-op) and silent on success.
+  The toast on the original failure now reads "...will retry
+  automatically." since re-recording is no longer the only
+  retry path. docs/Backlog.md back to empty.
+
+1.46.42
+  Fix wedged-recording UI after a LIFT save failure
+  (main.py:3592-3617 in stop_recording). The set_audio call
+  is now wrapped in try/except; on a transient daemon hiccup
+  (ServerUnavailable, ContentProvider FD recycle, FS pressure)
+  the exception is caught, the user gets a translatable toast
+  ("Audio captured but reference not saved — hold the button
+  again to retry."), _notify_ui still dispatches so the UI
+  transitions out of the recording visual, and play_audio is
+  skipped (no audio_filename to play against). The on-disk
+  audio bytes are preserved; re-recording overwrites the same
+  deterministic path and re-runs set_audio, which is the
+  natural retry. The residual "retry without re-recording" UX
+  stays in docs/Backlog.md.
+
+1.46.41
+  Add docs/Backlog.md flagging the wedged-recording UI after a
+  LIFT save failure (main.py:3592-3597 in stop_recording). The
+  set_audio call has no try/except, so a transient lift_io.commit
+  failure raises before _notify_ui is scheduled — recording flag
+  is cleared but the UI doesn't transition. Fix shape documented
+  for later work: try/except + error toast + retry affordance,
+  _notify_ui in finally, preserve the on-disk audio on LIFT
+  write failure.
+
 1.46.40
   docs/StatusCodes.md tightens the suffix-table prose so the
   "+N" / "LANOK +N" / "+u/N" entries no longer read as making

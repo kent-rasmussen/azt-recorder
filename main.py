@@ -260,6 +260,9 @@ if platform == 'android':
 from azt_collab_client.ui import register_charis
 _FONT_NAME = register_charis()
 _CHARIS_AVAILABLE = _FONT_NAME == 'CharisSIL'
+print(f'[font] CharisSIL='
+      f'{"loaded" if _CHARIS_AVAILABLE else "MISSING — Roboto fallback"}',
+      file=sys.stderr, flush=True)
 
 # ── KV layout ─────────────────────────────────────────────────────────────────
 # Font name is injected at build time so every widget uses Charis SIL if available.
@@ -363,6 +366,22 @@ KV_TEMPLATE = '''
                         halign: 'left'
                         valign: 'middle'
                         text_size: self.size
+                        # v0.47.0 sync labels can exceed the dp(128)
+                        # label width (e.g. "WAN-113 LAN-1 +1 · offline"
+                        # is 26 chars at sp(13) ≈ 169dp). With text_size
+                        # constraining the layout box, Kivy wraps and
+                        # the wrapped tail lines get clipped or hidden
+                        # behind the top bar background — observed
+                        # symptom: badge appearing as just "· offline"
+                        # with the WAN-N / LAN-N parts invisible.
+                        # ``shorten: True`` keeps the text on one line
+                        # and ellipsises overflow; ``shorten_from:
+                        # 'right'`` truncates from the trailing edge
+                        # so the load-bearing state label at the
+                        # start stays visible (the offline suffix is
+                        # the part most likely to get dropped).
+                        shorten: True
+                        shorten_from: 'right'
             Button:
                 size_hint_x: None
                 width: dp(44)
@@ -646,6 +665,12 @@ KV_TEMPLATE = '''
                             cursor_color: T.ACCENT
                             multiline: False
                             on_text_validate: root.apply_cawl(self.text)
+                            # 'number' gives the digit keypad with
+                            # ``-`` and ``,`` accessible for CAWL
+                            # range syntax. No ``input_filter`` —
+                            # 'int' would block ``-`` and ``,``;
+                            # apply_cawl's parser handles validation.
+                            input_type: 'number'
                         Label:
                             id: gloss_search_label
                             text: _('Gloss search (filter by gloss text)')
@@ -3140,6 +3165,41 @@ class RecorderController:
         # Pure browse swipes leave it False and skip the commit RPC.
         self._dirty = False
 
+        # LIFT saves stranded by a transient daemon hiccup
+        # (ServerUnavailable / ContentProvider FD recycle / FS
+        # pressure inside ``set_audio`` → ``_save`` →
+        # ``atomic_open_write``). Keyed by entry guid → audio
+        # filename; retried on every _update_sync_status tick by
+        # ``retry_pending_lift_saves``. The on-disk audio bytes
+        # are preserved (re-record overwrites the same
+        # deterministic path), so the worst case if the daemon
+        # never comes back is "audio file exists, LIFT reference
+        # missing" — same end-state as the old un-wedge fix, but
+        # auto-healing once the daemon recovers. Project switch
+        # destroys the controller, so the dict naturally clears.
+        self._pending_lift_saves = {}
+
+        # Start-attempt token incremented each start_recording.
+        # The watchdog (``_start_watchdog``) only fires force-
+        # cancel if its captured token still matches when it
+        # runs, so a successful start that resolves _start_pending
+        # within the timeout doesn't get spuriously cancelled by
+        # a late-firing watchdog from an earlier attempt.
+        self._record_attempt = 0
+
+        # Per-recording poll wakes every 500ms while _recording
+        # is True. Tracks two things on the same tick:
+        #   - getMaxAmplitude (Android only) to catch the
+        #     "another app has the mic and we got a silent
+        #     stream" case (e.g. Zoom holding the mic while
+        #     the recorder thinks it's capturing).
+        #   - elapsed monotonic time vs the MediaRecorder
+        #     setMaxDuration(60_000) cap, as a peer-side
+        #     backstop in case the internal duration-reached
+        #     event doesn't flip our state machine.
+        self._recording_poll_event = None
+        self._max_amplitude_seen = 0
+
         # Gloss languages — `all_gloss_langs` is what the LIFT
         # actually has; `active_gloss_langs` is the user's pick. The
         # pick persists across boots/installs: if the user previously
@@ -3381,6 +3441,33 @@ class RecorderController:
     # — a silent failure mode observed on flaky MediaTek HAL builds.
     _POST_STOP_MIN_RATIO = 0.25
 
+    # Peak MediaRecorder.getMaxAmplitude (Android, 0-32767)
+    # below which we treat the take as silent input. Speech
+    # routinely peaks in the thousands; a sub-100 ceiling is
+    # well above any real noise floor and well below normal
+    # voice. Used by ``_poll_recording`` + the post-stop
+    # silent-input branch to detect "another app has the mic"
+    # cases (Zoom, phone calls, voice assistants).
+    _SILENT_AMP_THRESHOLD = 100
+
+    # Backstop for ``setMaxDuration(60_000)``: MediaRecorder
+    # stops itself at the cap, but the peer state machine
+    # (``_recording``, etc.) doesn't know unless we listen.
+    # Polling elapsed time is simpler than wiring an
+    # ``OnInfoListener`` PythonJavaClass and gives us the
+    # same end-result one tick later. 0.5 s grace past 60 s
+    # avoids racing the encoder's internal stop.
+    _MAX_DURATION_BACKSTOP_S = 60.5
+
+    # How long start_recording will wait for the worker
+    # thread to publish success / failure before the
+    # watchdog force-cancels the attempt. Slow MediaTek
+    # devices have been observed at 150-400 ms; 5 s is
+    # an order of magnitude past that and well below the
+    # threshold where the user starts wondering if the app
+    # crashed.
+    _START_WATCHDOG_S = 5.0
+
     def _degrade_profile(self, failed_key):
         """Drop the audio-quality ceiling one rung below `failed_key`
         and clamp the user-facing pref to it. Persisted via peer_pref
@@ -3399,8 +3486,19 @@ class RecorderController:
             self._toast_record_failed(at_floor=True)
             return None
         new_key = self._PROFILE_LADDER[idx + 1]
-        set_peer_pref('audio_quality_ceiling', new_key)
-        set_peer_pref('audio_quality', new_key)
+        # peer_pref persistence is an RPC; ServerUnavailable
+        # here must NOT block the in-memory degrade nor
+        # propagate out of stop_recording (which would skip
+        # _notify_ui and wedge the UI). Log and continue —
+        # the next successful peer_pref write picks up the
+        # ceiling.
+        try:
+            set_peer_pref('audio_quality_ceiling', new_key)
+            set_peer_pref('audio_quality', new_key)
+        except Exception as ex:
+            print(f'[record] degrade persist failed: {ex} '
+                  f'(in-memory ceiling still applied)',
+                  file=sys.stderr, flush=True)
         print(f'[record] degraded {failed_key} → {new_key} '
               f'(ceiling pinned)')
         self._toast_record_failed(at_floor=False)
@@ -3435,6 +3533,12 @@ class RecorderController:
         self._start_pending = True
         self._start_cancel_requested = False
         self._record_started_at = None
+        # Bump the attempt token so the watchdog (scheduled
+        # below) and any late publish callbacks can tell
+        # whether they're operating on the live attempt or a
+        # superseded one.
+        self._record_attempt += 1
+        attempt = self._record_attempt
         # Defer the "preparing" UI rebuild to the next frame so the
         # Kivy touch dispatch that triggered us can return cleanly
         # before refresh_recorder_ui touches widgets.
@@ -3445,6 +3549,13 @@ class RecorderController:
             args=(path,),
             daemon=True,
         ).start()
+        # Watchdog: if neither publish callback has flipped
+        # _start_pending to False within _START_WATCHDOG_S,
+        # force-cancel so the UI doesn't sit on the
+        # "preparing" visual indefinitely.
+        Clock.schedule_once(
+            lambda dt, a=attempt: self._start_watchdog(a),
+            self._START_WATCHDOG_S)
 
     def _start_worker(self, path):
         """Run the blocking JNI setup on a worker thread. Marshals
@@ -3468,6 +3579,21 @@ class RecorderController:
         released the button while the worker was running, tears
         down without writing the LIFT reference — same end-state
         as the min-hold-gate tap path."""
+        # Stale-callback gate: the watchdog (or a later start)
+        # may have already force-cancelled this attempt by
+        # clearing _start_pending. Tear down whatever
+        # MediaRecorder the worker spun up so the mic isn't
+        # held by a leaked recorder, then bail without
+        # flipping _recording / scheduling play_audio.
+        if not self._start_pending:
+            print('[record] stale _publish_start_success; '
+                  'tearing down', file=sys.stderr, flush=True)
+            try:
+                self._stop_native_recording()
+            except Exception as ex:
+                print(f'[record] stale teardown error: {ex}',
+                      file=sys.stderr, flush=True)
+            return
         self._start_pending = False
         if self._start_cancel_requested:
             print('[record] start completed but user already '
@@ -3495,10 +3621,33 @@ class RecorderController:
         self._record_ok = True
         import time as _time
         self._record_started_at = _time.monotonic()
+        # Reset the silent-input tracker and arm the
+        # per-recording poll. Same Clock event covers two
+        # concerns: amplitude tracking (for silent-input
+        # detection) and the setMaxDuration backstop.
+        self._max_amplitude_seen = 0
+        self._recording_poll_event = Clock.schedule_interval(
+            self._poll_recording, 0.5)
+        # Diagnostic — incident logs (e.g. 1.46.43 "60 s
+        # wedge" report) couldn't tell whether the worker had
+        # reached this point without a marker.
+        print(f'[record] publish_start_success: '
+              f'audio_path={self._audio_path!r}',
+              file=sys.stderr, flush=True)
         Clock.schedule_once(lambda dt: self._notify_ui(), 0)
 
     def _publish_start_failure(self, ex):
         """Main-thread callback after the worker's start raised."""
+        # Stale-callback gate: the watchdog already cleaned
+        # up if _start_pending is False. Logging this error
+        # is still useful (the original exception is the
+        # diagnostic), but the second toast / second degrade
+        # would just be noise on top of the watchdog toast.
+        if not self._start_pending:
+            print(f'[record] stale _publish_start_failure '
+                  f'(watchdog already cleaned up): {ex}',
+                  file=sys.stderr, flush=True)
+            return
         print(f'Recording start failed: {ex}')
         self._start_pending = False
         self._record_ok = False
@@ -3511,7 +3660,92 @@ class RecorderController:
         self._degrade_profile(self._record_profile_key)
         Clock.schedule_once(lambda dt: self._notify_ui(), 0)
 
+    def _start_watchdog(self, attempt):
+        """Force-cancel a stuck start. Scheduled by
+        ``start_recording`` to fire ``_START_WATCHDOG_S``
+        seconds later; no-ops if the worker has already
+        resolved _start_pending (the common case) or if a
+        later start has bumped the attempt counter past us.
+
+        Stuck-start symptom this closes: worker thread's
+        ``MediaRecorder.prepare()`` / ``.start()`` hangs on a
+        bad device or while the mic is contended by another
+        app. Without this watchdog the user sees the
+        "preparing" UI indefinitely; subsequent record-button
+        presses early-return at ``_start_pending`` so the
+        button looks dead."""
+        if not self._start_pending:
+            return
+        if self._record_attempt != attempt:
+            return
+        print(f'[record] start watchdog fired after '
+              f'{self._START_WATCHDOG_S}s; force-cancelling '
+              f'attempt {attempt}', file=sys.stderr, flush=True)
+        self._start_pending = False
+        self._record_ok = False
+        self._record_started_at = None
+        self._record_profile_key = None
+        # A successful late publish callback would now see
+        # _start_pending == False (stale-callback gate above)
+        # and tear down its leaked MediaRecorder.
+        from kivy.app import App as _App
+        app = _App.get_running_app()
+        if app is not None:
+            Clock.schedule_once(
+                lambda dt: app._show_toast(
+                    _tr('Recording setup timed out. '
+                        'Please try again.')), 0)
+        Clock.schedule_once(lambda dt: self._notify_ui(), 0)
+
+    def _poll_recording(self, dt):
+        """Per-recording tick (500 ms). Two concerns:
+
+        1. Track ``MediaRecorder.getMaxAmplitude`` so
+           ``stop_recording`` can detect the "another app
+           has the mic, we captured silence" case (Zoom
+           call, phone call, voice assistant) and surface a
+           diagnostic toast instead of writing a silent-but-
+           correctly-sized file.
+        2. Enforce the ``setMaxDuration(60_000)`` cap
+           peer-side. MediaRecorder stops itself when the
+           cap fires, but our state machine wouldn't know
+           without a listener; polling elapsed time is the
+           simpler equivalent.
+
+        Returns False to cancel the schedule_interval when
+        recording ends."""
+        if not self._recording:
+            return False
+        if platform == 'android' and self._recorder is not None:
+            try:
+                amp = self._recorder.getMaxAmplitude()
+                if amp > self._max_amplitude_seen:
+                    self._max_amplitude_seen = amp
+            except Exception:
+                pass
+        if self._record_started_at is not None:
+            import time as _time
+            elapsed = _time.monotonic() - self._record_started_at
+            if elapsed >= self._MAX_DURATION_BACKSTOP_S:
+                print(f'[record] max-duration backstop fired '
+                      f'at {elapsed:.2f}s; auto-stopping',
+                      file=sys.stderr, flush=True)
+                self.stop_recording()
+                return False
+        return True
+
     def stop_recording(self):
+        # Cancel the per-recording poll at the very top so it
+        # stops in every exit path below (early returns, the
+        # tap-not-hold branch, the full stop, the exception
+        # paths). Idempotent — None when no poll is armed.
+        ev = self._recording_poll_event
+        if ev is not None:
+            try:
+                ev.cancel()
+            except Exception:
+                pass
+            self._recording_poll_event = None
         if self._start_pending:
             # User released the button while the worker was still
             # setting up. Flag the cancel; the publish callback
@@ -3585,17 +3819,91 @@ class RecorderController:
                     except OSError:
                         pass
                     self._degrade_profile(self._record_profile_key)
+        # Silent-input detection (Android only): the encoder
+        # produces a correctly-sized M4A even when the mic
+        # input is silence, so the file-size validation above
+        # passes. The peak amplitude tracked by
+        # ``_poll_recording`` is the diagnostic for "another
+        # app holds the mic and we got a zero stream" — most
+        # commonly Zoom in a call, but also phone calls and
+        # voice assistants. Surface a toast naming the cause
+        # so the user doesn't conclude the recorder is broken;
+        # discard the take (audio is unusable) by clearing
+        # _record_ok so the LIFT reference write below is
+        # skipped, and remove the silent file so it doesn't
+        # accumulate.
+        if (platform == 'android'
+                and self._record_ok
+                and held > 1.0
+                and self._max_amplitude_seen < self._SILENT_AMP_THRESHOLD):
+            print(f'[record] silent-input detected: peak '
+                  f'amplitude={self._max_amplitude_seen} over '
+                  f'{held:.2f}s (threshold '
+                  f'{self._SILENT_AMP_THRESHOLD})',
+                  file=sys.stderr, flush=True)
+            self._record_ok = False
+            if self._audio_path and not self.db.is_uri:
+                try:
+                    os.remove(self._audio_path)
+                except OSError:
+                    pass
+            from kivy.app import App as _App
+            _app = _App.get_running_app()
+            if _app is not None:
+                Clock.schedule_once(
+                    lambda dt: _app._show_toast(
+                        _tr('No audio detected — another app may '
+                            'have the microphone. Close any '
+                            'recording / call apps and try '
+                            'again.')), 0)
         # Write filename into LIFT XML only if both start and stop
         # ran clean. _record_ok flips False on a stop exception so a
         # half-finalised M4A (no moov atom, etc.) does not get
         # advertised as the entry's canonical recording.
+        #
+        # The LIFT save (set_audio → _save → atomic_open_write) can
+        # raise on a transient daemon hiccup. Catch it locally so a
+        # failed write doesn't propagate out of stop_recording and
+        # leave the UI wedged on the "recording" visual, and stash
+        # the (guid, filename) pair on ``_pending_lift_saves`` so
+        # ``retry_pending_lift_saves`` (driven from the App's 10 s
+        # _update_sync_status tick) re-runs the write against the
+        # existing on-disk audio file once the daemon recovers —
+        # no re-recording required.
+        lift_save_ok = True
         if self._audio_path and self._record_ok:
             filename = os.path.basename(self._audio_path)
-            self.db.set_audio(self.current['guid'], filename)
-            self.current['audio_filename'] = filename
-            self._dirty = True
+            guid = self.current['guid']
+            try:
+                self.db.set_audio(guid, filename)
+            except Exception as ex:
+                lift_save_ok = False
+                prev = self._pending_lift_saves.get(guid)
+                if prev is not None and prev != filename:
+                    print(f'[record] replacing pending LIFT save '
+                          f'for {guid}: {prev!r} → {filename!r}',
+                          file=sys.stderr, flush=True)
+                self._pending_lift_saves[guid] = filename
+                print(f'[record] LIFT save failed: {ex} '
+                      f'(queued for auto-retry)',
+                      file=sys.stderr, flush=True)
+                from kivy.app import App as _App
+                _app = _App.get_running_app()
+                if _app is not None:
+                    Clock.schedule_once(
+                        lambda dt: _app._show_toast(
+                            _tr('Audio captured but reference not '
+                                'saved — will retry '
+                                'automatically.')), 0)
+            else:
+                # Successful save also clears any earlier failed
+                # attempt for the same entry — e.g. user retried by
+                # re-recording before the auto-retry tick fired.
+                self._pending_lift_saves.pop(guid, None)
+                self.current['audio_filename'] = filename
+                self._dirty = True
         Clock.schedule_once(lambda dt: self._notify_ui(), 0)
-        if self._record_ok:
+        if self._record_ok and lift_save_ok:
             Clock.schedule_once(lambda dt: self.play_audio(), 0.5)
 
     def play_audio(self):
@@ -4069,10 +4377,45 @@ class RecorderController:
         if app:
             Clock.schedule_once(lambda dt: app.refresh_recorder_ui(), 0)
 
+    # ── Pending-LIFT-save retry ────────────────────────────────────────────────
+
+    def retry_pending_lift_saves(self):
+        """Retry any LIFT saves stranded by a transient daemon
+        hiccup. Driven from the App's 10 s _update_sync_status
+        tick. Idempotent: set_audio against an entry that
+        already carries the reference is a no-op (the inner
+        ``_find_entry`` / ``find('form')`` re-resolve to the
+        same nodes), so a retry that races a recovered first
+        attempt costs nothing.
+
+        Failures stay in the queue for the next tick. On
+        success for the currently-displayed entry, mirror the
+        write back onto ``self.current`` and schedule a UI
+        refresh so playback works without a re-load."""
+        if not self._pending_lift_saves:
+            return
+        current_guid = (self.current.get('guid', '')
+                        if getattr(self, 'current', None) else '')
+        for guid in list(self._pending_lift_saves.keys()):
+            filename = self._pending_lift_saves[guid]
+            try:
+                self.db.set_audio(guid, filename)
+            except Exception as ex:
+                print(f'[record] retry LIFT save for {guid} still '
+                      f'failing: {ex}', file=sys.stderr, flush=True)
+                continue
+            self._pending_lift_saves.pop(guid, None)
+            print(f'[record] retry LIFT save for {guid} succeeded',
+                  file=sys.stderr, flush=True)
+            if guid == current_guid:
+                self.current['audio_filename'] = filename
+                self._dirty = True
+                Clock.schedule_once(lambda dt: self._notify_ui(), 0)
+
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.46.40'
+__version__ = '1.47.7'
 
 
 class LIFTRecorderApp(App):
@@ -5411,11 +5754,14 @@ class LIFTRecorderApp(App):
                 # Project's _handle_pick → load_lift runs there).
                 print(f'[load_lift] clean_template failed: {ex}')
         self._pending_vernlang = ''
-        # Drop any last_commit_seen baseline carried over from a
+        # Drop any content-advance baselines carried over from a
         # previous project — otherwise the first _update_sync_status
         # tick after this load would compare the new project's
-        # last_commit against the old project's value and fire a
-        # spurious _reload_and_restore on top of the load we just did.
+        # head_sha / last_commit against the old project's and fire
+        # a spurious _reload_and_restore on top of the load we
+        # just did. Both signals reset; whichever the daemon
+        # surfaces takes over on the next poll.
+        self._last_head_sha = None
         self._last_commit_seen = None
         self.recorder = RecorderController(db)
         # Apply persisted show-past-work preference (default: hide past work)
@@ -5682,207 +6028,174 @@ class LIFTRecorderApp(App):
                 print(f'[auto-publish] error: {ex}')
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _not_backed_up_text(self, status):
-        """Pick a 'not backed up' variant that hints at the *blocker* so
-        a tap on the indicator lands the user where they can actually
-        fix it. Probes in the order go_collab presents them: contributor
-        name → GitHub sign-in → project remote. Each _tr literal is
-        spelled out so xgettext can extract it."""
-        try:
-            from azt_collab_client import (
-                get_contributor, get_credentials_status)
-            if not (get_contributor() or '').strip():
-                return _tr('add name to back up')
-            cred = get_credentials_status() or {}
-            host = cred.get('host', 'github')
-            connected = bool(cred.get(host, {}).get('connected', False))
-            if not connected:
-                return _tr('sign in to back up')
-            if not (getattr(status, 'remote_url', '') or '').strip():
-                return _tr('publish to back up')
-        except Exception:
-            pass
-        return _tr('not backed up')
-
     def _sync_status_info(self):
-        """Return (text, last_sync, last_commit) for the current project.
+        """Return (text, last_sync, last_commit, head_sha) for the
+        current project, rendered per CLIENT_INTEGRATION.md § 17b
+        v0.47.0 5-state model.
 
-        ``text`` is what goes in the sync indicator:
-          - ``''`` if no langcode or the server is unreachable
-          - ``'not backed up'`` when last_sync is 0 (no successful push
-            yet — see ProjectStatus semantics in
-            azt_collab_client/projects.py)
-          - ``'HH:MM (+n)'`` / ``'HH:MM (OK)'`` otherwise, where *n*
-            is the number of commits ahead of the remote that haven't
-            been pushed yet (ProjectStatus.commits_ahead). ``(OK)``
-            when commits_ahead is 0.
-          - Work-offline mode appends ``' · offline'`` per
-            CLIENT_INTEGRATION.md § 17b: the daemon-side toggle is
-            on, so pending commits won't be pushed even when online.
+        The label is one of:
+          - ``OK``                    — wan=0, lan=0
+          - ``WAN-{n}``               — wan>0, lan=0
+          - ``LAN-{n}``               — wan=0, lan>0
+          - ``WAN-{w}_LAN-{l}``       — wan>0, lan>0, at_risk=0
+                                        (rare split-brain)
+          - ``WAN-{w} LAN-{l}``       — wan>0, lan>0, at_risk>0
+                                        (routine transient right
+                                         after a fresh commit)
+        Per-channel red coloring rule ("settings allow this to be
+        stored but it isn't yet"):
+          - ``WAN-{n}`` red iff ``work_offline`` is OFF
+          - ``LAN-{n}`` red iff ``lan_allow_sync`` is ON
+          - ``+{n}`` always red (auto-commit always runs)
+        Suffix: only `` · offline`` surfaces (when work_offline
+        is ON and lan_allow_sync is OFF — the "phone in the
+        forest" mode). All other toggle states are implied; the
+        user can see them elsewhere in the UI.
 
-        Date prefixes (``'yesterday HH:MM'`` / ``'N days ago HH:MM'``)
-        prepend the time when last_sync is older than today.
-
-        ``last_sync`` (push timestamp) is returned raw so callers
-        like do_sync can branch behaviour without re-querying.
-        ``last_commit`` (most recent local commit timestamp) lets
-        _update_sync_status detect external mutations between polls
-        per CLIENT_INTEGRATION.md § 14.
+        Returned tuple's other elements drive non-rendering
+        logic: ``last_sync`` for do_sync()'s never-pushed →
+        go_collab routing; ``last_commit`` for the legacy
+        content-advance fallback; ``head_sha`` for the primary
+        HEAD-advance signal in _update_sync_status.
         """
-        import datetime
         langcode = getattr(self, '_current_langcode', '')
         if not langcode:
-            return ('', 0.0, 0.0)
+            return ('', 0.0, 0.0, '')
         from azt_collab_client import project_status
         status = project_status(langcode)
         if status is None:
-            return ('', 0.0, 0.0)
+            return ('', 0.0, 0.0, '')
         last_sync = float(getattr(status, 'last_sync', 0.0) or 0.0)
         last_commit = float(getattr(status, 'last_commit', 0.0) or 0.0)
-        commits_ahead = int(getattr(status, 'commits_ahead', 0) or 0)
-        unshared_commits = int(
-            getattr(status, 'unshared_commits', commits_ahead) or 0)
+        head_sha = str(getattr(status, 'head_sha', '') or '')
+        wan = int(getattr(status, 'wan_unshared', 0) or 0)
+        lan = int(getattr(status, 'lan_unshared', 0) or 0)
+        at_risk = int(getattr(status, 'at_risk', 0) or 0)
         n_changes = int(getattr(status, 'n_changes', 0) or 0)
         work_offline = bool(getattr(status, 'work_offline', False))
         lan_allow_sync = bool(getattr(status, 'lan_allow_sync', False))
-        # Always render the uncommitted-file count in red when
-        # n_changes > 0. We started with a >60 s persistence gate
-        # to avoid flashing during normal record-and-commit cycles,
-        # but the user wants to see the count empirically — short
-        # flashes during transient dirty windows are acceptable
-        # tuition; a steady non-zero red is the data-loss-risk
-        # signal we want users to learn to read.
-        show_dirty_red = n_changes > 0
-        # Four-cell matrix per CLIENT_INTEGRATION.md § 17b:
-        #   work_offline=off, lan=*   → no suffix
-        #   work_offline=on,  lan=off → "offline" (commits accumulate)
-        #   work_offline=on,  lan=on  → "LAN-only" (paired phones
-        #                               still receive; github push
-        #                               suspended)
-        if work_offline and lan_allow_sync:
-            offline_tag = f' · {_tr("LAN-only")}'
-        elif work_offline:
-            offline_tag = f' · {_tr("offline")}'
+        # Per-channel red rule. Markup tags wrap the count if and
+        # only if the channel's toggle currently authorises the
+        # sync that hasn't happened yet (transient red = normal
+        # automation in flight; persistent red = something's
+        # broken). Channel parts with the toggle gating them
+        # OFF render black ("you accepted by design").
+        RED_OPEN = '[color=ff4444]'
+        RED_CLOSE = '[/color]'
+
+        def _maybe_red(text, red):
+            return f'{RED_OPEN}{text}{RED_CLOSE}' if red else text
+
+        wan_part = _maybe_red(f'WAN-{wan}', red=not work_offline)
+        lan_part = _maybe_red(f'LAN-{lan}', red=lan_allow_sync)
+        # State label by the 5-state matrix.
+        if wan == 0 and lan == 0:
+            label = 'OK'
+        elif wan == 0:
+            label = lan_part
+        elif lan == 0:
+            label = wan_part
+        elif at_risk == 0:
+            # Split-brain (rare): different commits on each
+            # channel with no overlap; requires divergent
+            # history. Underscore separator distinguishes from
+            # the routine both-behind state below.
+            label = f'{wan_part}_{lan_part}'
         else:
-            offline_tag = ''
-        # Suffix encodes "commits ahead of github" + LAN-shared
-        # breakdown per CLIENT_INTEGRATION.md § 17b
-        # (ProjectStatus.unshared_commits, daemon 0.45.0+):
-        #   commits_ahead == 0                              → "OK"
-        #   commits_ahead > 0, unshared == 0                → "LANOK +N"
-        #     (N ahead of github, but all already on LAN —
-        #      device could be wiped without losing data)
-        #   commits_ahead > 0, 0 < unshared < commits_ahead → "+M/N"
-        #     (M unshared / N total ahead — partial LAN coverage)
-        #   commits_ahead > 0, unshared == commits_ahead    → "+N"
-        #     (none on LAN; same as pre-LAN world)
-        # Computed regardless of last_sync: per § 17b the LANOK
-        # signal derives from commits_ahead / unshared_commits
-        # only — NOT from whether github has ever seen the
-        # project. A LAN-only project (last_sync == 0,
-        # commits_ahead > 0, unshared_commits == 0) must still
-        # surface LANOK so the user sees their data lives on a
-        # paired phone even before github push succeeds.
-        if commits_ahead == 0:
-            suffix = 'OK'
-        elif unshared_commits == 0:
-            suffix = f'LANOK +{commits_ahead}'
-        elif unshared_commits >= commits_ahead:
-            suffix = f'+{commits_ahead}'
+            # Both behind on the same commits — routine
+            # transient right after a fresh commit. Drops to
+            # WAN-N or LAN-N as one channel catches up. Space
+            # separator (not underscore) so it's visually
+            # distinct from split-brain.
+            label = f'{wan_part} {lan_part}'
+        # Uncommitted-changes badge — always red, separate
+        # visual element next to the label. The literal output
+        # is just ``+N`` (in red); the ``R(+N)`` form in the
+        # contract's design notes is shorthand notation for
+        # "red uncommitted badge with value N", not output text.
+        badge = (f'{RED_OPEN}+{n_changes}{RED_CLOSE}'
+                 if n_changes > 0 else '')
+        # Suffix: only · offline surfaces. The · LAN-only and
+        # · LAN modes are implied (mode-tag visible elsewhere
+        # in the UI; calling them out alongside every status
+        # would be noise).
+        if work_offline and not lan_allow_sync:
+            suffix = f' · {_tr("offline")}'
         else:
-            suffix = f'+{unshared_commits}/{commits_ahead}'
-        if show_dirty_red:
-            suffix = f'{suffix} [color=ff4444]+{n_changes}[/color]'
-        # Prefix: timestamp when github has accepted a push for
-        # this project; a call-to-action message otherwise. The
-        # suffix still rides along when there are commits or
-        # dirty files to report.
-        if not last_sync:
-            base = self._not_backed_up_text(status)
-            if commits_ahead == 0:
-                # Nothing committed yet; the suffix would be
-                # "OK" (plus any dirty red) which misleadingly
-                # implies safety before any push. Surface the
-                # uncommitted-work signal on the prefix instead.
-                if show_dirty_red:
-                    base = f'{base} [color=ff4444]+{n_changes}[/color]'
-                return (f'{base}{offline_tag}', 0.0, last_commit)
-            return (f'{base} ({suffix}){offline_tag}',
-                    0.0, last_commit)
-        dt_sync = datetime.datetime.fromtimestamp(last_sync)
-        now = datetime.datetime.now()
-        sync_date = dt_sync.date()
-        time_str = dt_sync.strftime('%H:%M')
-        days = (now.date() - sync_date).days
-        if days == 0:
-            base = time_str
-        elif days == 1:
-            base = f'yesterday {time_str}'
-        else:
-            base = f'{days} days ago {time_str}'
-        # Examples on the rendered indicator:
-        #   (OK)                  — committed + pushed, all clean
-        #   (+3)                  — 3 commits ahead of remote, none on LAN
-        #   (LANOK +3)            — 3 ahead of github, all on LAN already
-        #   (+1/3)                — 3 ahead, 1 unshared, 2 on LAN
-        #   (OK <red>+5</red>)    — 5 dirty files awaiting commit
-        #   (+1 <red>+5</red>)    — both: unpushed commit AND dirty
-        #   (+1) · offline        — work-offline on, LAN-share off:
-        #                           daemon won't push; commits accumulate
-        #   (LANOK +1) · LAN-only — work-offline on, LAN-share on:
-        #                           paired phones still receive locally;
-        #                           github push suspended
-        #   (LANOK +1 <red>+2</red>) · LAN-only
-        #                         — LAN-only mode with 1 commit on a
-        #                           paired phone but not on github, and
-        #                           2 dirty files still to commit
-        #   not backed up (LANOK +3)
-        #                         — never github-pushed yet, but the 3
-        #                           local commits all exist on a paired
-        #                           phone
-        #   not backed up <red>+2</red>
-        #                         — never committed; 2 dirty files
-        #                           present but no LAN/github safety
-        #                           to claim
-        #   not backed up (LANOK +1 <red>+2</red>) · LAN-only
-        #                         — 1 commit on a paired phone but not
-        #                           on github, 2 dirty files, github
-        #                           push suspended by work-offline +
-        #                           LAN-share toggle
-        return (f'{base} ({suffix}){offline_tag}',
-                last_sync, last_commit)
+            suffix = ''
+        text = label
+        if badge:
+            text = f'{text} {badge}'
+        if suffix:
+            text = f'{text}{suffix}'
+        return (text.strip(), last_sync, last_commit, head_sha)
 
     def _update_sync_status(self):
         """Push sync status text into the recorder top bar, and
-        detect external mutations (another peer's push, a daemon-
-        driven debounced sync) by watching project_status.last_commit
-        across polls. On a change, refresh the recorder UI in place
-        per CLIENT_INTEGRATION.md § 14 — same anchor entry, fresh
-        content.
+        detect external mutations by watching for HEAD advance
+        across polls. On a change, refresh the recorder UI in
+        place per CLIENT_INTEGRATION.md § 14 — same anchor entry,
+        fresh content.
+
+        Per § 17b "Background refresh obligation — peer MUST
+        re-poll AND re-read content on HEAD advance" the primary
+        signal is ``project_status.head_sha`` (daemon 0.45.45+),
+        which catches incoming LAN receive-packs that
+        ``last_commit`` alone misses. Legacy daemons (empty
+        ``head_sha``) fall back to the pre-0.45.45 last_commit
+        signal — strictly less reliable but covers everything the
+        old daemon could surface anyway.
 
         Also polls the most recent auto-commit job (if any) for
-        DATA_LOSS_RISK statuses per CLIENT_INTEGRATION.md § 17 —
-        commit_project is fire-and-forget so this is the only
-        seam where the eventual Result becomes observable for the
-        auto-commit context."""
+        DATA_LOSS_RISK statuses per § 17 — commit_project is
+        fire-and-forget so this is the only seam where the
+        eventual Result becomes observable for the auto-commit
+        context."""
         self._check_data_loss_risk_async()
-        text, _last_sync, last_commit = self._sync_status_info()
+        # Retry any LIFT saves stranded by a transient daemon
+        # hiccup. Idempotent + silent on success; failures stay
+        # queued for the next tick.
+        if self.recorder:
+            self.recorder.retry_pending_lift_saves()
+        text, _last_sync, last_commit, head_sha = self._sync_status_info()
         sm = self.root.ids.sm
         rec_screen = sm.get_screen('recorder')
         lbl = rec_screen.ids.get('sync_status_label')
         if lbl:
             lbl.text = text
-        seen = getattr(self, '_last_commit_seen', None)
-        # Pin the new seen-value BEFORE calling _reload_and_restore.
-        # The reload path eventually schedules refresh_recorder_ui,
-        # which re-enters this method; if we updated _last_commit_seen
-        # only after the reload returned, the nested call would still
-        # see the old value, detect last_commit > seen again, and
-        # fire another reload — an infinite chain that pegged the UI
-        # thread with back-to-back LIFTDatabase reconstructions.
-        self._last_commit_seen = last_commit
-        if (self.recorder and seen is not None
-                and last_commit > seen and last_commit > 0):
+        # Content-advance detection. Prefer head_sha (catches
+        # LAN receive-packs); fall back to last_commit when the
+        # daemon doesn't surface head_sha.
+        last_seen_head = getattr(self, '_last_head_sha', None)
+        last_seen_commit = getattr(self, '_last_commit_seen', None)
+        if head_sha:
+            content_advanced = (last_seen_head is not None
+                                and head_sha != last_seen_head)
+        elif last_commit > 0:
+            content_advanced = (last_seen_commit is not None
+                                and last_commit > last_seen_commit)
+        else:
+            content_advanced = False
+        mid_record = (self.recorder is not None
+                      and getattr(self.recorder, '_recording', False))
+        # Defer the reload while the user is mid-recording — re-
+        # parsing the LIFT mid-take would yank the model out
+        # from under stop_recording's set_audio write. Leaving
+        # the seen values stale means the next post-stop tick
+        # sees the same diff and reloads then. § 17b
+        # "content-reload cost" bullet.
+        if content_advanced and mid_record:
+            pass  # defer; next post-stop poll handles it
+        else:
+            # Pin the seen values BEFORE the reload (the reload
+            # path eventually re-enters this method via
+            # refresh_recorder_ui; pinning first prevents the
+            # nested call from re-detecting the same diff and
+            # firing another reload — an infinite chain).
+            if head_sha:
+                self._last_head_sha = head_sha
+            self._last_commit_seen = last_commit
+        if content_advanced and not mid_record and self.recorder:
             guid = (self.recorder.current.get('guid', '')
                     if self.recorder.queue else '')
             self._reload_and_restore(guid)
@@ -5903,8 +6216,9 @@ class LIFTRecorderApp(App):
 
         Per CLIENT_INTEGRATION.md § 17b (0.43.0+): this RPC NEVER
         emits PUSHED — push is daemon-driven. Peer surface for
-        "are we pushed up?" reads ProjectStatus.commits_ahead /
-        ProjectStatus.work_offline."""
+        "are we pushed up?" reads ProjectStatus.wan_unshared /
+        ProjectStatus.lan_unshared / ProjectStatus.at_risk
+        (v0.47.0+) / ProjectStatus.work_offline."""
         if not self.recorder:
             return
         langcode = self._current_langcode_or_register()
@@ -6186,10 +6500,13 @@ class LIFTRecorderApp(App):
         if not langcode:
             return
         # If nothing has ever been pushed (last_sync == 0), the
-        # indicator reads "not backed up" and the user's tap is really
-        # asking to set up backup, not to sync. Route to the server's
-        # collab UI directly so they land where Publish lives.
-        _, last_sync, _last_commit = self._sync_status_info()
+        # user's tap on the sync indicator is really asking to set
+        # up backup, not to sync. Route to the server's collab UI
+        # directly so they land where Publish lives. (Pre-v0.47.0
+        # the badge surfaced "not backed up" wording for this
+        # state; the v0.47.0 model encodes it as a WAN-N count
+        # instead, but the routing trigger is unchanged.)
+        _, last_sync, _last_commit, _head_sha = self._sync_status_info()
         if not last_sync:
             self.go_collab()
             return
@@ -6693,7 +7010,17 @@ class LIFTRecorderApp(App):
             text=initial,
             hint_text=hint,
             multiline=False, size_hint_y=None, height=dp(48),
-            font_size=sp(18), input_filter='int',
+            font_size=sp(18),
+            # input_filter rejects non-digit keystrokes at the
+            # model layer (covers paste / hardware keyboards).
+            input_filter='int',
+            # input_type='number' asks Android to bring up the
+            # numeric keypad on focus instead of the full
+            # alphanumeric soft keyboard. Maps to InputType.
+            # TYPE_CLASS_NUMBER. Saves the user a tap on the
+            # keyboard's 123 button and reduces fat-finger
+            # errors on a button-array task like "go to entry N".
+            input_type='number',
         )
         content.add_widget(num_input)
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
@@ -6812,28 +7139,93 @@ class LIFTRecorderApp(App):
             ids.status_label.color = theme.GREEN \
                 if r.has_recording else theme.TEXT_DIM
 
-        # Button area: record button OR play+redo pair
+        # Button area: record button OR play+redo pair.
+        #
+        # CRITICAL: do NOT ``clear_widgets`` on every refresh.
+        # Each refresh fires within touch-event windows
+        # (refresh runs from _notify_ui, which is scheduled by
+        # both record_start and _publish_start_success — both
+        # of which run BEFORE the user releases the button).
+        # If we destroy the RecordButton mid-press, Kivy's
+        # touch.grab_list holds only a *weak* ref to the old
+        # widget — Python GC can collect it before touch_up
+        # arrives, and the grab dispatch silently skips. The
+        # touch_up then routes to the freshly-built button
+        # whose grab was never set, returns False (not grabbed
+        # by *this* widget), and ``record_stop`` is never
+        # called. The recording then runs to the
+        # ``_MAX_DURATION_BACKSTOP_S`` ceiling. This was the
+        # actual "recorder held itself down for 60 s without
+        # me" wedge in the 1.46.43 field logs — the #1 grab
+        # fix was correct as far as it went, but defeated by
+        # the rebuild underneath it.
+        #
+        # Fix: only rebuild when the desired widget layout
+        # differs from what's currently there. Within a
+        # "record button is shown" session, update the
+        # button's ``recording`` property in place so the
+        # same Kivy widget instance survives every refresh
+        # and the grab keeps pointing at a live object.
         if 'btn_area' in ids:
             btn_area = ids.btn_area
-            btn_area.clear_widgets()
-            if r.has_recording and not r._recording and not r._pending_rerecord:
-                # Show Play (2/3) and Re-record (1/3) side by side
-                play_btn = PlayButton(size_hint_x=2)
-                play_btn.bind(on_touch_up=lambda w, t:
-                    self.play_audio() if w.collide_point(*t.pos) else None)
-                redo_btn = RedoButton(size_hint_x=1)
-                redo_btn.bind(on_touch_up=lambda w, t:
-                    self.redo_recording() if w.collide_point(*t.pos) else None)
-                btn_area.add_widget(play_btn)
-                btn_area.add_widget(redo_btn)
+            want_play_redo = (r.has_recording and not r._recording
+                              and not r._pending_rerecord)
+            kids = btn_area.children  # newest-first ordering
+            has_play_redo = (
+                len(kids) == 2
+                and any(isinstance(k, PlayButton) for k in kids)
+                and any(isinstance(k, RedoButton) for k in kids))
+            has_record_btn = (
+                len(kids) == 1 and isinstance(kids[0], RecordButton))
+            if want_play_redo:
+                if not has_play_redo:
+                    btn_area.clear_widgets()
+                    play_btn = PlayButton(size_hint_x=2)
+                    play_btn.bind(on_touch_up=lambda w, t:
+                        self.play_audio() if w.collide_point(*t.pos) else None)
+                    redo_btn = RedoButton(size_hint_x=1)
+                    redo_btn.bind(on_touch_up=lambda w, t:
+                        self.redo_recording() if w.collide_point(*t.pos) else None)
+                    btn_area.add_widget(play_btn)
+                    btn_area.add_widget(redo_btn)
+            elif has_record_btn:
+                # Same widget instance survives the refresh —
+                # just flip the visual state via its
+                # BooleanProperty. The grab from touch_down
+                # stays valid; touch_up will find this widget
+                # alive in the grab dispatch.
+                kids[0].recording = r._recording
             else:
-                # Show record button (push-to-talk)
+                btn_area.clear_widgets()
+                # Record button (push-to-talk).
+                #
+                # Touch handling uses the Kivy ``grab``
+                # pattern: on touch_down, if the press lands
+                # inside the button we ``grab`` the touch onto
+                # the widget and call record_start. On
+                # touch_up, we act when ``touch.grab_current``
+                # is this widget regardless of the current
+                # touch position, so a finger sliding off the
+                # button before release still fires
+                # record_stop. (Pre-grab binding silently
+                # skipped record_stop when the finger had
+                # moved off.)
                 rec_btn = RecordButton()
                 rec_btn.recording = r._recording
-                rec_btn.bind(on_touch_down=lambda w, t:
-                    self.record_start() if w.collide_point(*t.pos) else None)
-                rec_btn.bind(on_touch_up=lambda w, t:
-                    self.record_stop() if w.collide_point(*t.pos) else None)
+                def _rec_down(w, t, _self=self):
+                    if w.collide_point(*t.pos):
+                        t.grab(w)
+                        _self.record_start()
+                        return True
+                    return False
+                def _rec_up(w, t, _self=self):
+                    if t.grab_current is w:
+                        t.ungrab(w)
+                        _self.record_stop()
+                        return True
+                    return False
+                rec_btn.bind(on_touch_down=_rec_down)
+                rec_btn.bind(on_touch_up=_rec_up)
                 btn_area.add_widget(rec_btn)
 
 
