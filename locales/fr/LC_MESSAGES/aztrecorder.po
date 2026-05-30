@@ -349,3 +349,68 @@ msgstr "LAN seulement"
 # delegated-to-client string.
 msgid "Share this app"
 msgstr "Partager cette appli"
+
+# ── v1.48.x — wordlist split (§ 21) ────────────────────────────────────────
+
+# Settings → Filter words prompt above the [2][3][4][5+] team-
+# size buttons; visible only in picker mode (when no team_size
+# is set yet, or user tapped [change] to revise).
+msgid "Split across devices"
+msgstr "Répartir entre les appareils"
+
+# Settings → Filter words summary line after a team_size has
+# been picked: "Split across {n} devices  [change]".
+msgid "Split across {n} devices"
+msgstr "Réparti entre {n} appareils"
+
+# Lowercase to match the visual weight of the inline summary
+# (it's a tag-style affordance, not a top-level CTA).
+msgid "change"
+msgstr "modifier"
+
+# Prompt above the [1/n]…[n/n] slot button row (Settings) AND
+# inside the auto-fired slot-picker popup.
+msgid "Which device is this?"
+msgstr "Quel appareil est-ce ?"
+
+# Slot-picker popup title — auto-fires when team_size is set
+# AND this device hasn't claimed a slot yet (§ 21 hard rule
+# #3 displacement detection).
+msgid "Pick a recording slot"
+msgstr "Choisir une tranche d'enregistrement"
+
+# Slot-picker popup override button. Shown only when at least
+# one slot is already claimed; one-shot — clicking once
+# reveals the claimed slots and the button disappears.
+msgid "Show claimed slots too"
+msgstr "Afficher aussi les tranches occupées"
+
+# 5+ team-size dialog — title + prompt + the numeric input
+# accepts ≥ 5.
+msgid "Team size"
+msgstr "Taille de l'équipe"
+
+msgid "How many devices on the team?"
+msgstr "Combien d'appareils dans l'équipe ?"
+
+# Fallback for an empty device_name in the slot-picker popup
+# (the inline Settings slot row leaves it blank instead so a
+# misconfigured device renders as just "[k/n]"; the popup
+# always shows a label).
+msgid "Unknown"
+msgstr "Inconnu"
+
+# CONTRIBUTOR_UNSET routing per § 21 hard rule #2: both the
+# inline Settings slot button and the auto-popup picker route
+# the user to the Sync Settings UI when no contributor name is
+# set, since claim_slot refuses without one.
+msgid "Name required"
+msgstr "Nom requis"
+
+msgid ""
+"Set your name in Sync Settings before claiming a recording slot. "
+"Tap \"Open Sync Settings\" to continue."
+msgstr ""
+"Définissez votre nom dans les paramètres de synchronisation avant "
+"de revendiquer une tranche d'enregistrement. Touchez « Ouvrir les "
+"paramètres de synchronisation » pour continuer."

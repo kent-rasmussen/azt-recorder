@@ -336,6 +336,18 @@ KV_TEMPLATE = '''
                 background_normal: ''
                 on_release: app.show_goto_dialog()
                 size_hint_x: 1
+                # Ellipsize from the left so the [k/n] split
+                # suffix at the right (the thing that
+                # distinguishes one phone from another) stays
+                # visible even on narrow screens or when the
+                # lang prefix is long. shorten_from='left'
+                # drops characters off the front with a '…'
+                # prefix; the lang code is the same across
+                # every phone on a project, so losing it from
+                # this label is the right thing to lose.
+                shorten: True
+                shorten_from: 'left'
+                split_str: ''
             Button:
                 size_hint_x: 1
                 background_color: T.TRANSPARENT
@@ -671,6 +683,46 @@ KV_TEMPLATE = '''
                             # 'int' would block ``-`` and ``,``;
                             # apply_cawl's parser handles validation.
                             input_type: 'number'
+                        # ── Wordlist split (§ 21) ─────────────────
+                        # Team-size row is always visible inside the
+                        # expanded filter panel. Slot row appears
+                        # below it only when team_size is set.
+                        # Buttons are built dynamically by
+                        # ConfigScreen._refresh_split_rows so the
+                        # team_size value drives [1/n]..[n/n] without
+                        # KV recomposition.
+                        Label:
+                            id: split_devices_label
+                            text: _('Split across devices')
+                            font_size: sp(13)
+                            font_name: FONT
+                            color: T.TEXT_DIM
+                            size_hint_y: None
+                            height: dp(36)
+                            halign: 'left'
+                            text_size: self.width, None
+                        BoxLayout:
+                            id: team_size_row
+                            orientation: 'horizontal'
+                            size_hint_y: None
+                            height: dp(48)
+                            spacing: dp(6)
+                        Label:
+                            id: which_device_label
+                            text: _('Which device is this?')
+                            font_size: sp(13)
+                            font_name: FONT
+                            color: T.TEXT_DIM
+                            size_hint_y: None
+                            height: 0
+                            halign: 'left'
+                            text_size: self.width, None
+                        BoxLayout:
+                            id: slot_row
+                            orientation: 'horizontal'
+                            size_hint_y: None
+                            height: 0
+                            spacing: dp(6)
                         Label:
                             id: gloss_search_label
                             text: _('Gloss search (filter by gloss text)')
@@ -2039,6 +2091,11 @@ class ConfigScreen(Screen):
 
     def on_enter(self):
         app = App.get_running_app()
+        # Start each Settings entry in summary mode for the
+        # team-size row — if the user previously tapped
+        # [change] then navigated away without picking, we
+        # shouldn't keep the picker buttons open on re-entry.
+        self._team_size_editing = False
         self._build_lang_selector()
         # Conserve-power selectors are peer-pref-backed (suite-wide),
         # so they populate regardless of project state — they used to
@@ -2231,7 +2288,10 @@ class ConfigScreen(Screen):
         panel = self.ids.get('filter_panel')
         if not panel:
             return
-        # Restore child heights before expanding
+        # Restore child heights for the non-split widgets.
+        # Split-section heights + panel.height are owned by
+        # _refresh_split_rows below (three-state logic:
+        # team_size=0 / editing / summary).
         for cid in ('cawl_label', 'gloss_search_label'):
             w = self.ids.get(cid)
             if w:
@@ -2241,6 +2301,9 @@ class ConfigScreen(Screen):
             if w:
                 w.height = dp(48)
                 w.disabled = False
+        team_size_row = self.ids.get('team_size_row')
+        if team_size_row:
+            team_size_row.height = dp(48)
         bottom_row = self.ids.get('filter_bottom_row')
         if bottom_row:
             bottom_row.height = dp(56)
@@ -2252,10 +2315,12 @@ class ConfigScreen(Screen):
         if ok_btn:
             ok_btn.height = dp(56)
             ok_btn.disabled = False
-        # dp(36)*2 labels + dp(48)*2 inputs + dp(56) bottom row + dp(8)*4 spacing
-        panel.height = dp(256)
         panel.opacity = 1
         self._filter_open = True
+        # Build the team-size + slot button rows now that we know
+        # team_size; without this, an expand-while-already-loaded
+        # would leave the rows empty.
+        self._refresh_split_rows()
         btn = self.ids.get('filter_toggle_btn')
         if btn:
             btn.normal_color = theme.BTN_INACTIVE
@@ -2275,7 +2340,8 @@ class ConfigScreen(Screen):
         # `<UnrecordedToggle>:` / `<RecBtn@Button>:` root rules pin
         # `size_hint_y: None` + an explicit height so they don't
         # shrink with their (zeroed) parent row.
-        for cid in ('cawl_label', 'gloss_search_label'):
+        for cid in ('cawl_label', 'gloss_search_label',
+                    'split_devices_label', 'which_device_label'):
             w = self.ids.get(cid)
             if w:
                 w.height = 0
@@ -2285,6 +2351,10 @@ class ConfigScreen(Screen):
                 w.height = 0
                 w.disabled = True
                 w.focus = False
+        for cid in ('team_size_row', 'slot_row'):
+            w = self.ids.get(cid)
+            if w:
+                w.height = 0
         bottom_row = self.ids.get('filter_bottom_row')
         if bottom_row:
             bottom_row.height = 0
@@ -2315,13 +2385,37 @@ class ConfigScreen(Screen):
                 cawl_in = self.ids.get('cawl_input')
                 if cawl_in:
                     text = cawl_in.text.strip()
+                    prior = (app.recorder.cawl_filter or '').strip()
                     app.recorder.cawl_filter = text
                     set_peer_pref('cawl_filter', text or None)
+                    # § 21: only flip the source flag when the
+                    # text actually changed. Otherwise we'd
+                    # demote a split-derived value to 'manual'
+                    # just because the user opened and closed
+                    # the panel — the field shows the
+                    # computed range and our re-persist of
+                    # that same string would otherwise look
+                    # like a manual edit, suppressing the
+                    # [k/n] suffix in progress_text.
+                    if text != prior:
+                        set_peer_pref(
+                            'cawl_filter_source',
+                            'manual' if text else None)
                 gs = self.ids.get('gloss_search_input')
                 if gs:
                     app.recorder.gloss_search = gs.text.strip()
         else:
             self._expand_filter_panel()
+            # Refresh split state on expand so the inline
+            # summary/picker reflects the latest team_size +
+            # list_slots from the daemon. Without this the
+            # other phone in a 2-device team can sit on stale
+            # data until its next background sync — visible
+            # as "split across X devices" on one phone and
+            # the picker still showing on the other.
+            app = App.get_running_app()
+            if app is not None:
+                app._populate_split_state()
         # Belt-and-suspenders: force db_settings_box to recompute
         # height after the panel size change. The KV binding
         # `height: self.minimum_height` should handle this on its
@@ -2362,6 +2456,321 @@ class ConfigScreen(Screen):
         cleaned = text.strip()
         App.get_running_app().recorder.cawl_filter = cleaned
         set_peer_pref('cawl_filter', cleaned or None)
+        # § 21: user typed in the field — flip the filter source
+        # off split mode so populate_split_state stops
+        # overwriting it on subsequent syncs. Empty field clears
+        # the source entirely.
+        set_peer_pref('cawl_filter_source',
+                      'manual' if cleaned else None)
+
+    def _refresh_split_rows(self):
+        """Refresh the team-size + slot button rows in the
+        filter panel from the recorder's current
+        ``split_team_size`` / ``split_my_slot`` state plus a
+        fresh ``list_slots`` read. Called on every filter-panel
+        expand and whenever split state changes.
+
+        UI shape:
+        - team_size_row in **summary mode** ("Number of groups:
+          X  [Change]") once a value is set — the picker buttons
+          are hidden so an accidental tap on the slot row below
+          can't bleed into [2][3][4][5+] and change team_size
+          under the user.
+        - team_size_row in **picker mode** ([2][3][4][5+]) when
+          team_size is 0 (initial setup) OR the user has tapped
+          [Change] to revise.
+
+        Rebuild discipline (avoid the Kivy touch-during-rebuild
+        race): heights update synchronously so the layout knows
+        the new geometry, but the actual widget-tear-down +
+        rebuild for both rows is deferred via
+        ``Clock.schedule_once(0)`` so the BoxLayout layout pass
+        and the current touch dispatch settle before children
+        change underneath the user's finger."""
+        app = App.get_running_app()
+        if not (app and app.recorder):
+            return
+        team_size = int(getattr(app.recorder, 'split_team_size', 0) or 0)
+        my_slot = str(getattr(app.recorder, 'split_my_slot', '') or '')
+
+        # ── Heights FIRST so subsequent button-adds land at the
+        # right positions. Three states:
+        #   - team_size == 0 (initial picker):
+        #       split_devices_label visible, slot row hidden.
+        #       panel = dp(372).
+        #   - team_size set + editing (user tapped [change]):
+        #       both split_devices_label AND slot row visible.
+        #       panel = dp(456).
+        #   - team_size set + summary (default after pick):
+        #       split_devices_label hidden (its content is in
+        #       the team_size_row summary text), slot row
+        #       visible. panel = dp(420).
+        # Skipped when the filter panel is collapsed — the
+        # collapse path keeps everything at 0 and a later
+        # expand will recompute via this same path.
+        panel = self.ids.get('filter_panel')
+        editing = getattr(self, '_team_size_editing', False)
+        if panel is not None and getattr(self, '_filter_open', False):
+            which = self.ids.get('which_device_label')
+            slot_row_w = self.ids.get('slot_row')
+            split_label = self.ids.get('split_devices_label')
+            in_picker_mode = (not team_size) or editing
+            if team_size:
+                if which is not None:
+                    which.height = dp(36)
+                if slot_row_w is not None:
+                    slot_row_w.height = dp(48)
+            else:
+                if which is not None:
+                    which.height = 0
+                if slot_row_w is not None:
+                    slot_row_w.height = 0
+            if split_label is not None:
+                split_label.height = dp(36) if in_picker_mode else 0
+            if not team_size:
+                panel.height = dp(372)
+            elif editing:
+                panel.height = dp(456)
+            else:
+                panel.height = dp(420)
+
+        # ── cawl_input text sync (when split is active) and
+        # collapsed-summary line.
+        if peer_pref('cawl_filter_source', None) == 'split':
+            cawl_in = self.ids.get('cawl_input')
+            if cawl_in is not None:
+                new_text = app.recorder.cawl_filter or ''
+                if cawl_in.text != new_text:
+                    cawl_in.text = new_text
+        self._update_filter_summary()
+
+        # ── Deferred row rebuilds. Both team_size_row and
+        # slot_row clear+rebuild happen one frame later so the
+        # current touch dispatch returns and the layout pass
+        # picks up the height changes above before children
+        # are torn down.
+        Clock.schedule_once(
+            lambda dt: self._rebuild_team_size_row(team_size), 0)
+        Clock.schedule_once(
+            lambda dt: self._rebuild_slot_row(team_size, my_slot), 0)
+
+    def _rebuild_team_size_row(self, team_size):
+        """Rebuild team_size_row's children. Two modes:
+
+        - team_size > 0 AND not editing → summary "Number of
+          groups: X  [Change]"
+        - team_size == 0 OR user tapped [Change] → picker
+          [2][3][4][5+]
+
+        The summary mode is the default once a value is set;
+        it keeps the picker buttons off-screen so an accidental
+        tap on the slot row beneath can't bleed into them.
+        Called from Clock.schedule_once(0) so the previous
+        touch dispatch and layout pass have completed first."""
+        from kivy.uix.button import Button
+        from kivy.uix.label import Label
+        ts_row = self.ids.get('team_size_row')
+        if ts_row is None:
+            return
+        ts_row.clear_widgets()
+        editing = getattr(self, '_team_size_editing', False)
+        if team_size and not editing:
+            # Summary mode.
+            summary = Label(
+                text=_tr('Split across {n} devices').format(n=team_size),
+                font_size=sp(14), font_name=_FONT_NAME,
+                color=theme.TEXT,
+                halign='left', valign='middle',
+                size_hint_x=3)
+            summary.bind(
+                size=lambda w, s: setattr(w, 'text_size', s))
+            change_btn = Button(
+                text=_tr('change'),
+                font_size=sp(14), font_name=_FONT_NAME,
+                background_normal='',
+                background_color=theme.BTN_INACTIVE,
+                color=theme.TEXT,
+                size_hint_x=1)
+            change_btn.bind(
+                on_release=lambda *_:
+                    self._enter_team_size_editing())
+            ts_row.add_widget(summary)
+            ts_row.add_widget(change_btn)
+            return
+        # Picker mode.
+        for n in (2, 3, 4):
+            btn = Button(
+                text=str(n), font_size=sp(15),
+                font_name=_FONT_NAME,
+                background_normal='',
+                background_color=(
+                    theme.ACCENT if n == team_size else theme.SURFACE),
+                color=theme.TEXT)
+            btn.bind(on_release=lambda b, _n=n:
+                     self._on_pick_team_size(_n))
+            ts_row.add_widget(btn)
+        plus_btn = Button(
+            text='5+', font_size=sp(15),
+            font_name=_FONT_NAME,
+            background_normal='',
+            background_color=(
+                theme.ACCENT if team_size >= 5 else theme.SURFACE),
+            color=theme.TEXT)
+        plus_btn.bind(
+            on_release=lambda *_: self._open_team_size_plus_dialog())
+        ts_row.add_widget(plus_btn)
+
+    def _enter_team_size_editing(self):
+        """Flip team_size_row to picker mode on the next frame.
+        Bound to the [Change] button in summary mode."""
+        self._team_size_editing = True
+        self._refresh_split_rows()
+
+    def _rebuild_slot_row(self, team_size, my_slot):
+        """Synchronously clear + rebuild slot_row's children.
+        Always called from a Clock.schedule_once(0) so the
+        previous frame's touch dispatch and layout pass have
+        completed before we tear down + re-add children."""
+        from kivy.uix.button import Button
+        slot_row = self.ids.get('slot_row')
+        if slot_row is None:
+            return
+        slot_row.clear_widgets()
+        if not team_size:
+            return
+        app = App.get_running_app()
+        try:
+            from azt_collab_client import list_slots
+        except ImportError:
+            list_slots = lambda _lc: {}
+        langcode = getattr(app, '_current_langcode', '') or ''
+        slots = list_slots(langcode) if langcode else {}
+        for k in range(1, team_size + 1):
+            k_str = str(k)
+            claim = (slots or {}).get(k_str) or {}
+            device = claim.get('device_name', '') or ''
+            is_mine = (k_str == my_slot)
+            is_taken = bool(claim) and not is_mine
+            if is_mine:
+                label = f'{k}/{team_size}'
+                bg = theme.ACCENT
+            elif is_taken:
+                label = f'{k}/{team_size}\n({device})'
+                bg = theme.BTN_INACTIVE
+            else:
+                label = f'{k}/{team_size}'
+                bg = theme.SURFACE
+            btn = Button(
+                text=label, font_size=sp(13),
+                font_name=_FONT_NAME,
+                background_normal='',
+                background_color=bg,
+                color=theme.TEXT)
+            btn.bind(on_release=lambda b, _s=k_str:
+                     self._on_pick_slot(_s))
+            slot_row.add_widget(btn)
+
+    def _on_pick_team_size(self, n):
+        """Persist team_size to the project KV and refresh
+        split state. Resets the editing flag so the row
+        returns to summary mode after the pick. The slot
+        picker popup will fire from _populate_split_state if
+        this device hasn't claimed a slot yet."""
+        app = App.get_running_app()
+        langcode = getattr(app, '_current_langcode', '') or ''
+        if not langcode:
+            return
+        try:
+            from azt_collab_client import project_kv_set
+        except ImportError:
+            return
+        project_kv_set(langcode, 'team_size', n)
+        self._team_size_editing = False
+        app._populate_split_state()
+        self._refresh_split_rows()
+
+    def _open_team_size_plus_dialog(self):
+        """Numeric-input dialog for team sizes ≥ 5. Tapping OK
+        flows through the same _on_pick_team_size path."""
+        from kivy.uix.popup import Popup
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.textinput import TextInput
+        from kivy.uix.button import Button
+        from kivy.uix.label import Label
+
+        box = BoxLayout(
+            orientation='vertical', padding=dp(12), spacing=dp(10))
+        box.add_widget(Label(
+            text=_tr('How many devices on the team?'),
+            font_size=sp(14), font_name=_FONT_NAME,
+            size_hint_y=None, height=dp(36)))
+        num_input = TextInput(
+            text='5', multiline=False,
+            size_hint_y=None, height=dp(48),
+            font_size=sp(18), font_name=_FONT_NAME,
+            input_filter='int', input_type='number')
+        box.add_widget(num_input)
+        btn_row = BoxLayout(
+            orientation='horizontal', size_hint_y=None,
+            height=dp(48), spacing=dp(8))
+        cancel = Button(text=_tr('Cancel'), font_size=sp(13))
+        ok = Button(
+            text=_tr('OK'), font_size=sp(13),
+            background_color=theme.ACCENT)
+        btn_row.add_widget(cancel)
+        btn_row.add_widget(ok)
+        box.add_widget(btn_row)
+        popup = Popup(
+            title=_tr('Team size'),
+            content=box,
+            size_hint=(0.8, None), height=dp(200),
+            auto_dismiss=False)
+        cancel.bind(on_release=lambda *_: popup.dismiss())
+
+        def _confirm(*_):
+            try:
+                n = int((num_input.text or '').strip())
+            except ValueError:
+                popup.dismiss()
+                return
+            if n >= 2:
+                popup.dismiss()
+                self._on_pick_team_size(n)
+            else:
+                popup.dismiss()
+        ok.bind(on_release=_confirm)
+        num_input.bind(on_text_validate=_confirm)
+        popup.open()
+
+    def _on_pick_slot(self, slot_str):
+        """Claim *slot_str* for this device. § 21 hard rule #2
+        routes CONTRIBUTOR_UNSET through the same path the
+        popup picker uses."""
+        from azt_collab_client import (
+            claim_slot as _claim_slot, get_contributor)
+        app = App.get_running_app()
+        if not (get_contributor() or '').strip():
+            app._show_contributor_required_for_slot()
+            return
+        langcode = getattr(app, '_current_langcode', '') or ''
+        if not langcode:
+            return
+        # Mark this slot as in-flight before the RPC so the
+        # _populate_split_state we trigger ourselves below doesn't
+        # see a stale list_slots (commit hasn't been flushed yet)
+        # and re-fire the picker. Cleared by the apply step once
+        # the daemon's list_slots catches up; cleared here on
+        # outright RPC failure.
+        app._claim_pending_slot = str(slot_str)
+        ok = _claim_slot(langcode, slot_str)
+        if not ok:
+            app._claim_pending_slot = ''
+            print(f'[split] claim_slot({slot_str}) returned False',
+                  file=sys.stderr)
+            return
+        set_peer_pref('cawl_filter_source', 'split')
+        app._populate_split_state()
+        self._refresh_split_rows()
 
     def toggle_show_past(self, show_past):
         self.only_unrecorded = not show_past
@@ -2673,8 +3082,19 @@ class ConfigScreen(Screen):
             cawl_in = self.ids.get('cawl_input')
             if cawl_in:
                 text = cawl_in.text.strip()
+                prior = (app.recorder.cawl_filter or '').strip()
                 app.recorder.cawl_filter = text
                 set_peer_pref('cawl_filter', text or None)
+                # § 21: only flip the source flag when the text
+                # actually changed. Closing Settings without
+                # touching the CAWL field should not demote a
+                # split-derived value to 'manual' (which would
+                # suppress [k/n] in progress_text and stop the
+                # filter from auto-recomputing on next sync).
+                if text != prior:
+                    set_peer_pref(
+                        'cawl_filter_source',
+                        'manual' if text else None)
             gs = self.ids.get('gloss_search_input')
             if gs:
                 app.recorder.gloss_search = gs.text.strip()
@@ -3112,8 +3532,14 @@ class RecorderController:
     Decoupled from the UI — the UI reads properties from here.
     """
 
-    def __init__(self, db: 'LIFTDatabase'):
+    def __init__(self, db: 'LIFTDatabase', langcode: str = ''):
         self.db = db
+        # Langcode is daemon-authoritative; carried into the controller
+        # so the per-project pending-save queue can persist under a
+        # (langcode, guid) key (template-cloned projects share GUIDs —
+        # see NOTES_TO_DAEMON "Fresh GUIDs when creating a project from
+        # a template"). Empty langcode disables persistence.
+        self._langcode = langcode
         self.queue = []          # list of entry dicts
         self.index = 0
         # cawl_filter persists across boots/installs: some workflows
@@ -3122,6 +3548,14 @@ class RecorderController:
         self.cawl_filter = peer_pref('cawl_filter', '') or ''
         self.gloss_search = ''
         self.only_unrecorded = False
+        # Wordlist-split state (CLIENT_INTEGRATION.md § 21).
+        # Populated by populate_split_state on project-load and
+        # every sync-completion. ``split_team_size`` is the
+        # project-shared team count; ``split_my_slot`` is this
+        # device's claimed slot ("1", "2", …) or '' if unclaimed.
+        # progress_text reads both for the "[k/n]" suffix.
+        self.split_team_size = 0
+        self.split_my_slot = ''
         self._recording = False
         self._playing = False
         self._pending_rerecord = False
@@ -3174,10 +3608,16 @@ class RecorderController:
         # are preserved (re-record overwrites the same
         # deterministic path), so the worst case if the daemon
         # never comes back is "audio file exists, LIFT reference
-        # missing" — same end-state as the old un-wedge fix, but
-        # auto-healing once the daemon recovers. Project switch
-        # destroys the controller, so the dict naturally clears.
-        self._pending_lift_saves = {}
+        # missing".
+        #
+        # Persisted via ``peer_pref('pending_lift_saves')`` under
+        # the controller's langcode so a force-kill before the
+        # auto-retry tick fires doesn't lose the binding. On
+        # filesystem projects ``LIFTDatabase.bind_orphan_audio``
+        # (called from ``load_lift``) is the primary recovery
+        # path; the persisted queue covers URI projects, where
+        # the daemon's provider exposes no list_audio RPC.
+        self._pending_lift_saves = self._load_persisted_pending()
 
         # Start-attempt token incremented each start_recording.
         # The watchdog (``_start_watchdog``) only fires force-
@@ -3265,6 +3705,53 @@ class RecorderController:
                     pass
         return result
 
+    def sorted_cawl_numbers(self):
+        """Return every project entry's CAWL number as a sorted
+        list of ints. Reads the unfiltered model (``db.entries``)
+        — not ``queue`` — so the result is invariant under the
+        active filter. Used by the word-list split feature to
+        partition the full list across team devices."""
+        nums = []
+        for e in self.db.entries:
+            cawl = e.get('cawl', '')
+            if not cawl:
+                continue
+            try:
+                nums.append(int(cawl))
+            except (TypeError, ValueError):
+                continue
+        nums.sort()
+        return nums
+
+    @staticmethod
+    def compute_split_range(sorted_nums, team_size, my_slot):
+        """Partition *sorted_nums* into *team_size* contiguous
+        slices and return slice *my_slot* (1-indexed) as a
+        ``'lo-hi'`` range string suitable for ``cawl_filter``.
+
+        Sizes differ by at most 1: the first ``len(nums) %
+        team_size`` slices get one extra. ``lo`` and ``hi`` are
+        the min and max CAWL numbers actually present in the
+        slice — gaps inside the slice are harmless because
+        ``_parse_cawl_filter`` intersects ranges against the
+        actual entries.
+
+        Returns ``''`` for invalid inputs (empty list, slot out
+        of range, team_size < 1) so callers can treat the result
+        uniformly as "no filter to apply"."""
+        if (not sorted_nums or team_size < 1 or my_slot < 1
+                or my_slot > team_size):
+            return ''
+        total = len(sorted_nums)
+        base = total // team_size
+        rem = total % team_size
+        start = sum(
+            (base + 1) if k < rem else base
+            for k in range(my_slot - 1))
+        size = (base + 1) if (my_slot - 1) < rem else base
+        end = start + size - 1
+        return f'{sorted_nums[start]}-{sorted_nums[end]}'
+
     # ── Navigation ─────────────────────────────────────────────────────────────
 
     def go_next(self):
@@ -3311,18 +3798,29 @@ class RecorderController:
         cawl = self.current.get('cawl', '')
         cawl_num = cawl.lstrip('0') or '0' if cawl else ''
         lang = self.db.vernlang or self.list_name
-        parts = [lang]
-        if cawl_num:
-            parts.append(cawl_num)
-        # Right-hand side: when a CAWL filter is active, show the filter
-        # expression itself (e.g. "501-1000") so the displayed number is
-        # interpretable. Otherwise fall back to the queue length.
+        # Tight format: one space after lang, then cawl/range with no
+        # internal spaces, then optional [k/n] split suffix.
+        # Examples:
+        #   en-US-x-kent 204/200-500[2/4]   (split active)
+        #   en-US-x-kent 204/200-500        (manual range filter)
+        #   en-US-x-kent 204/1700           (no filter)
         cf = self.cawl_filter.strip()
-        if cf:
-            parts.append(f'/ {cf}')
-        else:
-            parts.append(f'/ {len(self.queue)}')
-        return ' '.join(parts)
+        right = cf if cf else str(len(self.queue))
+        # Compose the centre: "cawl_num/right" if we have a cawl
+        # number, else just "right" (preserves the pre-split shape
+        # for non-CAWL list types).
+        centre = f'{cawl_num}/{right}' if cawl_num else right
+        # Split suffix: only when this device has an active slot
+        # claim AND a team_size pulled from the project KV AND
+        # the filter is currently split-derived. Without the
+        # source gate, a manually-typed range like "200-500"
+        # would still pick up a stale [k/n] from a prior pick.
+        team_size = getattr(self, 'split_team_size', 0)
+        my_slot = getattr(self, 'split_my_slot', '')
+        is_split = (peer_pref('cawl_filter_source', None) == 'split')
+        if team_size and my_slot and is_split:
+            centre = f'{centre}[{my_slot}/{team_size}]'
+        return f'{lang} {centre}'
 
     @property
     def has_image(self):
@@ -3884,6 +4382,7 @@ class RecorderController:
                           f'for {guid}: {prev!r} → {filename!r}',
                           file=sys.stderr, flush=True)
                 self._pending_lift_saves[guid] = filename
+                self._persist_pending(guid, filename)
                 print(f'[record] LIFT save failed: {ex} '
                       f'(queued for auto-retry)',
                       file=sys.stderr, flush=True)
@@ -3899,7 +4398,8 @@ class RecorderController:
                 # Successful save also clears any earlier failed
                 # attempt for the same entry — e.g. user retried by
                 # re-recording before the auto-retry tick fired.
-                self._pending_lift_saves.pop(guid, None)
+                if self._pending_lift_saves.pop(guid, None) is not None:
+                    self._unpersist_pending(guid)
                 self.current['audio_filename'] = filename
                 self._dirty = True
         Clock.schedule_once(lambda dt: self._notify_ui(), 0)
@@ -4377,7 +4877,46 @@ class RecorderController:
         if app:
             Clock.schedule_once(lambda dt: app.refresh_recorder_ui(), 0)
 
-    # ── Pending-LIFT-save retry ────────────────────────────────────────────────
+    # ── Pending-LIFT-save persistence + retry ──────────────────────────────────
+
+    _PENDING_PREF_KEY = 'pending_lift_saves'
+
+    def _load_persisted_pending(self):
+        """Restore stranded-save entries persisted for this project's
+        langcode. Empty dict if no langcode (peer_pref store unavailable)
+        or no entries recorded for this langcode."""
+        if not self._langcode:
+            return {}
+        store = peer_pref(self._PENDING_PREF_KEY, {}) or {}
+        return dict(store.get(self._langcode, {}))
+
+    def _persist_pending(self, guid, filename):
+        """Record (guid → filename) for this project's langcode in
+        peer_pref. Reads-modifies-writes the cross-project store so
+        other projects' queues are preserved."""
+        if not self._langcode:
+            return
+        store = peer_pref(self._PENDING_PREF_KEY, {}) or {}
+        store.setdefault(self._langcode, {})[guid] = filename
+        set_peer_pref(self._PENDING_PREF_KEY, store)
+
+    def _unpersist_pending(self, guid):
+        """Remove (guid) from the persisted queue for this project's
+        langcode. Cleans up the langcode bucket entirely if empty, and
+        the whole key if no buckets remain."""
+        if not self._langcode:
+            return
+        store = peer_pref(self._PENDING_PREF_KEY, {}) or {}
+        bucket = store.get(self._langcode)
+        if not bucket:
+            return
+        bucket.pop(guid, None)
+        if not bucket:
+            store.pop(self._langcode, None)
+        if store:
+            set_peer_pref(self._PENDING_PREF_KEY, store)
+        else:
+            set_peer_pref(self._PENDING_PREF_KEY, None)
 
     def retry_pending_lift_saves(self):
         """Retry any LIFT saves stranded by a transient daemon
@@ -4405,6 +4944,7 @@ class RecorderController:
                       f'failing: {ex}', file=sys.stderr, flush=True)
                 continue
             self._pending_lift_saves.pop(guid, None)
+            self._unpersist_pending(guid)
             print(f'[record] retry LIFT save for {guid} succeeded',
                   file=sys.stderr, flush=True)
             if guid == current_guid:
@@ -4415,7 +4955,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.47.7'
+__version__ = '1.50.2'
 
 
 class LIFTRecorderApp(App):
@@ -4479,11 +5019,19 @@ class LIFTRecorderApp(App):
             print(f'Legacy prefs write error: {ex}')
 
     def _migrate_prefs_to_suite_store(self):
-        """Drain the legacy peer-private prefs.json into $AZT_HOME/config.json
-        via azt_collab_client. Idempotent: keys already present in the
-        suite store are left alone (a sister app that ran first wins).
-        After drain, the keys are popped from prefs.json so subsequent
-        launches do nothing — no daemon contact, no repeated work."""
+        """Drain the legacy peer-private prefs.json into $AZT_HOME/config.json.
+        Local-file work only — the post-call ``peer_pref('theme', …)``
+        read depends on this completing first, so it stays on the main
+        thread. Daemon-touching legacy keys (``collab_name`` → daemon
+        contributor) are stashed in ``self._pending_legacy_contributor``
+        and migrated on the startup worker per
+        CLIENT_INTEGRATION.md § 17c Rule 7.
+
+        Idempotent: keys already present in the suite store are left
+        alone (a sister app that ran first wins). After drain, the
+        keys are popped from prefs.json so subsequent launches do
+        nothing."""
+        self._pending_legacy_contributor = None
         legacy = self._load_legacy_prefs()
         if not legacy:
             return
@@ -4497,27 +5045,20 @@ class LIFTRecorderApp(App):
         if legacy.pop('last_lift', None) is not None:
             moved.append('last_lift (dropped)')
         # vernlang, collab_langcode, and image_repo were peer-side
-        # caches of daemon-owned data; 1.41.3 dropped all three. The
-        # daemon's projects.json is now the only source of truth for
-        # the project langcode, and Project.cawl_image_repo is the
-        # only source for the CAWL image repo — see the no-daemon-
-        # owned-caches rule.
+        # caches of daemon-owned data; 1.41.3 dropped all three.
         if legacy.pop('vernlang', None) is not None:
             moved.append('vernlang (dropped)')
         if legacy.pop('collab_langcode', None) is not None:
             moved.append('collab_langcode (dropped)')
         if legacy.pop('image_repo', None) is not None:
             moved.append('image_repo (dropped)')
-        # Committer name has a dedicated suite endpoint.
+        # Committer name has a dedicated suite endpoint. Stash the
+        # value here (local-only pop); the worker calls the daemon.
         if 'collab_name' in legacy:
-            try:
-                from azt_collab_client import get_contributor, set_contributor
-                value = legacy.pop('collab_name')
-                if value and not get_contributor():
-                    set_contributor(value)
-                moved.append('collab_name -> contributor')
-            except Exception as ex:
-                print(f'[migrate] collab_name failed: {ex}')
+            value = legacy.pop('collab_name')
+            if value:
+                self._pending_legacy_contributor = value
+            moved.append('collab_name -> contributor (deferred)')
         # Generic peer-shared keys.
         for key in ('theme', 'show_past_work', 'rec_task'):
             if key in legacy:
@@ -4536,6 +5077,45 @@ class LIFTRecorderApp(App):
         if moved:
             self._write_legacy_prefs(legacy)
             print(f'[migrate] prefs.json -> $AZT_HOME/config.json: {moved}')
+
+    def _startup_daemon_migrations_worker(self):
+        """Daemon-touching half of the startup migrations, spawned
+        from ``build`` on a worker thread per CLIENT_INTEGRATION.md
+        § 17c Rule 7. Two responsibilities:
+
+        - Promote any legacy ``collab_name`` value stashed by
+          ``_migrate_prefs_to_suite_store`` into the daemon's
+          contributor slot (only if the daemon currently has no
+          contributor — a sister app that ran first wins).
+        - Drain legacy credential keys out of prefs.json into
+          ``$AZT_HOME/credentials.json`` via
+          ``azt_collab_client.migrate_from_prefs``.
+
+        Both calls are idempotent: a second invocation after the
+        legacy keys have been drained is a cheap no-op. Failures
+        are logged but don't propagate — startup must not block on
+        a daemon mid-restart."""
+        legacy_contributor = getattr(
+            self, '_pending_legacy_contributor', None)
+        if legacy_contributor:
+            try:
+                from azt_collab_client import (
+                    get_contributor, set_contributor)
+                if not get_contributor():
+                    set_contributor(legacy_contributor)
+                    print(f'[migrate] collab_name -> contributor: '
+                          f'{legacy_contributor!r}')
+            except Exception as ex:
+                print(f'[migrate] collab_name -> contributor failed: '
+                      f'{ex}')
+            self._pending_legacy_contributor = None
+        try:
+            from azt_collab_client import migrate_from_prefs
+            summary = migrate_from_prefs(self._prefs_path)
+            if summary.get('migrated'):
+                print(f'[migrate] credentials: {summary}')
+        except Exception as ex:
+            print(f'[migrate] credentials: {ex}')
 
     # ── App lifecycle ─────────────────────────────────────────────────────────
 
@@ -4582,24 +5162,27 @@ class LIFTRecorderApp(App):
             except Exception as ex:
                 print(f'[prewarm] {ex}', file=sys.stderr)
             # Drain the legacy peer-private prefs.json into the
-            # suite-wide $AZT_HOME/config.json. Idempotent — keys
-            # already in the suite store are left alone, so a sister
-            # app that ran first wins. Apply *before* reading the theme
-            # below so a fresh upgrade still finds the user's choice.
+            # suite-wide $AZT_HOME/config.json. Local-file work only;
+            # apply *before* reading the theme below so a fresh
+            # upgrade still finds the user's choice. Daemon-touching
+            # parts (collab_name → contributor; migrate_from_prefs for
+            # credentials) are spawned on the startup worker below
+            # per CLIENT_INTEGRATION.md § 17c Rule 7.
             self._migrate_prefs_to_suite_store()
             theme.set_theme(peer_pref('theme', 'Ocean') or 'Ocean')
             self.subtitle = _tr(APP_TAGLINE)
             Builder.load_string(KV)
             self.root = RootScreen()
-            # Move any legacy credential keys out of prefs.json into
-            # $AZT_HOME/credentials.json. Idempotent.
-            try:
-                from azt_collab_client import migrate_from_prefs
-                summary = migrate_from_prefs(self._prefs_path)
-                if summary.get('migrated'):
-                    print(f'[migrate] credentials: {summary}')
-            except Exception as ex:
-                print(f'[migrate] error: {ex}')
+            # Daemon-touching startup migrations off the main thread.
+            # Both calls (set_contributor if legacy collab_name was
+            # stashed; migrate_from_prefs for legacy credentials) are
+            # idempotent — re-entering after the legacy keys are
+            # drained is a cheap no-op. § 17c Rule 7.
+            import threading
+            threading.Thread(
+                target=self._startup_daemon_migrations_worker,
+                daemon=True,
+                name='startup-migrations').start()
             return self.root
         except Exception:
             traceback.print_exc()
@@ -4665,6 +5248,18 @@ class LIFTRecorderApp(App):
             # parked on its own popup and the user hasn't yet given
             # us a daemon to talk to.
             Clock.schedule_once(lambda dt: self._run_bootstrap(), 0)
+            # Shared decisions watcher (CLIENT_INTEGRATION.md § 20a).
+            # The single canonical surface for inbound LAN decisions
+            # (share offers, pair requests, adopt-origin, remote-
+            # conflict). Hard rule #1: "install exactly once at
+            # startup." Idempotent — safe even if Kivy fires on_start
+            # twice. on_resolved is informational only; the recorder
+            # has no project-list or peer-roster UI to refresh, and
+            # the contract forbids auto-loading a newly-received
+            # project (hard rule #4).
+            from azt_collab_client.ui import install_decision_watcher
+            install_decision_watcher(
+                on_resolved=self._on_decision_resolved)
             # Periodically refresh the last-sync indicator so background
             # debounced commits (commit_project from swipes) and the
             # daemon's scheduler-drain pushes become visible
@@ -4701,6 +5296,10 @@ class LIFTRecorderApp(App):
             except Exception:
                 pass
             self._sync_status_event = None
+        # § 17b "subscribe when foregrounded" — drop the
+        # ContentObserver subscription while paused; re-subscribed
+        # in on_resume.
+        self._unsubscribe_project_changes()
         return True
 
     def on_resume(self):
@@ -4744,10 +5343,20 @@ class LIFTRecorderApp(App):
             # foreground rather than waiting up to 10s.
             Clock.schedule_once(
                 lambda dt: self._update_sync_status(), 0)
+        # § 17b — re-subscribe to ContentObserver wakeups for the
+        # foreground project. Idempotent: the helper tears down
+        # any prior token before registering a new one.
+        if getattr(self, '_current_langcode', ''):
+            self._subscribe_project_changes()
         return True
 
     def on_stop(self):
         self._finalise_active_recording('on_stop')
+        # Release the ContentObserver subscription before the
+        # process exits. § 17b notes the leak is non-catastrophic
+        # (observers are cheap), but unsubscribe is the disciplined
+        # shape.
+        self._unsubscribe_project_changes()
         # Stop the cache-progress polling if it's still running.
         event = getattr(self, '_cache_status_event', None)
         if event:
@@ -4878,6 +5487,18 @@ class LIFTRecorderApp(App):
             collab._set_log(message)
         except Exception:
             pass
+
+    def _on_decision_resolved(self, kind, action, decision):
+        """Inbound LAN decision was resolved by the user through the
+        shared watcher's popup (CLIENT_INTEGRATION.md § 20a). The
+        recorder has no project-list / peer-roster UI to refresh,
+        and the contract forbids auto-loading a newly-received
+        project — a passive share-offer accept lands the project in
+        the daemon's list and the user opens it explicitly via the
+        picker on next start_over."""
+        print(f'[decisions] resolved kind={kind} action={action} '
+              f'id={decision.get("id", "")}',
+              file=sys.stderr)
 
     def _on_touch_record(self, window, touch):
         """Stamp _last_touch_time on every touch_down. Cheap;
@@ -5258,29 +5879,42 @@ class LIFTRecorderApp(App):
 
     def _start_image_prefetch(self):
         """Hand the daemon this project's CAWL working-set and start
-        the cache-progress poll.
+        the cache-progress poll, on a worker thread so the daemon
+        round-trips (``all_cawl_paths`` triggers ``cawl_index``;
+        ``cawl_prefetch`` itself is a daemon RPC) don't compete
+        with ``auto_sync`` ticks on the main thread when multiple
+        paired phones open the same project simultaneously.
 
         Per CLIENT_INTEGRATION.md § 10's daemon-driven prefetch
         update: the peer no longer iterates CAWLHandle on its own.
         It computes the working-set (one variant per CAWL id), hands
         the list to ``cawl_prefetch`` once, and the daemon iterates
-        in its own background thread. That lets the daemon know the
-        actual work size so ``cawl_cache_status`` returns a
-        meaningful denominator (otherwise progress plateaus far short
-        of "100%" because the index counts every variant per CAWL
-        id but the peer only ever fetches the preferred one).
-
-        On-demand fetches (CAWLHandle.open_read for the current swipe
-        target, etc.) still work — they hit the same daemon cache the
-        bulk warm populates."""
+        in its own background thread."""
         if not self.recorder:
             print('[image-prefetch] no recorder; skipping')
             return
-        langcode = getattr(self, '_current_langcode', '') or ''
+        langcode = (getattr(self, '_current_langcode', '') or '').strip()
         if not langcode:
             print('[image-prefetch] no langcode; cache-progress '
                   'indicator will not poll')
             return
+        # "Be eager when you have room to" — sample is cheap and
+        # main-thread-safe, so check before paying the worker-spawn
+        # cost. Project switch re-samples naturally via the
+        # load_lift → _start_image_prefetch path.
+        ok, reason = self._have_room_for_prefetch()
+        if not ok:
+            print(f'[image-prefetch] skipped — {reason}; '
+                  f'on-demand only this session')
+            return
+        import threading
+        threading.Thread(
+            target=self._image_prefetch_worker,
+            args=(langcode,),
+            daemon=True,
+        ).start()
+
+    def _image_prefetch_worker(self, langcode):
         try:
             paths = self.recorder.db.all_cawl_paths()
         except Exception as ex:
@@ -5289,18 +5923,6 @@ class LIFTRecorderApp(App):
         if not paths:
             print('[image-prefetch] no paths to warm '
                   '(resolver returned empty)')
-            return
-        # "Be eager when you have room to" — sample the OS-level
-        # memory and network signals once before kicking the
-        # daemon-side warm. If the device is tight, skip bulk
-        # prefetch entirely; on-demand CAWLHandle.open_read still
-        # fetches the displayed image (just no progress indicator,
-        # no daemon-side bulk fill). Project switch re-samples
-        # naturally via the load_lift → _start_image_prefetch path.
-        ok, reason = self._have_room_for_prefetch()
-        if not ok:
-            print(f'[image-prefetch] skipped — {reason}; '
-                  f'on-demand only this session')
             return
         from azt_collab_client import cawl_prefetch
         try:
@@ -5312,7 +5934,9 @@ class LIFTRecorderApp(App):
               f'requested={resp.get("requested")} '
               f'completed={resp.get("completed")} '
               f'finished={resp.get("finished")}')
-        self._start_cache_status_poll(langcode)
+        # Polling cycle drives Kivy properties, schedule onto main.
+        Clock.schedule_once(
+            lambda dt: self._start_cache_status_poll(langcode), 0)
 
     def _sample_total_ram_mb(self):
         """One-shot total-RAM read at startup, in MB. Used for
@@ -5763,7 +6387,19 @@ class LIFTRecorderApp(App):
         # surfaces takes over on the next poll.
         self._last_head_sha = None
         self._last_commit_seen = None
-        self.recorder = RecorderController(db)
+        # Filesystem-side orphan-audio recovery: bind any audio files
+        # whose deterministic basename names an entry with no audiolang
+        # citation form yet. Covers the case where a previous session
+        # recorded the file, queued the LIFT write (daemon hiccup, FS
+        # pressure), then the app was force-killed before the auto-retry
+        # tick fired. URI projects handle the same case via the
+        # persisted ``_pending_lift_saves`` queue restored below.
+        try:
+            db.bind_orphan_audio()
+        except Exception as ex:
+            print(f'[load_lift] orphan-audio bind raised: {ex}')
+        self.recorder = RecorderController(
+            db, langcode=(authoritative or pending or ''))
         # Apply persisted show-past-work preference (default: hide past work)
         show_past = bool(peer_pref('show_past_work', False))
         self.recorder.only_unrecorded = not show_past
@@ -5771,10 +6407,28 @@ class LIFTRecorderApp(App):
         # Register this project with the sync backend so future ops can
         # be addressed by langcode.
         self._register_current_project()
+        # ContentObserver subscription (CLIENT_INTEGRATION.md § 17b,
+        # v0.47.0+): per-project URI gives sub-second wakeups on
+        # daemon-side HEAD advance (incoming LAN receive-pack from a
+        # paired peer, scheduler-driven push, post-receive absorb).
+        # Polling stays as a heartbeat floor — § 17b is explicit that
+        # the subscribe-when-foregrounded + poll + on_resume recipe
+        # is the contract. Silent no-op on non-Android (token is None;
+        # polling-only path handles those peers).
+        self._subscribe_project_changes()
         sm = self.root.ids.sm
         sm.transition = SlideTransition(direction='left')
         sm.current = 'recorder'
         Clock.schedule_once(lambda dt: self.refresh_recorder_ui(), 0.1)
+        # Wordlist-split state per CLIENT_INTEGRATION.md § 21:
+        # read team_size + this device's slot from the project KV
+        # and apply a computed range filter when the filter source
+        # is 'split'. Fires immediately — the RPC reads run on a
+        # worker thread, and the apply step schedules itself onto
+        # the main thread once the daemon responds (no defer
+        # needed for layout settling; the apply is post-render
+        # by construction).
+        self._populate_split_state()
         # Silently pre-fetch all CAWL images for offline use
         Clock.schedule_once(lambda dt: self._start_image_prefetch(), 1.0)
         # Auto-publish new project if credentials are already configured
@@ -5825,6 +6479,372 @@ class LIFTRecorderApp(App):
             return code
         return self._register_current_project()
 
+    # ── ContentObserver subscription (CLIENT_INTEGRATION.md § 17b v0.47.0+) ───
+
+    def _subscribe_project_changes(self):
+        """Subscribe to the daemon's per-project ContentObserver URI
+        for the currently-loaded project so HEAD-advance events
+        (incoming LAN receive-pack, scheduler push, post-receive
+        absorb) wake the peer sub-second instead of waiting for the
+        next polling tick. Silent no-op on non-Android / loopback —
+        the subscribe call returns None and the polling-floor path
+        covers those peers.
+
+        Idempotent: tears down any prior subscription before
+        registering a new one (project switch reuses this method
+        with the new langcode)."""
+        self._unsubscribe_project_changes()
+        langcode = (getattr(self, '_current_langcode', '') or '').strip()
+        if not langcode:
+            return
+        try:
+            from azt_collab_client import subscribe_project_changes
+        except ImportError:
+            return  # pre-0.47.0 client
+        try:
+            self._project_sub_token = subscribe_project_changes(
+                langcode, self._on_project_changed)
+        except Exception as ex:
+            print(f'[content-observer] subscribe failed: {ex}',
+                  file=sys.stderr)
+            self._project_sub_token = None
+
+    def _unsubscribe_project_changes(self):
+        """Release any active per-project subscription. Safe to call
+        when no subscription is held."""
+        token = getattr(self, '_project_sub_token', None)
+        if token is None:
+            return
+        try:
+            from azt_collab_client import unsubscribe
+            unsubscribe(token)
+        except Exception as ex:
+            print(f'[content-observer] unsubscribe failed: {ex}',
+                  file=sys.stderr)
+        self._project_sub_token = None
+
+    def _on_project_changed(self, uri):
+        """ContentObserver callback. Fires on the binder thread that
+        delivered the notification — marshal back to the main thread
+        before touching Kivy widgets. Wakes the existing sync-status
+        path, which already does the head_sha advance detection and
+        in-place content reload (§ 14)."""
+        Clock.schedule_once(lambda dt: self._update_sync_status(), 0)
+
+    # ── Wordlist-split state (CLIENT_INTEGRATION.md § 21) ──────────────────────
+
+    def _populate_split_state(self):
+        """Pull ``team_size`` + this device's slot from the project
+        KV (worker thread) and apply on the main thread. Refreshes
+        ``recorder.split_team_size`` / ``split_my_slot``; recomputes
+        the CAWL range when ``cawl_filter_source == 'split'``;
+        opens the slot picker if team_size is set but this device
+        isn't in ``list_slots`` (§ 21 hard rule #3).
+
+        Worker-thread fetch keeps the UI responsive when the daemon
+        is mid-restart (project_kv_get / list_slots can block for
+        seconds). An in-flight guard drops re-entrant calls while a
+        prior fetch is still running (§ 17c Rule 1 shape) — the
+        running worker covers whatever the new call would have
+        done."""
+        if not self.recorder:
+            return
+        langcode = (getattr(self, '_current_langcode', '') or '').strip()
+        if not langcode:
+            return
+        if getattr(self, '_split_state_in_flight', False):
+            return
+        self._split_state_in_flight = True
+        import threading
+        pending_slot = getattr(self, '_claim_pending_slot', '')
+        threading.Thread(
+            target=self._populate_split_state_worker,
+            args=(langcode, pending_slot),
+            daemon=True,
+        ).start()
+
+    def _populate_split_state_worker(self, langcode, pending_slot):
+        try:
+            from azt_collab_client import (
+                project_kv_get, list_slots, lan_peer_id)
+        except ImportError:
+            self._split_state_in_flight = False
+            return
+        try:
+            raw = project_kv_get(langcode, 'team_size', default='') or ''
+            try:
+                team_size = int(raw) if raw else 0
+            except (TypeError, ValueError):
+                team_size = 0
+            try:
+                slots = list_slots(langcode) or {}
+            except Exception as ex:
+                print(f'[split] worker list_slots failed: {ex}',
+                      file=sys.stderr)
+                return
+            try:
+                my_peer_id = (lan_peer_id() or {}).get('peer_id', '') or ''
+            except Exception:
+                my_peer_id = ''
+            Clock.schedule_once(
+                lambda dt: self._populate_split_state_apply(
+                    langcode, team_size, slots, my_peer_id,
+                    pending_slot),
+                0)
+        except Exception as ex:
+            print(f'[split] worker project_kv_get failed: {ex}',
+                  file=sys.stderr)
+        finally:
+            # Clear the guard from the worker (not the apply step)
+            # so a slow daemon doesn't strand the flag if the worker
+            # raises before scheduling the apply.
+            self._split_state_in_flight = False
+
+    def _populate_split_state_apply(self, langcode, team_size, slots,
+                                    my_peer_id, pending_slot):
+        # Project switched while the worker was in flight — drop
+        # the apply rather than write a previous project's split
+        # state onto the new one.
+        if (getattr(self, '_current_langcode', '') or '') != langcode:
+            return
+        if not self.recorder:
+            return
+        # § 21 Locked semantic #2 (2026-05-28): peer_id is the
+        # canonical key; device_name is display-only and can change
+        # without invalidating any claim. No device_name fallback —
+        # if lan_peer_id() returns '', the daemon's LAN identity
+        # wasn't initialised, which is a daemon-side issue; the
+        # peer logs and skips matching rather than papering over it.
+        my_slot = ''
+        if my_peer_id:
+            for slot, claim in slots.items():
+                if (claim or {}).get('peer_id', '') == my_peer_id:
+                    my_slot = str(slot)
+                    break
+        # S1 claim-pending guard: a just-issued claim_slot may not
+        # yet have flushed to list_slots. Adopt the pending value
+        # optimistically so the picker doesn't re-fire over a
+        # successful tap. One-shot — the pending token is cleared
+        # at the bottom regardless of whether the daemon caught up,
+        # so a loser of a simultaneous-claim merge (§ 21 Locked
+        # semantic #1: "convergent atomicity, not real-time") sees
+        # the picker again on the next cycle instead of staying
+        # falsely "claimed" forever.
+        optimistic = False
+        if not my_slot and pending_slot:
+            my_slot = str(pending_slot)
+            optimistic = True
+        if team_size and not my_slot:
+            print(f'[split] no slot matched: peer_id={my_peer_id!r} '
+                  f'slots_keys={sorted(slots.keys()) if slots else []!r}',
+                  file=sys.stderr)
+        self.recorder.split_team_size = team_size
+        self.recorder.split_my_slot = my_slot
+        if peer_pref('cawl_filter_source', None) == 'split':
+            if team_size and my_slot:
+                sorted_nums = self.recorder.sorted_cawl_numbers()
+                try:
+                    slot_int = int(my_slot)
+                except (TypeError, ValueError):
+                    slot_int = 0
+                new_range = RecorderController.compute_split_range(
+                    sorted_nums, team_size, slot_int)
+                if new_range and new_range != self.recorder.cawl_filter:
+                    self.recorder.cawl_filter = new_range
+                    set_peer_pref('cawl_filter', new_range)
+                    self.recorder.rebuild_queue()
+            else:
+                if self.recorder.cawl_filter:
+                    self.recorder.cawl_filter = ''
+                    set_peer_pref('cawl_filter', None)
+                    self.recorder.rebuild_queue()
+        cs = getattr(self, 'config_screen', None)
+        if cs is not None:
+            try:
+                cs._refresh_split_rows()
+            except Exception as ex:
+                print(f'[split] refresh_split_rows raised: {ex}',
+                      file=sys.stderr)
+        # S1 (one-shot): clear the pending token unconditionally —
+        # the optimistic adoption is only good for THIS apply cycle.
+        # If the daemon caught up (my_slot matched on peer_id), the
+        # token clears naturally; if the daemon didn't (we're the
+        # loser of a simultaneous claim), the next populate cycle
+        # sees no pending and routes to the picker.
+        if optimistic:
+            self._claim_pending_slot = ''
+        elif my_slot:
+            self._claim_pending_slot = ''
+        if team_size and not my_slot:
+            self._show_slot_picker(team_size, slots)
+        self.refresh_recorder_ui()
+
+    def _show_slot_picker(self, team_size, slots):
+        """Modal slot picker. Unclaimed slots are tappable by
+        default; a "Show all" button reveals claimed slots
+        (each labelled with the claiming device_name) so a
+        replacement phone can displace a dead device. Tapping a
+        slot calls ``claim_slot``; on CONTRIBUTOR_UNSET we route
+        the user to set their name first (§ 21 hard rule #2)."""
+        from kivy.uix.popup import Popup
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.button import Button
+        from kivy.uix.label import Label
+        if getattr(self, '_slot_picker_open', False):
+            return  # already showing
+        self._slot_picker_open = True
+
+        taken = {str(s): (c or {}) for s, c in (slots or {}).items()}
+
+        content = BoxLayout(
+            orientation='vertical', padding=dp(12), spacing=dp(10))
+        prompt = Label(
+            text=_tr('Which device is this?'),
+            font_size=sp(15), font_name=_FONT_NAME,
+            size_hint_y=None, height=dp(36),
+            halign='center', valign='middle')
+        prompt.bind(size=lambda w, s: setattr(w, 'text_size', s))
+        content.add_widget(prompt)
+
+        slot_row = BoxLayout(
+            orientation='horizontal', size_hint_y=None,
+            height=dp(56), spacing=dp(6))
+        content.add_widget(slot_row)
+
+        state = {'show_all': False}
+
+        # Only offer the override when something is actually
+        # claimed — for a fresh team_size where no one's picked,
+        # the button is meaningless and adds visual noise.
+        has_taken = bool(taken)
+        toggle_btn = Button(
+            text=_tr('Show claimed slots too'),
+            font_size=sp(13), size_hint_y=None,
+            height=dp(40) if has_taken else 0,
+            opacity=1 if has_taken else 0,
+            disabled=not has_taken)
+        content.add_widget(toggle_btn)
+
+        popup = Popup(
+            title=_tr('Pick a recording slot'),
+            content=content,
+            size_hint=(0.9, None),
+            height=dp(220) if has_taken else dp(180),
+            auto_dismiss=False,
+        )
+
+        def _on_pick(slot_str):
+            from azt_collab_client import (
+                claim_slot as _claim_slot, get_contributor)
+            # § 21 hard rule #2: claim refuses with
+            # CONTRIBUTOR_UNSET if no contributor name is set.
+            # Check upfront so the failure routes to the right
+            # surface (settings) rather than a silent False.
+            if not (get_contributor() or '').strip():
+                popup.dismiss()
+                self._slot_picker_open = False
+                self._show_contributor_required_for_slot()
+                return
+            langcode = (getattr(self, '_current_langcode', '')
+                        or '')
+            if not langcode:
+                popup.dismiss()
+                self._slot_picker_open = False
+                return
+            self._claim_pending_slot = str(slot_str)
+            ok = _claim_slot(langcode, slot_str)
+            popup.dismiss()
+            self._slot_picker_open = False
+            if not ok:
+                # Could be transport failure or daemon refusal.
+                # Re-trigger populate (and thus picker) on next
+                # sync — for now just log.
+                self._claim_pending_slot = ''
+                print(f'[split] claim_slot({slot_str}) returned '
+                      f'False; will retry on next sync',
+                      file=sys.stderr)
+                return
+            set_peer_pref('cawl_filter_source', 'split')
+            self._populate_split_state()
+
+        def _render(*_):
+            slot_row.clear_widgets()
+            for k in range(1, team_size + 1):
+                k_str = str(k)
+                claim = taken.get(k_str)
+                is_taken = claim is not None
+                if is_taken and not state['show_all']:
+                    continue
+                if is_taken:
+                    device = (claim.get('device_name', '')
+                              or _tr('Unknown'))
+                    label = f'{k}/{team_size}\n({device})'
+                else:
+                    label = f'{k}/{team_size}'
+                btn = Button(
+                    text=label, font_size=sp(13),
+                    font_name=_FONT_NAME)
+                btn.bind(on_release=lambda b, s=k_str: _on_pick(s))
+                slot_row.add_widget(btn)
+
+        def _toggle_show_all(*_):
+            # One-shot: reveal claimed slots, then collapse the
+            # toggle so it doesn't sit in the popup looking
+            # half-functional. User reopens the picker if they
+            # want to flip back.
+            state['show_all'] = True
+            toggle_btn.height = 0
+            toggle_btn.opacity = 0
+            toggle_btn.disabled = True
+            _render()
+
+        toggle_btn.bind(on_release=_toggle_show_all)
+        _render()
+        popup.open()
+
+    def _show_contributor_required_for_slot(self):
+        """Route the user to set a contributor name before
+        claiming a slot. Uses the canonical
+        ``open_server_ui`` deep-link per § 21 hard rule #2."""
+        from kivy.uix.popup import Popup
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.button import Button
+        from kivy.uix.label import Label
+        from azt_collab_client import open_server_ui
+
+        box = BoxLayout(
+            orientation='vertical', padding=dp(12), spacing=dp(10))
+        msg = Label(
+            text=_tr('Set your name in Sync Settings before '
+                     'claiming a recording slot. Tap "Open Sync '
+                     'Settings" to continue.'),
+            font_size=sp(14), font_name=_FONT_NAME,
+            halign='center', valign='middle')
+        msg.bind(size=lambda w, s: setattr(w, 'text_size', s))
+        box.add_widget(msg)
+        btn_row = BoxLayout(
+            orientation='horizontal', size_hint_y=None,
+            height=dp(48), spacing=dp(8))
+        cancel_btn = Button(text=_tr('Cancel'), font_size=sp(13))
+        open_btn = Button(
+            text=_tr('Open Sync Settings'), font_size=sp(13),
+            background_color=theme.ACCENT)
+        btn_row.add_widget(cancel_btn)
+        btn_row.add_widget(open_btn)
+        box.add_widget(btn_row)
+        popup = Popup(
+            title=_tr('Name required'),
+            content=box,
+            size_hint=(0.9, None), height=dp(220),
+            auto_dismiss=False)
+        cancel_btn.bind(on_release=lambda *_: popup.dismiss())
+
+        def _open(*_):
+            popup.dismiss()
+            open_server_ui(on_status=self._log_bootstrap_status)
+        open_btn.bind(on_release=_open)
+        popup.open()
+
     def _reload_and_restore(self, guid):
         """Reload the LIFT file and restore position to the entry with
         *guid*, refreshing the recorder UI in place per
@@ -5853,13 +6873,17 @@ class LIFTRecorderApp(App):
         authoritative = getattr(self, '_current_langcode', '')
         if authoritative:
             db.set_vernlang(authoritative)
+        try:
+            db.bind_orphan_audio()
+        except Exception as ex:
+            print(f'[reload] orphan-audio bind raised: {ex}')
         old_settings = (
             self.recorder.cawl_filter,
             self.recorder.gloss_search,
             self.recorder.only_unrecorded,
             self.recorder.active_gloss_langs[:],
         )
-        self.recorder = RecorderController(db)
+        self.recorder = RecorderController(db, langcode=authoritative)
         self.recorder.cawl_filter, self.recorder.gloss_search, \
             self.recorder.only_unrecorded, self.recorder.active_gloss_langs = old_settings
         self.recorder.rebuild_queue()
@@ -5875,11 +6899,20 @@ class LIFTRecorderApp(App):
             # anchor stays present even though the data clock moved.
             # ConfigScreen.on_enter re-reads the recorder's filter
             # state into the input fields, so no extra UI sync.
+            #
+            # Scope: only release ``only_unrecorded``. The common
+            # cause of anchor disappearance is "this entry just got
+            # recorded (by me or by a paired peer), and the
+            # 'unrecorded only' filter now excludes it." Releasing
+            # past-work restores the view without disrupting the
+            # user's slice. ``cawl_filter`` and ``gloss_search``
+            # don't auto-exclude in normal workflow (CAWL numbers
+            # don't change under us; gloss text is edited
+            # deliberately) — leaving them intact preserves the
+            # user's place in a large project.
             in_model = any(
                 e.get('guid') == guid for e in self.recorder.db.entries)
             if in_model:
-                self.recorder.cawl_filter = ''
-                self.recorder.gloss_search = ''
                 self.recorder.only_unrecorded = False
                 self.recorder.rebuild_queue()
                 for i, e in enumerate(self.recorder.queue):
@@ -5891,6 +6924,11 @@ class LIFTRecorderApp(App):
             # on whatever's at the same slot. Per § 14 let the
             # natural propagation render; no toast.
         self.refresh_recorder_ui()
+        # § 21: sync may have changed team_size or list_slots
+        # under us. Re-pull and re-apply the split filter; trigger
+        # the slot picker if this device has been displaced (no
+        # peer_id in list_slots) while team_size is still set.
+        self._populate_split_state()
 
     def _clone_via_server(self, clone_url, dest_dir, on_progress=None):
         """Drive a server-side clone job to completion. Schedules
@@ -7005,6 +8043,8 @@ class LIFTRecorderApp(App):
             title = _tr('Go to entry (1-{total})').format(total=total)
             hint = f'1-{total}'
 
+        from kivy.uix.checkbox import CheckBox
+        from kivy.uix.label import Label
         content = BoxLayout(orientation='vertical', spacing=dp(12), padding=dp(12))
         num_input = TextInput(
             text=initial,
@@ -7023,6 +8063,25 @@ class LIFTRecorderApp(App):
             input_type='number',
         )
         content.add_widget(num_input)
+
+        # Past-work toggle mirrors Settings → show_past_work
+        # peer_pref. Lives here so the user can flip it without
+        # walking into Settings — it's the only filter they're
+        # likely to touch day-to-day.
+        show_past_row = BoxLayout(
+            orientation='horizontal', size_hint_y=None,
+            height=dp(40), spacing=dp(8))
+        past_cb = CheckBox(
+            size_hint_x=None, width=dp(40),
+            active=bool(peer_pref('show_past_work', False)))
+        past_label = Label(
+            text=_tr('Show past work'), font_size=sp(14),
+            font_name=_FONT_NAME, halign='left', valign='middle')
+        past_label.bind(size=lambda w, s: setattr(w, 'text_size', s))
+        show_past_row.add_widget(past_cb)
+        show_past_row.add_widget(past_label)
+        content.add_widget(show_past_row)
+
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
         clear_btn = Button(text=_tr('Clear'), font_size=sp(14))
         ok_btn = Button(text=_tr('OK'), font_size=sp(14),
@@ -7034,9 +8093,22 @@ class LIFTRecorderApp(App):
         popup = Popup(
             title=title,
             content=content,
-            size_hint=(0.8, None), height=dp(180),
+            size_hint=(0.8, None), height=dp(240),
             auto_dismiss=True,
         )
+
+        def _apply_past_toggle(checkbox, value):
+            """Flipping the goto-popup checkbox mirrors what the
+            Settings UnrecordedToggle does: invert into
+            only_unrecorded, persist, rebuild queue, refresh UI.
+            Visible immediately so the user sees the effect after
+            dismissing the popup."""
+            show_past = bool(value)
+            r.only_unrecorded = not show_past
+            set_peer_pref('show_past_work', show_past)
+            r.rebuild_queue()
+            App.get_running_app().refresh_recorder_ui()
+        past_cb.bind(active=_apply_past_toggle)
 
         def _go(*args):
             text = num_input.text.strip()
@@ -7060,12 +8132,15 @@ class LIFTRecorderApp(App):
             popup.dismiss()
 
         def _clear(*args):
-            r.cawl_filter = ''
-            r.gloss_search = ''
-            r.only_unrecorded = False
-            set_peer_pref('cawl_filter', None)
-            set_peer_pref('show_past_work', True)
-            r.rebuild_queue()
+            """Jump to the start of the current filtered queue.
+            Does NOT clear cawl_filter / gloss_search /
+            only_unrecorded — those are project-load-bearing for
+            the wordlist-split workflow. Past-work flag is changed
+            only via the explicit checkbox above."""
+            if r.queue:
+                r.index = 0
+                r._pending_rerecord = False
+                r._notify_ui()
             popup.dismiss()
 
         clear_btn.bind(on_release=_clear)

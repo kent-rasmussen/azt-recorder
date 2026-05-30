@@ -740,6 +740,60 @@ class LIFTDatabase:
             ET.SubElement(vern_form, 'text')
             self._indent_dirty = True
 
+    # ── Orphan-audio recovery ──────────────────────────────────────────────
+
+    def bind_orphan_audio(self):
+        """Scan ``audio/`` for files whose deterministic basename
+        identifies an entry that has no audiolang citation form yet,
+        and bind them.
+
+        Filesystem mode only. URI projects rely on the persisted
+        ``_pending_lift_saves`` queue (no provider-side list_audio
+        RPC; see NOTES_TO_DAEMON).
+
+        Filename layout (from ``_make_audio_path``):
+        ``{cawl}_{guid[:8]}_{safe_gloss}.{ext}``. The cawl is a digit
+        run; guid8 is the entry guid's first 8 chars; everything after
+        the second underscore is gloss-derived and irrelevant for
+        matching.
+        """
+        if self.is_uri or not self.audio_dir:
+            return 0
+        if not os.path.isdir(self.audio_dir):
+            return 0
+        # Build a lookup keyed by guid8 — entries that already have an
+        # audio_filename are skipped (the orphan scan never overwrites
+        # an existing binding).
+        by_guid8 = {}
+        for e in self.entries:
+            guid = e.get('guid', '')
+            if guid and not e.get('audio_filename'):
+                by_guid8.setdefault(guid[:8], e)
+        if not by_guid8:
+            return 0
+        bound = 0
+        for name in os.listdir(self.audio_dir):
+            parts = name.split('_', 2)
+            if len(parts) < 2:
+                continue
+            guid8 = parts[1]
+            entry = by_guid8.get(guid8)
+            if entry is None:
+                continue
+            try:
+                self.set_audio(entry['guid'], name)
+            except Exception as ex:
+                print(f'[orphan-audio] bind {name!r} → '
+                      f'{entry["guid"]!r} failed: {ex}')
+                continue
+            entry['audio_filename'] = name
+            del by_guid8[guid8]
+            bound += 1
+        if bound:
+            print(f'[orphan-audio] bound {bound} stranded audio '
+                  f'file(s) to entries with empty citation form')
+        return bound
+
     # ── Writing audio filename back to LIFT (Entry.lc.textvaluebylang) ────────
 
     def set_audio(self, guid: str, filename: str):
