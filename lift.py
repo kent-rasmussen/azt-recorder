@@ -392,17 +392,24 @@ class LIFTDatabase:
         # with ns0:-style prefixes).
         for prefix, uri in _scan_namespaces(self.handle).items():
             ET.register_namespace(prefix, uri)
-        with self.handle.open_read() as f:
-            self._tree = ET.parse(f)
-        self._root = self._tree.getroot()
-        # One-time normalization to our 4-space indent style. Subsequent
-        # saves are bit-stable as long as no new elements get added
-        # between parse and save (tracked via _indent_dirty below); when
-        # set_audio / set_illustration / _clean_forms appends a new
-        # element, _indent runs once on the next save to give it
-        # whitespace, then _indent_dirty resets.
-        self._indent(self._root)
+        # Streaming parse for low peak memory on multi-MB LIFTs:
+        # iterparse fires 'end' events as each <entry> finishes; we
+        # extract its fields via _parse_entry then clear() the element
+        # to free its subtree before the next entry starts. The full
+        # DOM (self._tree / self._root) is NOT retained — it would
+        # be ~5× the source size. The DOM gets rebuilt lazily on the
+        # first mutation (set_audio / clean_template / etc.) via
+        # _ensure_dom, and held from then on so subsequent saves
+        # don't re-parse. This means the cold-load memory peak is
+        # roughly entries-only (~1× source) instead of DOM+entries
+        # (~6× source); the post-first-save steady-state is the
+        # same as before. Full removal of the DOM peak awaits a
+        # surgical-write path (see NOTES_TO_DAEMON #N — audio
+        # set RPC proposal).
+        self._tree = None
+        self._root = None
         self._indent_dirty = False
+        self._dom_lock = threading.Lock()
 
         # Peer-side cache for sibling files that arrive via the daemon's
         # ContentProvider on URI projects (Android server-APK model).
@@ -490,10 +497,20 @@ class LIFTDatabase:
         audio_langs_seen = set()
 
         raw_entries = []
-        for entry_el in self._root.findall('entry'):
-            e = self._parse_entry(entry_el, gloss_langs_seen,
-                                  vern_langs_seen, audio_langs_seen)
-            raw_entries.append(e)
+        # Streaming iterparse to keep peak parse memory at one
+        # <entry>'s subtree rather than the full DOM. .clear() frees
+        # each entry's children after we've extracted what we need.
+        # The empty <entry> stubs accumulate on the root, but they
+        # carry no children/text — ~tens of KB total for thousands of
+        # entries — which is acceptable on the cold-load path.
+        with self.handle.open_read() as f:
+            for event, entry_el in ET.iterparse(f, events=('end',)):
+                if entry_el.tag != 'entry':
+                    continue
+                e = self._parse_entry(entry_el, gloss_langs_seen,
+                                      vern_langs_seen, audio_langs_seen)
+                raw_entries.append(e)
+                entry_el.clear()
 
         # Determine primary vernlang and audiolang from what we saw
         if vern_langs_seen:
@@ -711,12 +728,15 @@ class LIFTDatabase:
         """
         if not self.vernlang:
             return
+        self._ensure_dom()
         for entry_el in self._root.findall('entry'):
             for parent_tag in ('citation', 'sense/definition'):
                 for parent_el in entry_el.findall(parent_tag):
                     self._clean_forms(parent_el)
         self._save()
-        # Re-parse so in-memory entries reflect the cleaned XML
+        # Re-parse so in-memory entries reflect the cleaned XML.
+        # _parse runs iterparse against the on-disk file (just-saved
+        # bytes); the DOM we just built remains alongside.
         self.entries = []
         self._parse()
 
@@ -840,7 +860,43 @@ class LIFTDatabase:
         # Save
         self._save()
 
+    def _ensure_dom(self):
+        """Lazy-rebuild the ElementTree DOM for mutation paths.
+
+        The initial load uses iterparse + clear() to populate
+        self.entries with low peak memory and intentionally drops the
+        full DOM. Anything that needs to mutate the XML — set_audio,
+        set_illustration, clean_template, bind_orphan_audio's set_audio
+        loop — calls this first so self._tree / self._root are
+        available. Once built we keep the DOM for the rest of the
+        session so subsequent saves don't re-parse.
+
+        Thread-safe via _dom_lock — set_audio runs on the LIFT-write
+        worker thread (see RecorderController._lift_audio_write_worker),
+        and concurrent first-save attempts must not race-build two
+        trees.
+
+        Runs _indent on first build so the legacy "normalise indent
+        on parse" behaviour is preserved (subsequent saves get
+        bit-stable output unless a new element gets added). On URI
+        projects the daemon's open_read may serve the freshest
+        committed bytes; on filesystem projects we read the file
+        directly."""
+        if self._tree is not None:
+            return
+        with self._dom_lock:
+            if self._tree is not None:
+                return
+            with self.handle.open_read() as f:
+                tree = ET.parse(f)
+            root = tree.getroot()
+            self._indent(root)
+            self._indent_dirty = False
+            self._tree = tree
+            self._root = root
+
     def _find_entry(self, guid: str):
+        self._ensure_dom()
         for e in self._root.findall('entry'):
             if e.get('guid') == guid:
                 return e
@@ -867,6 +923,12 @@ class LIFTDatabase:
         text-only edits (the common case: writing a new audio
         filename into an existing <text>) bit-stable in git, instead
         of re-flowing the whole tree's whitespace on every save."""
+        # First-save-after-cold-load lazily builds the DOM that the
+        # streaming parse skipped (see _ensure_dom). Mutation entry
+        # points (_find_entry, clean_template, set_illustration) also
+        # call this, but _save is the floor — nothing reaches disk
+        # without a tree to write.
+        self._ensure_dom()
         if self._indent_dirty:
             self._indent(self._root)
             self._indent_dirty = False

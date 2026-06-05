@@ -264,6 +264,13 @@ print(f'[font] CharisSIL='
       f'{"loaded" if _CHARIS_AVAILABLE else "MISSING — Roboto fallback"}',
       file=sys.stderr, flush=True)
 
+# ── Gloss display mode ────────────────────────────────────────────────────────
+# True → long glosses scroll horizontally inside a fixed-height row
+# (MarqueeLabel); short glosses stay static. False → fall back to the
+# 1.55.2 wrap behavior (multi-line label, row height grows). Kept as a
+# constant so flipping back is one edit, no settings UI noise.
+GLOSS_USE_MARQUEE = True
+
 # ── KV layout ─────────────────────────────────────────────────────────────────
 # Font name is injected at build time so every widget uses Charis SIL if available.
 KV_TEMPLATE = '''
@@ -349,7 +356,17 @@ KV_TEMPLATE = '''
                 shorten_from: 'left'
                 split_str: ''
             Button:
-                size_hint_x: 1
+                # Gated on app.has_project (same pattern as the gear
+                # to its right) so sync + settings reveal together
+                # when load_lift finishes, not one-by-one through
+                # the partial-load window. size_hint_x flips between
+                # 1 (proportional fill) and None+width=0 so the
+                # adjacent progress_label button absorbs the space
+                # while we're hidden.
+                size_hint_x: 1 if app.has_project else None
+                width: 0
+                opacity: 1 if app.has_project else 0
+                disabled: not app.has_project
                 background_color: T.TRANSPARENT
                 background_normal: ''
                 on_release: app.do_sync()
@@ -395,8 +412,17 @@ KV_TEMPLATE = '''
                         shorten: True
                         shorten_from: 'right'
             Button:
+                # Gear → Settings. Hidden + disabled until a
+                # project loads (app.has_project flips True at
+                # the end of load_lift). Reaching Settings in
+                # the no-project state triggers _hide_box_tree
+                # zeroing every descendant, and the children
+                # never come back without an app restart —
+                # gating the button is the cheapest defence.
                 size_hint_x: None
-                width: dp(44)
+                width: dp(44) if app.has_project else 0
+                opacity: 1 if app.has_project else 0
+                disabled: not app.has_project
                 background_color: T.TRANSPARENT
                 background_normal: ''
                 on_release: app.go_config()
@@ -527,6 +553,13 @@ KV_TEMPLATE = '''
                 Rectangle:
                     pos: self.pos
                     size: self.size
+            # Title-bar layout:
+            #   [version] [share] [Update]  …open space…  [X]
+            # Version label sized to its text so the action
+            # buttons sit immediately to its right (not stranded
+            # next to the close X). A spacer Widget after the
+            # action buttons takes the leftover space so X stays
+            # right-anchored.
             Label:
                 text: app.version_string
                 font_size: sp(11)
@@ -534,8 +567,41 @@ KV_TEMPLATE = '''
                 color: T.TEXT_DIM
                 halign: 'left'
                 valign: 'middle'
-                text_size: self.size
                 padding_x: dp(8)
+                size_hint_x: None
+                width: self.texture_size[0] + dp(16)
+                text_size: None, self.height
+            # Share-this-app icon. Title-bar location replaces the
+            # body button used through 1.55.5; same on_release.
+            Button:
+                size_hint_x: None
+                width: dp(44)
+                background_color: T.TRANSPARENT
+                background_normal: ''
+                on_release: app.share_apk()
+                Image:
+                    source: 'icons/share_dark.png'
+                    size: dp(24), dp(24)
+                    size_hint: None, None
+                    center: self.parent.center
+                    allow_stretch: True
+                    keep_ratio: True
+            # Explicit update check — distinct from the silent
+            # bootstrap probe. Always shows a modal with the
+            # outcome so the user can tell "no newer release"
+            # apart from "couldn't reach GitHub".
+            Button:
+                text: _('Update')
+                font_size: sp(13)
+                font_name: FONT
+                color: T.ACCENT
+                background_color: T.TRANSPARENT
+                background_normal: ''
+                size_hint_x: None
+                width: dp(70)
+                on_release: app.check_for_update_explicit()
+            # Spacer — pushes X to the right edge.
+            Widget:
                 size_hint_x: 1
             IconBtn:
                 text: 'X'
@@ -556,24 +622,6 @@ KV_TEMPLATE = '''
                     size_hint_y: None
                     height: dp(44)
                     spacing: dp(8)
-                # ── Share this app ─────────────────────────────────────
-                RecBtn:
-                    text: _('Share this app')
-                    halign: 'left'
-                    padding: [dp(52), 0]
-                    text_size: self.size
-                    valign: 'middle'
-                    size_hint_x: None
-                    width: min(self.parent.width - dp(40), dp(360))
-                    pos_hint: {{'center_x': 0.5}}
-                    normal_color: T.SURFACE
-                    on_release: app.share_apk()
-                    Image:
-                        source: 'icons/share_dark.png'
-                        size_hint: None, None
-                        size: dp(24), dp(24)
-                        x: self.parent.x + dp(16)
-                        center_y: self.parent.center_y
                 # ── Database-dependent settings (hidden when no project) ──
                 BoxLayout:
                     id: db_settings_box
@@ -616,16 +664,18 @@ KV_TEMPLATE = '''
                             normal_color: T.ACCENT
                             font_size: sp(14)
                             on_release: root._show_gloss_overlay()
-                        Label:
+                        # Marquee so a long comma-joined list of
+                        # selected gloss langs stays single-line and
+                        # scrolls instead of wrapping into the row
+                        # below. _update_gloss_summary sets .text;
+                        # MarqueeLabel decides static-vs-scroll based
+                        # on whether the text fits its width.
+                        MarqueeLabel:
                             id: gloss_summary_label
                             text: ''
                             font_size: sp(14)
                             font_name: FONT
                             color: T.TEXT_DIM
-                            halign: 'left'
-                            valign: 'middle'
-                            text_size: self.size
-                            markup: True
                     BoxLayout:
                         size_hint_y: None
                         height: dp(44)
@@ -638,16 +688,18 @@ KV_TEMPLATE = '''
                             normal_color: T.ACCENT
                             font_size: sp(14)
                             on_release: root.toggle_filter_panel()
-                        Label:
+                        # Marquee for the same reason as the gloss
+                        # summary above — long filter combinations
+                        # (CAWL + gloss + unrecorded) stay one line
+                        # and scroll. _update_filter_summary sets
+                        # plain comma-joined text; no markup ever
+                        # inserted, so markup:True is unused.
+                        MarqueeLabel:
                             id: filter_summary_label
                             text: ''
                             font_size: sp(12)
                             font_name: FONT
                             color: T.TEXT_DIM
-                            halign: 'left'
-                            valign: 'middle'
-                            text_size: self.size
-                            markup: True
                     BoxLayout:
                         id: filter_panel
                         orientation: 'vertical'
@@ -718,11 +770,20 @@ KV_TEMPLATE = '''
                             halign: 'left'
                             text_size: self.width, None
                         BoxLayout:
+                            # Vertical container so claimed slots
+                            # (which need their device-name labels
+                            # readable) can stack one per line
+                            # underneath the horizontal row of
+                            # available + own-claim buttons. Height
+                            # is set dynamically by _rebuild_slot_row
+                            # since it varies with the number of
+                            # other devices currently claiming a
+                            # slot.
                             id: slot_row
-                            orientation: 'horizontal'
+                            orientation: 'vertical'
                             size_hint_y: None
                             height: 0
-                            spacing: dp(6)
+                            spacing: dp(4)
                         Label:
                             id: gloss_search_label
                             text: _('Gloss search (filter by gloss text)')
@@ -750,11 +811,12 @@ KV_TEMPLATE = '''
                             size_hint_y: None
                             height: dp(56)
                             spacing: dp(8)
-                            UnrecordedToggle:
-                                id: unrecorded_toggle
-                                active: False
-                                size_hint_x: 3
-                                on_active: root.toggle_show_past(self.active)
+                            # "Show past work" toggle was here.
+                            # Pulled in 1.52.x — the same toggle
+                            # lives in the Go-To popup, which is
+                            # day-to-day more accessible (one tap
+                            # from the recorder bar vs. walking
+                            # into Settings → Filter words).
                             RecBtn:
                                 id: filter_ok_btn
                                 text: _('OK')
@@ -1220,45 +1282,12 @@ KV_TEMPLATE = '''
             halign: 'right'
             valign: 'middle'
             text_size: self.size
-        Label:
-            text: root.gloss
-            font_size: sp(30)
-            font_name: FONT
-            bold: True
-            color: T.TEXT
-            halign: 'left'
-            valign: 'middle'
-            text_size: self.size
+        BoxLayout:
+            # Populated in GlossRow.__init__ — either a MarqueeLabel
+            # (marquee mode, single line, scrolls on overflow) or a
+            # wrapping Label (wrap mode, multi-line, grows the row).
+            id: gloss_holder
 
-<UnrecordedToggle>:
-    size_hint_y: None
-    height: dp(56)
-    canvas.before:
-        Color:
-            rgba: T.GREEN_DARK if self.active else T.SURFACE
-        RoundedRectangle:
-            pos: self.pos
-            size: self.size
-            radius: [dp(8)]
-    BoxLayout:
-        spacing: dp(12)
-        padding: dp(12), dp(8)
-        CheckBox:
-            id: chk
-            size_hint_x: None
-            width: dp(48)
-            active: root.active
-            color: T.ACCENT
-            on_active: root.active = self.active
-        Label:
-            text: _('Show past work')
-            font_size: sp(16)
-            font_name: FONT
-            bold: True
-            color: T.GREEN_BRIGHT if root.active else T.TEXT
-            halign: 'left'
-            valign: 'middle'
-            text_size: self.size
 
 <RecBtn@Button>:
     normal_color: T.ACCENT
@@ -1347,6 +1376,7 @@ KV = KV_TEMPLATE.format(font_name=_FONT_NAME)
 from kivy.uix.widget import Widget
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
+from kivy.uix.scrollview import ScrollView
 
 
 class ImageRedoBtn(Widget):
@@ -1389,21 +1419,196 @@ class RedoButton(Widget):
     pass
 
 
-class UnrecordedToggle(BoxLayout):
-    active = BooleanProperty(False)
+
+
+class MarqueeLabel(ScrollView):
+    """Single-line label that horizontally scrolls when its text
+    overflows the widget's width; static (left-aligned, no
+    animation) when the text fits. Display-only — never consumes
+    touches, so RecorderScreen's swipe handler still sees touches
+    landing on it inside the gloss_box swipe zone.
+
+    Cost: one text rasterisation per text change (same as a normal
+    Label), then per-frame work is a single ScrollView.scroll_x
+    property update animated via kivy.animation.Animation —
+    cheaper than character-ticker re-rasterisation because the
+    texture is built once and the GPU does the translation."""
+
+    text = StringProperty('')
+    font_size = NumericProperty(sp(16))
+    font_name = StringProperty('Roboto')
+    color = ListProperty([1, 1, 1, 1])
+    bold = BooleanProperty(False)
+
+    # Constant pixel-per-second scroll rate: same across every
+    # marquee on screen, so a longer gloss simply takes longer to
+    # finish and cycles less often. (Previously animated scroll_x
+    # 0→1 over a duration scaled by overflow, which also gave
+    # constant speed mathematically — but the bounce-back-then-
+    # forward motion made the speed feel variable. One-way scroll
+    # below removes that.)
+    SCROLL_SPEED = dp(25)
+    START_PAUSE = 1.5        # sec at left edge before scrolling
+    END_PAUSE = 2.0          # sec at right edge before reset
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.do_scroll_x = False
+        self.do_scroll_y = False
+        self.bar_width = 0
+        self._label = Label(
+            text=self.text, font_size=self.font_size,
+            font_name=self.font_name, color=self.color,
+            bold=self.bold,
+            size_hint=(None, None),
+            halign='left', valign='middle',
+            shorten=False,
+        )
+        self.add_widget(self._label)
+        for prop in ('text', 'font_size', 'font_name', 'color', 'bold'):
+            self.bind(**{prop: lambda inst, val, p=prop:
+                         setattr(self._label, p, val)})
+        self._label.bind(texture_size=self._on_texture_size)
+        self.bind(size=self._on_layout)
+        self._anim = None
+        self._pending = None  # Clock.schedule_once handle for edge pauses
+
+    def _on_texture_size(self, *args):
+        tw, th = self._label.texture_size
+        self._label.width = tw
+        self._label.height = max(th, self.height)
+        self._update_animation()
+
+    def _on_layout(self, *args):
+        self._label.text_size = (None, self.height)
+        if self._label.texture_size[1] < self.height:
+            self._label.height = self.height
+        self._update_animation()
+
+    def _update_animation(self):
+        from kivy.animation import Animation
+        self._cancel_all()
+        self.scroll_x = 0
+        tw = self._label.texture_size[0]
+        cw = self.width
+        if tw <= cw or cw <= 0:
+            return
+        # Constant pixel-per-second velocity, independent of
+        # overflow length:
+        #   scroll_x animates 0→1 over scroll_time seconds.
+        #   pixel displacement of label inside viewport
+        #     = scroll_x * (tw - cw).
+        #   d/dt = (tw - cw) / scroll_time
+        #        = (tw - cw) * SCROLL_SPEED / (tw - cw)
+        #        = SCROLL_SPEED  ← constant
+        # So a 300 px overflow takes 3× as long to finish as a
+        # 100 px overflow, but both move at exactly SCROLL_SPEED
+        # px/sec while moving. Longer glosses cycle less often;
+        # they don't move faster.
+        distance = tw - cw
+        scroll_time = distance / float(self.SCROLL_SPEED)
+
+        def _begin_scroll(_dt):
+            # START_PAUSE elapsed — kick off the scroll.
+            self._pending = None
+            self.scroll_x = 0
+            anim = Animation(scroll_x=1.0, duration=scroll_time,
+                             t='linear')
+            anim.bind(on_complete=_at_end)
+            anim.start(self)
+            self._anim = anim
+
+        def _at_end(_anim, _widget):
+            # Scroll finished — hold at the right edge for
+            # END_PAUSE, then jump back to start and re-arm.
+            self._anim = None
+            self._pending = Clock.schedule_once(
+                _loop_back, self.END_PAUSE)
+
+        def _loop_back(_dt):
+            # Instant snap to left, then wait START_PAUSE before
+            # scrolling again.
+            self._pending = None
+            self.scroll_x = 0
+            self._pending = Clock.schedule_once(
+                _begin_scroll, self.START_PAUSE)
+
+        # Kick off the very first cycle's start pause. Both edge
+        # waits use Clock.schedule_once rather than a no-property
+        # Animation(duration=N) — in some Kivy versions the latter
+        # completes instantly because it has nothing to interpolate,
+        # which is what made the edge pauses look broken in 1.55.7.
+        self._pending = Clock.schedule_once(
+            _begin_scroll, self.START_PAUSE)
+
+    def _cancel_all(self):
+        if self._anim is not None:
+            self._anim.cancel(self)
+            self._anim = None
+        if self._pending is not None:
+            self._pending.cancel()
+            self._pending = None
+
+    def on_parent(self, instance, parent):
+        if parent is None:
+            self._cancel_all()
 
     def on_touch_down(self, touch):
-        if self.collide_point(*touch.pos):
-            self.active = not self.active
-            return True
-        return super().on_touch_down(touch)
+        return False
 
+    def on_touch_move(self, touch):
+        return False
 
+    def on_touch_up(self, touch):
+        return False
 
 
 class GlossRow(BoxLayout):
     lang = StringProperty('')
     gloss = StringProperty('')
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # gloss_holder is the KV-defined placeholder BoxLayout; we
+        # fill it on the next frame so self.ids is populated.
+        Clock.schedule_once(self._populate_gloss, 0)
+
+    def _populate_gloss(self, _dt):
+        holder = self.ids.get('gloss_holder')
+        if holder is None:
+            return
+        if GLOSS_USE_MARQUEE:
+            inner = MarqueeLabel(
+                text=self.gloss,
+                font_size=sp(30),
+                font_name=_FONT_NAME,
+                bold=True,
+                color=theme.TEXT,
+            )
+            self.bind(gloss=lambda _i, v: setattr(inner, 'text', v))
+        else:
+            inner = Label(
+                text=self.gloss,
+                font_size=sp(30),
+                font_name=_FONT_NAME,
+                bold=True,
+                color=theme.TEXT,
+                halign='left',
+                valign='middle',
+                size_hint_y=None,
+                pos_hint={'center_y': 0.5},
+            )
+            inner.bind(width=lambda *_:
+                       setattr(inner, 'text_size',
+                               (inner.width, None)))
+            inner.bind(texture_size=lambda *_:
+                       setattr(inner, 'height',
+                               inner.texture_size[1]))
+            inner.bind(height=lambda *_:
+                       setattr(self, 'height',
+                               max(dp(70), inner.height + dp(16))))
+            self.bind(gloss=lambda _i, v: setattr(inner, 'text', v))
+        holder.add_widget(inner)
 
 
 class LangToggle(BoxLayout):
@@ -2086,8 +2291,158 @@ class RecorderScreen(Screen):
         anim_out.start(content)
 
 
+def _render_slot_picker_into(available_row, claimed_column,
+                              team_size, my_slot, slots,
+                              on_pick, state=None):
+    """Shared slot-picker renderer used by both the modal
+    popup (``_show_slot_picker``) and the inline filter-modal
+    slot row (``_rebuild_slot_row``). They ask the same
+    question — "which device is this?" — and now run through
+    the same code so a fix to one is a fix to both.
+
+    *available_row* — horizontal ``BoxLayout``. Receives one
+    button per slot in ``[1..team_size]`` that's free OR
+    claimed by this device (``my_slot``). The matching button
+    for ``my_slot`` is highlighted with ``theme.ACCENT``.
+
+    *claimed_column* — vertical ``BoxLayout``. Receives one
+    button per slot claimed by ANOTHER device, labelled with
+    that device's name.
+
+    *team_size* — number of slots in range.
+
+    *my_slot* — this device's claim. Callers that don't have
+    a direct ``my_slot`` (the modal popup, when firing
+    because the recorder's ``split_my_slot`` is empty) should
+    derive it from ``slots`` + this device's ``peer_id``
+    before calling; otherwise the device's own claim would
+    land in the claimed-by-other column with its own name.
+
+    *slots* — full ``list_slots`` dict.
+
+    *on_pick(slot_str)* — called when any button is tapped.
+
+    *state* (dict, optional) — when supplied, enables
+    in-place colour updates when the structure key
+    (``team_size`` + set of available slots + set of
+    claimed-by-other slots) hasn't changed since the last
+    call. The dict is mutated to carry forward a
+    ``button_map`` keyed by slot string. Pass ``None`` for
+    one-shot use (the modal popup, where each open builds
+    fresh widgets anyway)."""
+    from kivy.uix.button import Button
+
+    # Partition slots in [1..team_size]. Anything outside the
+    # range is ignored — the release-stale-slot worker is
+    # already untangling those daemon-side; showing them in
+    # the picker would confuse the user.
+    other_claims = {}
+    for s, c in (slots or {}).items():
+        k_str = str(s)
+        try:
+            slot_int = int(k_str)
+        except (TypeError, ValueError):
+            continue
+        if slot_int < 1 or slot_int > team_size:
+            continue
+        if k_str == my_slot:
+            continue  # our own claim → top row, not claimed list
+        other_claims[k_str] = c or {}
+
+    available_slots = [
+        str(k) for k in range(1, team_size + 1)
+        if str(k) not in other_claims]
+    claimed_slots = sorted(other_claims.keys(),
+                           key=lambda s: int(s) if s.isdigit() else 0)
+
+    top_buttons = []      # (k_str, bg)
+    for k_str in available_slots:
+        bg = theme.ACCENT if k_str == my_slot else theme.SURFACE
+        top_buttons.append((k_str, bg))
+
+    claimed_buttons = []  # (k_str, device, bg)
+    for k_str in claimed_slots:
+        device = (other_claims[k_str].get('device_name', '')
+                  or _tr('Unknown'))
+        claimed_buttons.append((k_str, device, theme.BTN_INACTIVE))
+
+    new_top_set = {k for k, _ in top_buttons}
+    new_claimed_pairs = {(k, d) for k, d, _ in claimed_buttons}
+
+    # In-place colour update when structure is unchanged.
+    if state is not None:
+        prev_team_size = state.get('team_size', 0)
+        prev_top_set = state.get('top_set', set())
+        prev_claimed_pairs = state.get('claimed_pairs', set())
+        button_map = state.get('button_map') or {}
+        structure_unchanged = (
+            prev_team_size == team_size
+            and prev_top_set == new_top_set
+            and prev_claimed_pairs == new_claimed_pairs
+            and bool(button_map))
+        if structure_unchanged:
+            for k_str, bg in top_buttons:
+                btn = button_map.get(k_str)
+                if btn is not None:
+                    btn.background_color = bg
+            for k_str, _device, bg in claimed_buttons:
+                btn = button_map.get(k_str)
+                if btn is not None:
+                    btn.background_color = bg
+            return
+
+    # Full rebuild.
+    button_map = {}
+    available_row.clear_widgets()
+    available_row.height = dp(56) if top_buttons else 0
+    for k_str, bg in top_buttons:
+        btn = Button(
+            text=f'{k_str}/{team_size}',
+            font_size=sp(13), font_name=_FONT_NAME,
+            background_normal='', background_color=bg,
+            color=theme.TEXT)
+        btn.bind(on_release=lambda b, s=k_str: on_pick(s))
+        available_row.add_widget(btn)
+        button_map[k_str] = btn
+
+    claimed_column.clear_widgets()
+    n_claimed = len(claimed_buttons)
+    claimed_column.height = (
+        n_claimed * dp(48) + max(0, n_claimed - 1) * dp(4)
+    ) if n_claimed else 0
+    for k_str, device, bg in claimed_buttons:
+        btn = Button(
+            text=f'{k_str}/{team_size} ({device})',
+            font_size=sp(13), font_name=_FONT_NAME,
+            background_normal='', background_color=bg,
+            color=theme.TEXT,
+            size_hint_y=None, height=dp(48))
+        btn.bind(on_release=lambda b, s=k_str: on_pick(s))
+        claimed_column.add_widget(btn)
+        button_map[k_str] = btn
+
+    if state is not None:
+        state['team_size'] = team_size
+        state['top_set'] = new_top_set
+        state['claimed_pairs'] = new_claimed_pairs
+        state['button_map'] = button_map
+
+
 class ConfigScreen(Screen):
     only_unrecorded = BooleanProperty(False)
+
+    def on_kv_post(self, base_widget):
+        """Collapse the inline filter_panel right after KV
+        applies so its children's natural heights don't bleed
+        touches into the Filter words button above. The inline
+        panel is now dead weight — the filter UI is a
+        gloss-style fresh-build ModalView in _show_filter_overlay
+        — but the widget tree retains it (with all children at
+        height=0) so self.ids references stay valid for any
+        legacy code that still resolves them."""
+        panel = self.ids.get('filter_panel')
+        if panel is not None and panel.parent is not None:
+            self._collapse_filter_panel()
 
     def on_enter(self):
         app = App.get_running_app()
@@ -2110,6 +2465,12 @@ class ConfigScreen(Screen):
         box = self.ids.get('db_settings_box')
         if box:
             if has_db:
+                # If we previously hid the box (no-project
+                # state), restore every descendant's saved
+                # height + opacity. Without this they stay at
+                # 0 forever and the gloss + filter toggle
+                # buttons render invisibly.
+                self._show_box_tree(box)
                 box.opacity = 1
                 Clock.schedule_once(
                     lambda dt, b=box: setattr(b, 'height', b.minimum_height), 0)
@@ -2123,32 +2484,58 @@ class ConfigScreen(Screen):
         gs = self.ids.get('gloss_search_input')
         if gs:
             gs.text = app.recorder.gloss_search or ''
-        # Restore show-past-work toggle (default False)
+        # Restore show-past-work pref (default False). The
+        # Settings-side toggle moved into the Go-To popup in
+        # 1.52.x; this just keeps the recorder's
+        # only_unrecorded flag aligned with the persisted pref
+        # at init time.
         show_past = bool(peer_pref('show_past_work', False))
-        toggle = self.ids.get('unrecorded_toggle')
-        if toggle:
-            toggle.active = show_past
         self.only_unrecorded = not show_past
-        # All panels start collapsed
+        # Filter summary label + gloss summary label reflect
+        # current state; the actual filter widgets live in the
+        # modal that `_open_filter_modal` builds on demand.
         self._update_filter_summary()
         self._update_gloss_summary()
-        self._collapse_filter_panel()
+        self._filter_open = False
         # Build recording options
         self._build_rec_options(app)
 
     @staticmethod
     def _hide_box_tree(widget):
-        """Zero the height/opacity of a widget and all descendants so
-        nothing has a touch hit-area when the section is hidden."""
-        widget.height = 0
-        widget.opacity = 0
-        for child in widget.children:
-            if hasattr(child, 'height'):
-                child.height = 0
-                child.opacity = 0
-            # Recurse into nested containers
-            if hasattr(child, 'children') and child.children:
-                ConfigScreen._hide_box_tree(child)
+        """Zero the height/opacity of *widget* and all
+        descendants so nothing has a touch hit-area when the
+        section is hidden. Saves the prior heights on
+        ``widget._saved_heights`` so ``_show_box_tree`` can put
+        them back when the section returns — without this the
+        gloss + filter toggle buttons (and every other
+        descendant) stay at height=0 forever once the no-project
+        path fires, even after a project loads."""
+        saved = []
+
+        def _zero(w):
+            if hasattr(w, 'height'):
+                saved.append((w, w.height, w.opacity))
+                w.height = 0
+                w.opacity = 0
+            if hasattr(w, 'children') and w.children:
+                for child in w.children:
+                    _zero(child)
+        _zero(widget)
+        widget._saved_heights = saved
+
+    @staticmethod
+    def _show_box_tree(widget):
+        """Restore heights + opacities saved by
+        ``_hide_box_tree``. No-op when the widget wasn't
+        previously hidden (no saved state)."""
+        saved = getattr(widget, '_saved_heights', None)
+        if not saved:
+            widget.opacity = 1
+            return
+        for w, h, op in saved:
+            w.height = h
+            w.opacity = op
+        widget._saved_heights = None
 
     def _build_lang_selector(self):
         """Populate the UI language selector row with one button per language."""
@@ -2308,9 +2695,6 @@ class ConfigScreen(Screen):
         if bottom_row:
             bottom_row.height = dp(56)
             bottom_row.opacity = 1
-        toggle = self.ids.get('unrecorded_toggle')
-        if toggle:
-            toggle.height = dp(56)
         ok_btn = self.ids.get('filter_ok_btn')
         if ok_btn:
             ok_btn.height = dp(56)
@@ -2335,11 +2719,10 @@ class ConfigScreen(Screen):
         # bounds. The "CAWL number…" / "Gloss search…" Labels
         # (height: dp(36)) were ending up inside the filter button
         # row's y-range and blocking its on_release. Zero everything,
-        # including the Labels — and the dp(56)-tall UnrecordedToggle
-        # / OK button inside filter_bottom_row, whose
-        # `<UnrecordedToggle>:` / `<RecBtn@Button>:` root rules pin
-        # `size_hint_y: None` + an explicit height so they don't
-        # shrink with their (zeroed) parent row.
+        # including the Labels — and the dp(56)-tall OK button
+        # inside filter_bottom_row, whose `<RecBtn@Button>:` root
+        # rule pins `size_hint_y: None` + an explicit height so it
+        # doesn't shrink with its (zeroed) parent row.
         for cid in ('cawl_label', 'gloss_search_label',
                     'split_devices_label', 'which_device_label'):
             w = self.ids.get(cid)
@@ -2355,13 +2738,24 @@ class ConfigScreen(Screen):
             w = self.ids.get(cid)
             if w:
                 w.height = 0
+        # slot_row got nested children in 1.51.2 (vertical
+        # container of a horizontal top sub-row + per-claim
+        # buttons). Zeroing slot_row.height alone leaves the
+        # nested children with their natural heights, and Kivy's
+        # BoxLayout-with-height-0 doesn't auto-hide them — they
+        # render at indeterminate positions and swallow taps on
+        # the Filter words / Gloss languages buttons above (same
+        # failure mode the cawl_label / gloss_search_label
+        # zeroing above guards against, just one level deeper).
+        # Drop the nested widgets here; the next expand will
+        # re-trigger _rebuild_slot_row via _refresh_split_rows.
+        slot_row = self.ids.get('slot_row')
+        if slot_row:
+            slot_row.clear_widgets()
         bottom_row = self.ids.get('filter_bottom_row')
         if bottom_row:
             bottom_row.height = 0
             bottom_row.opacity = 0
-        toggle = self.ids.get('unrecorded_toggle')
-        if toggle:
-            toggle.height = 0
         ok_btn = self.ids.get('filter_ok_btn')
         if ok_btn:
             ok_btn.height = 0
@@ -2374,63 +2768,193 @@ class ConfigScreen(Screen):
             btn.normal_color = theme.ACCENT
 
     def toggle_filter_panel(self):
-        """Expand or collapse the word filter panel."""
-        print(f'[filter] toggle_filter_panel: _filter_open={self._filter_open}')
-        if self._filter_open:
-            self._collapse_filter_panel()
+        """Filter words button + OK button inside the modal both
+        bind here. First tap opens a gloss-style modal with
+        fresh widgets; second tap (OK) dismisses, applies
+        edits, and refreshes the recorder UI."""
+        if getattr(self, '_filter_modal', None) is not None:
+            self._filter_modal.dismiss()
+            return
+        self._show_filter_overlay()
+
+    def _show_filter_overlay(self):
+        """Build a gloss-style fresh-widget ModalView with the
+        CAWL filter input, the team_size + slot rows, and the
+        gloss-search input. Mirrors _show_gloss_overlay's
+        pattern — no re-parenting of inline widgets, no
+        self.ids lookups for the controls.
+
+        Widget refs are stashed on self._filter_modal_widgets
+        so _rebuild_team_size_row and _rebuild_slot_row can
+        update the rows in place when daemon state changes
+        while the modal is open."""
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.button import Button
+        from kivy.uix.label import Label
+        from kivy.uix.modalview import ModalView
+        from kivy.uix.scrollview import ScrollView
+        from kivy.uix.textinput import TextInput
+
+        app = App.get_running_app()
+        if not app.recorder:
+            return
+
+        view = ModalView(
+            size_hint=(0.95, None),
+            height=min(Window.height * 0.92, dp(560)),
+            background_color=theme.OVERLAY_DARK,
+            auto_dismiss=True,
+        )
+        outer = BoxLayout(
+            orientation='vertical', spacing=dp(8),
+            padding=(dp(10), dp(10)),
+        )
+        scroll = ScrollView(size_hint=(1, 1))
+        inner = BoxLayout(
+            orientation='vertical', spacing=dp(8),
+            size_hint_y=None,
+        )
+        inner.bind(minimum_height=inner.setter('height'))
+
+        def _label(text, height=dp(36)):
+            lbl = Label(
+                text=text, font_size=sp(13), font_name=_FONT_NAME,
+                color=theme.TEXT_DIM,
+                size_hint_y=None, height=height,
+                halign='left', valign='middle',
+            )
+            lbl.bind(
+                size=lambda w, s: setattr(w, 'text_size', (s[0], None)))
+            return lbl
+
+        # CAWL filter
+        inner.add_widget(_label(_tr(
+            'CAWL number or range (e.g. 1-100, 42, leave blank for all)')))
+        cawl_in = TextInput(
+            text=app.recorder.cawl_filter or '',
+            hint_text=_tr('e.g. 1-500'),
+            font_size=sp(16), font_name=_FONT_NAME,
+            size_hint_y=None, height=dp(48),
+            background_color=theme.SURFACE,
+            foreground_color=theme.TEXT,
+            cursor_color=theme.ACCENT,
+            multiline=False, input_type='number',
+        )
+        inner.add_widget(cawl_in)
+
+        # Split team
+        inner.add_widget(_label(_tr('Split across devices')))
+        ts_row = BoxLayout(
+            orientation='horizontal', size_hint_y=None,
+            height=dp(48), spacing=dp(6),
+        )
+        inner.add_widget(ts_row)
+        inner.add_widget(_label(_tr('Which device is this?')))
+        slot_row = BoxLayout(
+            orientation='vertical', size_hint_y=None,
+            height=dp(48), spacing=dp(4),
+        )
+        # Two sub-containers inside slot_row — a horizontal
+        # row of available slots and a vertical column of
+        # claimed-by-other slots. The shared renderer
+        # _render_slot_picker_into fills these.
+        slot_available = BoxLayout(
+            orientation='horizontal', size_hint_y=None,
+            height=dp(48), spacing=dp(6),
+        )
+        slot_claimed = BoxLayout(
+            orientation='vertical', size_hint_y=None,
+            height=0, spacing=dp(4),
+        )
+        slot_row.add_widget(slot_available)
+        slot_row.add_widget(slot_claimed)
+        inner.add_widget(slot_row)
+
+        # Gloss search
+        inner.add_widget(_label(_tr(
+            'Gloss search (filter by gloss text)')))
+        gs_in = TextInput(
+            text=app.recorder.gloss_search or '',
+            font_size=sp(16), font_name=_FONT_NAME,
+            size_hint_y=None, height=dp(48),
+            background_color=theme.SURFACE,
+            foreground_color=theme.TEXT,
+            cursor_color=theme.ACCENT,
+            multiline=False,
+        )
+        inner.add_widget(gs_in)
+
+        scroll.add_widget(inner)
+        outer.add_widget(scroll)
+
+        ok_btn = Button(
+            text=_tr('OK'),
+            font_size=sp(15), font_name=_FONT_NAME,
+            size_hint_y=None, height=dp(56),
+            background_color=theme.GREEN, color=theme.TEXT,
+        )
+        ok_btn.bind(on_release=lambda inst: view.dismiss())
+        outer.add_widget(ok_btn)
+
+        view.add_widget(outer)
+
+        # Stash modal-widget refs so _rebuild_team_size_row /
+        # _rebuild_slot_row target these (fresh, modal-owned)
+        # widgets instead of the inline KV ones.
+        self._filter_modal_widgets = {
+            'cawl_input': cawl_in,
+            'gloss_search_input': gs_in,
+            'team_size_row': ts_row,
+            'slot_row': slot_row,
+            'slot_available': slot_available,
+            'slot_claimed': slot_claimed,
+        }
+        self._filter_modal = view
+        self._filter_open = True
+        # Fresh modal = fresh widgets; clear the idempotence
+        # caches so the next populate triggers a full rebuild.
+        self._team_size_row_state = None
+        # State dict for the shared _render_slot_picker_into
+        # — carries the button_map + structure key across
+        # rebuilds for in-place colour updates.
+        self._slot_picker_state = {}
+
+        def _on_dismiss(*_):
+            # Apply CAWL + gloss-search edits.
+            text = cawl_in.text.strip()
+            prior = (app.recorder.cawl_filter or '').strip()
+            app.recorder.cawl_filter = text
+            set_peer_pref('cawl_filter', text or None)
+            if text != prior:
+                set_peer_pref(
+                    'cawl_filter_source',
+                    'manual' if text else None)
+            app.recorder.gloss_search = gs_in.text.strip()
+            app.recorder.rebuild_queue()
             self._update_filter_summary()
-            # Apply filters immediately
-            app = App.get_running_app()
-            if app.recorder:
-                cawl_in = self.ids.get('cawl_input')
-                if cawl_in:
-                    text = cawl_in.text.strip()
-                    prior = (app.recorder.cawl_filter or '').strip()
-                    app.recorder.cawl_filter = text
-                    set_peer_pref('cawl_filter', text or None)
-                    # § 21: only flip the source flag when the
-                    # text actually changed. Otherwise we'd
-                    # demote a split-derived value to 'manual'
-                    # just because the user opened and closed
-                    # the panel — the field shows the
-                    # computed range and our re-persist of
-                    # that same string would otherwise look
-                    # like a manual edit, suppressing the
-                    # [k/n] suffix in progress_text.
-                    if text != prior:
-                        set_peer_pref(
-                            'cawl_filter_source',
-                            'manual' if text else None)
-                gs = self.ids.get('gloss_search_input')
-                if gs:
-                    app.recorder.gloss_search = gs.text.strip()
-        else:
-            self._expand_filter_panel()
-            # Refresh split state on expand so the inline
-            # summary/picker reflects the latest team_size +
-            # list_slots from the daemon. Without this the
-            # other phone in a 2-device team can sit on stale
-            # data until its next background sync — visible
-            # as "split across X devices" on one phone and
-            # the picker still showing on the other.
-            app = App.get_running_app()
-            if app is not None:
-                app._populate_split_state()
-        # Belt-and-suspenders: force db_settings_box to recompute
-        # height after the panel size change. The KV binding
-        # `height: self.minimum_height` should handle this on its
-        # own, but Kivy's BoxLayout-inside-ScrollView relayout
-        # ordering is touchy, so we explicitly Clock.schedule_once
-        # the readback.
-        box = self.ids.get('db_settings_box')
-        if box and box.opacity > 0:
-            Clock.schedule_once(
-                lambda dt: setattr(box, 'height', box.minimum_height), 0)
-        panel = self.ids.get('filter_panel')
-        print(f'[filter] post-toggle: panel.height={panel.height if panel else None} '
-              f'panel.opacity={panel.opacity if panel else None} '
-              f'box.height={box.height if box else None} '
-              f'box.minimum_height={box.minimum_height if box else None}')
+            app.refresh_recorder_ui()
+            # Drop refs — the modal's widgets are about to be
+            # GC'd; the rebuild methods should fall through to
+            # no-op state until the next open.
+            self._filter_modal_widgets = None
+            self._filter_modal = None
+            self._filter_open = False
+            self._slot_picker_state = None
+            btn = self.ids.get('filter_toggle_btn')
+            if btn:
+                btn.normal_color = theme.ACCENT
+        view.bind(on_dismiss=_on_dismiss)
+
+        btn = self.ids.get('filter_toggle_btn')
+        if btn:
+            btn.normal_color = theme.BTN_INACTIVE
+
+        view.open()
+
+        # Pull daemon state for the freshly-opened modal — this
+        # populates team_size_row + slot_row via _refresh_split_rows
+        # which now routes through self._filter_modal_widgets.
+        app._populate_split_state()
 
     def _update_filter_summary(self):
         """Show a one-line summary of active filters next to the button."""
@@ -2464,85 +2988,43 @@ class ConfigScreen(Screen):
                       'manual' if cleaned else None)
 
     def _refresh_split_rows(self):
-        """Refresh the team-size + slot button rows in the
-        filter panel from the recorder's current
-        ``split_team_size`` / ``split_my_slot`` state plus a
-        fresh ``list_slots`` read. Called on every filter-panel
-        expand and whenever split state changes.
+        """Refresh the modal's team-size + slot button rows from
+        the recorder's current ``split_team_size`` /
+        ``split_my_slot`` state. No-op when the filter modal
+        isn't open — the inline panel is dead weight; the
+        progress-text top-bar reads ``recorder.split_*``
+        directly without needing widget refresh.
 
-        UI shape:
-        - team_size_row in **summary mode** ("Number of groups:
-          X  [Change]") once a value is set — the picker buttons
-          are hidden so an accidental tap on the slot row below
-          can't bleed into [2][3][4][5+] and change team_size
-          under the user.
-        - team_size_row in **picker mode** ([2][3][4][5+]) when
-          team_size is 0 (initial setup) OR the user has tapped
-          [Change] to revise.
-
-        Rebuild discipline (avoid the Kivy touch-during-rebuild
-        race): heights update synchronously so the layout knows
-        the new geometry, but the actual widget-tear-down +
-        rebuild for both rows is deferred via
-        ``Clock.schedule_once(0)`` so the BoxLayout layout pass
-        and the current touch dispatch settle before children
-        change underneath the user's finger."""
+        Rebuilds are deferred one frame via
+        ``Clock.schedule_once(0)`` so the current touch dispatch
+        and layout pass settle before children change
+        underneath the user's finger."""
+        widgets = getattr(self, '_filter_modal_widgets', None)
+        if not widgets:
+            return
         app = App.get_running_app()
         if not (app and app.recorder):
             return
         team_size = int(getattr(app.recorder, 'split_team_size', 0) or 0)
         my_slot = str(getattr(app.recorder, 'split_my_slot', '') or '')
 
-        # ── Heights FIRST so subsequent button-adds land at the
-        # right positions. Three states:
-        #   - team_size == 0 (initial picker):
-        #       split_devices_label visible, slot row hidden.
-        #       panel = dp(372).
-        #   - team_size set + editing (user tapped [change]):
-        #       both split_devices_label AND slot row visible.
-        #       panel = dp(456).
-        #   - team_size set + summary (default after pick):
-        #       split_devices_label hidden (its content is in
-        #       the team_size_row summary text), slot row
-        #       visible. panel = dp(420).
-        # Skipped when the filter panel is collapsed — the
-        # collapse path keeps everything at 0 and a later
-        # expand will recompute via this same path.
-        panel = self.ids.get('filter_panel')
-        editing = getattr(self, '_team_size_editing', False)
-        if panel is not None and getattr(self, '_filter_open', False):
-            which = self.ids.get('which_device_label')
-            slot_row_w = self.ids.get('slot_row')
-            split_label = self.ids.get('split_devices_label')
-            in_picker_mode = (not team_size) or editing
-            if team_size:
-                if which is not None:
-                    which.height = dp(36)
-                if slot_row_w is not None:
-                    slot_row_w.height = dp(48)
-            else:
-                if which is not None:
-                    which.height = 0
-                if slot_row_w is not None:
-                    slot_row_w.height = 0
-            if split_label is not None:
-                split_label.height = dp(36) if in_picker_mode else 0
-            if not team_size:
-                panel.height = dp(372)
-            elif editing:
-                panel.height = dp(456)
-            else:
-                panel.height = dp(420)
-
-        # ── cawl_input text sync (when split is active) and
-        # collapsed-summary line.
+        # Sync cawl_input text when split-derived filter has
+        # changed (e.g. team_size flipped → range recomputed).
         if peer_pref('cawl_filter_source', None) == 'split':
-            cawl_in = self.ids.get('cawl_input')
+            cawl_in = widgets.get('cawl_input')
             if cawl_in is not None:
                 new_text = app.recorder.cawl_filter or ''
                 if cawl_in.text != new_text:
                     cawl_in.text = new_text
         self._update_filter_summary()
+
+        # Defer the row rebuilds one frame so any in-flight
+        # touch dispatch + the layout pass finish before
+        # widgets change.
+        Clock.schedule_once(
+            lambda dt: self._rebuild_team_size_row(team_size), 0)
+        Clock.schedule_once(
+            lambda dt: self._rebuild_slot_row(team_size, my_slot), 0)
 
         # ── Deferred row rebuilds. Both team_size_row and
         # slot_row clear+rebuild happen one frame later so the
@@ -2562,18 +3044,37 @@ class ConfigScreen(Screen):
         - team_size == 0 OR user tapped [Change] → picker
           [2][3][4][5+]
 
-        The summary mode is the default once a value is set;
-        it keeps the picker buttons off-screen so an accidental
-        tap on the slot row beneath can't bleed into them.
-        Called from Clock.schedule_once(0) so the previous
-        touch dispatch and layout pass have completed first."""
+        Targets the modal's ts_row when the filter overlay is
+        open (via self._filter_modal_widgets). No-op when the
+        modal is closed — there's no inline UI to update; the
+        progress-text top-bar reads from
+        recorder.split_team_size directly.
+
+        Idempotent on (team_size, editing) so repeated populate
+        cycles triggered by ContentObserver wakeups after a
+        daemon commit don't tear down and rebuild widgets when
+        the displayed state hasn't changed."""
         from kivy.uix.button import Button
         from kivy.uix.label import Label
-        ts_row = self.ids.get('team_size_row')
+        widgets = getattr(self, '_filter_modal_widgets', None)
+        if not widgets:
+            return
+        ts_row = widgets.get('team_size_row')
         if ts_row is None:
             return
-        ts_row.clear_widgets()
         editing = getattr(self, '_team_size_editing', False)
+        state_key = (team_size, editing)
+        prev = getattr(self, '_team_size_row_state', None)
+        if state_key == prev:
+            return
+        # Every transition is a flicker candidate. Logging the
+        # (prev → new) tuple in logcat lets the user / dev see
+        # what triggered the rebuild — transient team_size=0,
+        # editing flip, modal first-open from None, etc.
+        print(f'[split] ts_row rebuild: {prev} -> {state_key}',
+              file=sys.stderr)
+        self._team_size_row_state = state_key
+        ts_row.clear_widgets()
         if team_size and not editing:
             # Summary mode.
             summary = Label(
@@ -2619,6 +3120,19 @@ class ConfigScreen(Screen):
         plus_btn.bind(
             on_release=lambda *_: self._open_team_size_plus_dialog())
         ts_row.add_widget(plus_btn)
+        # Cancel button — back out of picker mode without
+        # touching team_size. Sits at the right end of the
+        # [2][3][4][5+] row so a user who tapped [Change] by
+        # accident has a one-tap retreat.
+        cancel_btn = Button(
+            text=_tr('Cancel'), font_size=sp(13),
+            font_name=_FONT_NAME,
+            background_normal='',
+            background_color=theme.BTN_INACTIVE,
+            color=theme.TEXT)
+        cancel_btn.bind(
+            on_release=lambda *_: self._cancel_team_size_editing())
+        ts_row.add_widget(cancel_btn)
 
     def _enter_team_size_editing(self):
         """Flip team_size_row to picker mode on the next frame.
@@ -2626,17 +3140,34 @@ class ConfigScreen(Screen):
         self._team_size_editing = True
         self._refresh_split_rows()
 
+    # Heights used by _rebuild_slot_row + the panel-height adjuster.
+    _SLOT_TOP_ROW_H = dp(48)
+    _SLOT_CLAIMED_BTN_H = dp(40)
+    _SLOT_CLAIMED_SPACING = dp(4)
+
     def _rebuild_slot_row(self, team_size, my_slot):
-        """Synchronously clear + rebuild slot_row's children.
-        Always called from a Clock.schedule_once(0) so the
-        previous frame's touch dispatch and layout pass have
-        completed before we tear down + re-add children."""
-        from kivy.uix.button import Button
-        slot_row = self.ids.get('slot_row')
-        if slot_row is None:
+        """Refresh the inline filter-modal slot picker. Delegates
+        to the shared ``_render_slot_picker_into`` renderer (also
+        used by the modal popup ``_show_slot_picker``) — the two
+        ask the same question and now share rendering code.
+
+        No-op when the filter modal isn't open. Maintains the
+        ``self._slot_picker_state`` dict across calls so the
+        shared renderer can do in-place colour updates when only
+        the highlight has moved (no tear-down flicker)."""
+        widgets = getattr(self, '_filter_modal_widgets', None)
+        if not widgets:
             return
-        slot_row.clear_widgets()
+        available = widgets.get('slot_available')
+        claimed = widgets.get('slot_claimed')
+        if available is None or claimed is None:
+            return
         if not team_size:
+            available.clear_widgets()
+            available.height = 0
+            claimed.clear_widgets()
+            claimed.height = 0
+            self._apply_slot_row_height(0)
             return
         app = App.get_running_app()
         try:
@@ -2645,38 +3176,41 @@ class ConfigScreen(Screen):
             list_slots = lambda _lc: {}
         langcode = getattr(app, '_current_langcode', '') or ''
         slots = list_slots(langcode) if langcode else {}
-        for k in range(1, team_size + 1):
-            k_str = str(k)
-            claim = (slots or {}).get(k_str) or {}
-            device = claim.get('device_name', '') or ''
-            is_mine = (k_str == my_slot)
-            is_taken = bool(claim) and not is_mine
-            if is_mine:
-                label = f'{k}/{team_size}'
-                bg = theme.ACCENT
-            elif is_taken:
-                label = f'{k}/{team_size}\n({device})'
-                bg = theme.BTN_INACTIVE
-            else:
-                label = f'{k}/{team_size}'
-                bg = theme.SURFACE
-            btn = Button(
-                text=label, font_size=sp(13),
-                font_name=_FONT_NAME,
-                background_normal='',
-                background_color=bg,
-                color=theme.TEXT)
-            btn.bind(on_release=lambda b, _s=k_str:
-                     self._on_pick_slot(_s))
-            slot_row.add_widget(btn)
+
+        if not isinstance(getattr(self, '_slot_picker_state', None), dict):
+            self._slot_picker_state = {}
+        _render_slot_picker_into(
+            available, claimed,
+            team_size, my_slot, slots,
+            self._on_pick_slot,
+            state=self._slot_picker_state)
+        self._apply_slot_row_height(available.height + claimed.height)
+
+    def _apply_slot_row_height(self, target_h):
+        """Set the modal's slot_row height to fit its children.
+        The modal's ScrollView handles overflow, so no parent-
+        height-chase dance is needed — the inline path's
+        db_settings_box.height = minimum_height refresh from
+        earlier versions is gone."""
+        widgets = getattr(self, '_filter_modal_widgets', None)
+        if not widgets:
+            return
+        slot_row = widgets.get('slot_row')
+        if slot_row is not None:
+            slot_row.height = target_h
 
     def _on_pick_team_size(self, n):
-        """Persist team_size to the project KV and refresh
-        split state. Resets the editing flag so the row
-        returns to summary mode after the pick. The slot
-        picker popup will fire from _populate_split_state if
-        this device hasn't claimed a slot yet."""
+        """Persist team_size to the project KV. Resets the
+        editing flag so ts_row returns to summary mode."""
         app = App.get_running_app()
+        prev = int(
+            getattr(app.recorder, 'split_team_size', 0) or 0)
+        if prev == n:
+            # No-op tap on the already-current value: just
+            # bounce back to summary mode.
+            self._team_size_editing = False
+            self._refresh_split_rows()
+            return
         langcode = getattr(app, '_current_langcode', '') or ''
         if not langcode:
             return
@@ -2687,6 +3221,13 @@ class ConfigScreen(Screen):
         project_kv_set(langcode, 'team_size', n)
         self._team_size_editing = False
         app._populate_split_state()
+        self._refresh_split_rows()
+
+    def _cancel_team_size_editing(self):
+        """Back out of picker mode without changing team_size.
+        Bound to the Cancel button rendered alongside the
+        [2][3][4][5+] options."""
+        self._team_size_editing = False
         self._refresh_split_rows()
 
     def _open_team_size_plus_dialog(self):
@@ -2769,15 +3310,20 @@ class ConfigScreen(Screen):
                   file=sys.stderr)
             return
         set_peer_pref('cawl_filter_source', 'split')
+        # Optimistic local mirror so the synchronous
+        # _refresh_split_rows below sees the new value. Without
+        # this, recorder.split_my_slot is still '' while
+        # list_slots already shows our claim — the rebuild
+        # treats slot_str as "claimed by another device" and
+        # the user sees their device name flash into the
+        # claimed-by-other column for one frame before the
+        # worker apply corrects it. Worker apply confirms the
+        # value via peer_id; on lost-race it overwrites to ''
+        # and re-fires the picker, same shape as before.
+        if app.recorder is not None:
+            app.recorder.split_my_slot = str(slot_str)
         app._populate_split_state()
         self._refresh_split_rows()
-
-    def toggle_show_past(self, show_past):
-        self.only_unrecorded = not show_past
-        app = App.get_running_app()
-        if app.recorder:
-            app.recorder.only_unrecorded = not show_past
-        set_peer_pref('show_past_work', bool(show_past))
 
     def _build_theme_buttons(self):
         """Populate theme selector row with one button per theme."""
@@ -3556,6 +4102,14 @@ class RecorderController:
         # progress_text reads both for the "[k/n]" suffix.
         self.split_team_size = 0
         self.split_my_slot = ''
+        # One-shot "go outside filter" target. Set by the Go-To
+        # dialog when the user enables the "Go outside filter"
+        # checkbox and enters a CAWL number not present in the
+        # current filtered queue. ``current`` returns this entry
+        # while it's set, regardless of ``queue``; the next call
+        # to ``go_next`` / ``go_prev`` clears it and snaps back to
+        # the in-filter entry closest by CAWL number.
+        self._one_shot_entry = None
         self._recording = False
         self._playing = False
         self._pending_rerecord = False
@@ -3755,6 +4309,9 @@ class RecorderController:
     # ── Navigation ─────────────────────────────────────────────────────────────
 
     def go_next(self):
+        if self._one_shot_entry is not None:
+            self._snap_back_from_one_shot()
+            return
         if self.index < len(self.queue) - 1:
             self._pending_rerecord = False
             self._stop_active_player()
@@ -3762,14 +4319,43 @@ class RecorderController:
             self._notify_ui()
 
     def go_prev(self):
+        if self._one_shot_entry is not None:
+            self._snap_back_from_one_shot()
+            return
         if self.index > 0:
             self._pending_rerecord = False
             self._stop_active_player()
             self.index -= 1
             self._notify_ui()
 
+    def _snap_back_from_one_shot(self):
+        """End the outside-filter excursion. Drops the one-shot
+        entry and points ``index`` at the in-filter entry closest
+        to it by CAWL number — closest in either direction so a
+        swipe that lands the user nearby feels natural regardless
+        of which way they swiped. Caller (go_next / go_prev) is
+        the one-shot UX contract: any swipe returns to filter."""
+        target_cawl = (self._one_shot_entry or {}).get('cawl', '')
+        self._one_shot_entry = None
+        self._pending_rerecord = False
+        self._stop_active_player()
+        if target_cawl and self.queue:
+            try:
+                target_n = int(target_cawl)
+                best_i = min(
+                    range(len(self.queue)),
+                    key=lambda i: abs(
+                        int(self.queue[i].get('cawl', '0') or '0')
+                        - target_n))
+                self.index = best_i
+            except (TypeError, ValueError):
+                self.index = 0
+        self._notify_ui()
+
     @property
     def current(self):
+        if self._one_shot_entry is not None:
+            return self._one_shot_entry
         if not self.queue:
             return None
         return self.queue[self.index]
@@ -4272,8 +4858,25 @@ class RecorderController:
             # the profile key so the stop-exception path can't degrade
             # off an immediate-stop wedge.
             self._record_profile_key = None
-            self._stop_native_recording()
             self._record_started_at = None
+            if platform == 'android':
+                # Move the blocking native stop off the main thread —
+                # MediaRecorder.stop()+release() flushes the encoder
+                # and on slow chips / URI-provider FDs can block for
+                # seconds, freezing the touch dispatcher. Capture the
+                # handles and null self._recorder so a fresh start
+                # can race in safely.
+                recorder = self._recorder
+                pfd = self._record_pfd
+                self._recorder = None
+                self._record_pfd = None
+                import threading
+                threading.Thread(
+                    target=self._stop_android_handles_only,
+                    args=(recorder, pfd),
+                    daemon=True, name='stop-tap').start()
+            else:
+                self._stop_native_recording()
             Clock.schedule_once(lambda dt: self._notify_ui(), 0)
             # Coaching toast on the main thread.
             from kivy.app import App as _App
@@ -4285,126 +4888,251 @@ class RecorderController:
             return
         self._recording = False
         self._pending_rerecord = False
-        self._stop_native_recording()
+        if platform != 'android':
+            # iOS/desktop: native stop is fast (AVAudioRecorder.stop()
+            # / sounddevice stream close). Keep the existing
+            # synchronous flow so the worker refactor below stays
+            # scoped to the slow Android-only blocking case.
+            self._stop_native_recording()
+            self._record_started_at = None
+            if self._audio_path and self._record_ok:
+                filename = os.path.basename(self._audio_path)
+                guid = self.current['guid']
+                self.current['audio_filename'] = filename
+                self._dirty = True
+                import threading
+                threading.Thread(
+                    target=self._lift_audio_write_worker,
+                    args=(guid, filename), daemon=True,
+                    name='lift-audio-write').start()
+            Clock.schedule_once(lambda dt: self._notify_ui(), 0)
+            if self._record_ok:
+                Clock.schedule_once(
+                    lambda dt: self.play_audio(), 0.5)
+            return
+        # Android: MediaRecorder.stop()+release() flushes the encoder
+        # and writes the moov atom; on slow MTK chips and over URI-
+        # provider FDs that can block for seconds, freezing the touch
+        # dispatcher so the user can't swipe to the next entry until
+        # stop returned. Move it onto a worker, then publish the
+        # validated state back to the main thread for the LIFT
+        # advertise + UI refresh + playback schedule. Capture the
+        # MediaRecorder + pfd handles on the main thread so a fresh
+        # start_recording press while the worker is still finalising
+        # the previous recording races in safely against the nulled
+        # self._recorder.
+        if (self._audio_path and self._record_ok
+                and self.current is not None):
+            # Optimistically mark dirty so a swipe that happens
+            # before the worker's continuation runs still includes
+            # this recording in its commit boundary. The LIFT write
+            # lands shortly after via _lift_audio_write_worker; the
+            # daemon's debounced commit picks it up on the next
+            # boundary if it missed this one.
+            self._dirty = True
+        recorder = self._recorder
+        pfd = self._record_pfd
+        self._recorder = None
+        self._record_pfd = None
+        audio_path = self._audio_path
+        profile_key = self._record_profile_key
+        max_amp = self._max_amplitude_seen
+        record_ok = self._record_ok
+        entry = self.current
+        guid = (entry.get('guid', '') if entry else '')
         self._record_started_at = None
-        # Post-stop file-size validation. A successful stop() can
-        # still leave behind a zero-byte or near-empty file on flaky
-        # MTK HAL builds — the encoder discarded everything and we'd
-        # otherwise advertise the basename into the LIFT. Only runs
-        # on Android filesystem paths; SAF content URIs would need a
-        # ContentResolver stat and are skipped (scoped storage is on
-        # newer Android where MediaRecorder is more reliable anyway).
-        if (platform == 'android'
-                and self._record_ok
-                and self._audio_path
-                and not self.db.is_uri
-                and self._record_profile_key):
+        import threading
+        threading.Thread(
+            target=self._stop_record_worker_android,
+            args=(recorder, pfd, held, audio_path, profile_key,
+                  max_amp, record_ok, entry, guid),
+            daemon=True, name='stop-record').start()
+
+    def _stop_android_handles_only(self, recorder, pfd):
+        """Tap-not-hold worker: stop+release the captured
+        MediaRecorder + close the captured pfd off the main thread.
+        No post-stop validation — the audio is junk by definition
+        (held < _MIN_HOLD_SEC) and won't be advertised."""
+        if recorder:
             try:
-                size = os.path.getsize(self._audio_path)
+                recorder.stop()
+            except Exception as ex:
+                print(f'Android stop() (tap) error: {ex}')
+            finally:
+                try:
+                    recorder.release()
+                except Exception as ex:
+                    print(f'Android release() (tap) error: {ex}')
+        if pfd is not None:
+            try:
+                pfd.close()
+            except Exception:
+                pass
+        self._clear_keep_screen_on_android()
+
+    def _stop_record_worker_android(self, recorder, pfd, held,
+                                    audio_path, profile_key, max_amp,
+                                    record_ok, entry, guid):
+        """Run the blocking native stop + post-stop checks off the
+        main thread. Publishes back to main thread via
+        _publish_stop_finish for the LIFT advertise + UI work."""
+        if recorder:
+            try:
+                recorder.stop()
+            except Exception as ex:
+                print(f'Android stop() error: {ex}')
+                record_ok = False
+                # Stop-time wedges are the MTK HAL failure mode the
+                # ladder exists for. _degrade_profile writes a
+                # peer_pref (RPC) which is fine off-main.
+                self._degrade_profile(profile_key)
+            finally:
+                try:
+                    recorder.release()
+                except Exception as ex:
+                    print(f'Android release() error: {ex}')
+        if pfd is not None:
+            try:
+                pfd.close()
+            except Exception:
+                pass
+        self._clear_keep_screen_on_android()
+        # Post-stop file-size validation (filesystem projects only).
+        if (record_ok and audio_path
+                and not self.db.is_uri and profile_key):
+            try:
+                size = os.path.getsize(audio_path)
             except OSError as ex:
                 print(f'[record] post-stop stat failed: {ex}')
                 size = 0
-            profile = self._AUDIO_PROFILES.get(self._record_profile_key)
+            profile = self._AUDIO_PROFILES.get(profile_key)
             if profile:
                 expected = held * profile['bitrate'] / 8
                 if size < expected * self._POST_STOP_MIN_RATIO:
                     print(f'[record] post-stop validation failed: '
                           f'{size} bytes for {held:.2f}s '
                           f'(expected ~{int(expected)})')
-                    self._record_ok = False
+                    record_ok = False
                     try:
-                        os.remove(self._audio_path)
+                        os.remove(audio_path)
                     except OSError:
                         pass
-                    self._degrade_profile(self._record_profile_key)
-        # Silent-input detection (Android only): the encoder
-        # produces a correctly-sized M4A even when the mic
-        # input is silence, so the file-size validation above
-        # passes. The peak amplitude tracked by
-        # ``_poll_recording`` is the diagnostic for "another
-        # app holds the mic and we got a zero stream" — most
-        # commonly Zoom in a call, but also phone calls and
-        # voice assistants. Surface a toast naming the cause
-        # so the user doesn't conclude the recorder is broken;
-        # discard the take (audio is unusable) by clearing
-        # _record_ok so the LIFT reference write below is
-        # skipped, and remove the silent file so it doesn't
-        # accumulate.
-        if (platform == 'android'
-                and self._record_ok
-                and held > 1.0
-                and self._max_amplitude_seen < self._SILENT_AMP_THRESHOLD):
+                    self._degrade_profile(profile_key)
+        # Silent-input detection (the encoder produces a correctly-
+        # sized M4A even when the mic input is silence, so the file-
+        # size check above passes).
+        silent = (record_ok and held > 1.0
+                  and max_amp < self._SILENT_AMP_THRESHOLD)
+        if silent:
             print(f'[record] silent-input detected: peak '
-                  f'amplitude={self._max_amplitude_seen} over '
-                  f'{held:.2f}s (threshold '
-                  f'{self._SILENT_AMP_THRESHOLD})',
+                  f'amplitude={max_amp} over {held:.2f}s '
+                  f'(threshold {self._SILENT_AMP_THRESHOLD})',
                   file=sys.stderr, flush=True)
-            self._record_ok = False
-            if self._audio_path and not self.db.is_uri:
+            record_ok = False
+            if audio_path and not self.db.is_uri:
                 try:
-                    os.remove(self._audio_path)
+                    os.remove(audio_path)
                 except OSError:
                     pass
+        Clock.schedule_once(
+            lambda dt: self._publish_stop_finish(
+                record_ok, audio_path, entry, guid, silent), 0)
+
+    def _publish_stop_finish(self, record_ok, audio_path, entry,
+                             guid, silent):
+        """Main-thread continuation after
+        _stop_record_worker_android. Updates self._record_ok,
+        advertises audio onto the captured entry's dict + LIFT,
+        refreshes UI, schedules playback. The captured entry is
+        used (not self.current) so a swipe that landed during the
+        worker still advertises against the originally-recorded
+        entry."""
+        self._record_ok = record_ok
+        if silent:
+            from kivy.app import App as _App
+            _app = _App.get_running_app()
+            if _app is not None:
+                _app._show_toast(
+                    _tr('No audio detected — another app may '
+                        'have the microphone. Close any '
+                        'recording / call apps and try again.'))
+        if audio_path and record_ok and entry is not None:
+            filename = os.path.basename(audio_path)
+            entry['audio_filename'] = filename
+            import threading
+            threading.Thread(
+                target=self._lift_audio_write_worker,
+                args=(guid, filename), daemon=True,
+                name='lift-audio-write').start()
+        self._notify_ui()
+        if record_ok and self.current is entry:
+            # Playback reads the file directly (filesystem path or
+            # provider URI), not LIFT, so it's safe to schedule
+            # without waiting for the LIFT write to land. Only play
+            # if the user hasn't swiped away — playing the previous
+            # entry's audio over the freshly-loaded next entry
+            # would be confusing.
+            Clock.schedule_once(lambda dt: self.play_audio(), 0.5)
+
+    def _clear_keep_screen_on_android(self):
+        """Drop the FLAG_KEEP_SCREEN_ON set by _start_android_recording.
+        Marshals to the Activity UI thread via run_on_ui_thread —
+        callable from any thread (Kivy main, worker, etc.)."""
+        try:
+            from jnius import autoclass
+            _WMLP = autoclass(
+                'android.view.WindowManager$LayoutParams')
+            PythonActivity = autoclass(
+                'org.kivy.android.PythonActivity')
+            window = PythonActivity.mActivity.getWindow()
+            _flag = _WMLP.FLAG_KEEP_SCREEN_ON
+
+            def _clear(w=window, f=_flag):
+                try:
+                    w.clearFlags(f)
+                except Exception as ex:
+                    print(f'[record] KEEP_SCREEN_ON clear (UI '
+                          f'thread) failed: {ex}')
+            try:
+                from android.runnable import run_on_ui_thread
+                run_on_ui_thread(_clear)()
+            except ImportError:
+                _clear()
+        except Exception as ex:
+            print(f'[record] KEEP_SCREEN_ON clear setup failed: {ex}')
+
+    def _lift_audio_write_worker(self, guid, filename):
+        """Off-main-thread LIFT write for a freshly-recorded audio
+        file. Mirrors the success / failure branches the inline
+        version used to do — success clears any prior pending entry;
+        failure queues for auto-retry. § 17c Rule 7 (daemon-bound
+        write off the main thread)."""
+        try:
+            self.db.set_audio(guid, filename)
+        except Exception as ex:
+            prev = self._pending_lift_saves.get(guid)
+            if prev is not None and prev != filename:
+                print(f'[record] replacing pending LIFT save '
+                      f'for {guid}: {prev!r} → {filename!r}',
+                      file=sys.stderr, flush=True)
+            self._pending_lift_saves[guid] = filename
+            self._persist_pending(guid, filename)
+            print(f'[record] LIFT save failed: {ex} '
+                  f'(queued for auto-retry)',
+                  file=sys.stderr, flush=True)
             from kivy.app import App as _App
             _app = _App.get_running_app()
             if _app is not None:
                 Clock.schedule_once(
                     lambda dt: _app._show_toast(
-                        _tr('No audio detected — another app may '
-                            'have the microphone. Close any '
-                            'recording / call apps and try '
-                            'again.')), 0)
-        # Write filename into LIFT XML only if both start and stop
-        # ran clean. _record_ok flips False on a stop exception so a
-        # half-finalised M4A (no moov atom, etc.) does not get
-        # advertised as the entry's canonical recording.
-        #
-        # The LIFT save (set_audio → _save → atomic_open_write) can
-        # raise on a transient daemon hiccup. Catch it locally so a
-        # failed write doesn't propagate out of stop_recording and
-        # leave the UI wedged on the "recording" visual, and stash
-        # the (guid, filename) pair on ``_pending_lift_saves`` so
-        # ``retry_pending_lift_saves`` (driven from the App's 10 s
-        # _update_sync_status tick) re-runs the write against the
-        # existing on-disk audio file once the daemon recovers —
-        # no re-recording required.
-        lift_save_ok = True
-        if self._audio_path and self._record_ok:
-            filename = os.path.basename(self._audio_path)
-            guid = self.current['guid']
-            try:
-                self.db.set_audio(guid, filename)
-            except Exception as ex:
-                lift_save_ok = False
-                prev = self._pending_lift_saves.get(guid)
-                if prev is not None and prev != filename:
-                    print(f'[record] replacing pending LIFT save '
-                          f'for {guid}: {prev!r} → {filename!r}',
-                          file=sys.stderr, flush=True)
-                self._pending_lift_saves[guid] = filename
-                self._persist_pending(guid, filename)
-                print(f'[record] LIFT save failed: {ex} '
-                      f'(queued for auto-retry)',
-                      file=sys.stderr, flush=True)
-                from kivy.app import App as _App
-                _app = _App.get_running_app()
-                if _app is not None:
-                    Clock.schedule_once(
-                        lambda dt: _app._show_toast(
-                            _tr('Audio captured but reference not '
-                                'saved — will retry '
-                                'automatically.')), 0)
-            else:
-                # Successful save also clears any earlier failed
-                # attempt for the same entry — e.g. user retried by
-                # re-recording before the auto-retry tick fired.
-                if self._pending_lift_saves.pop(guid, None) is not None:
-                    self._unpersist_pending(guid)
-                self.current['audio_filename'] = filename
-                self._dirty = True
-        Clock.schedule_once(lambda dt: self._notify_ui(), 0)
-        if self._record_ok and lift_save_ok:
-            Clock.schedule_once(lambda dt: self.play_audio(), 0.5)
+                        _tr('Audio captured but reference not '
+                            'saved — will retry automatically.')), 0)
+            return
+        # Successful save clears any prior failed attempt for the
+        # same entry — e.g. user retried by re-recording before
+        # the auto-retry tick fired.
+        if self._pending_lift_saves.pop(guid, None) is not None:
+            self._unpersist_pending(guid)
 
     def play_audio(self):
         # Defensive: tear down any stale player from a previous tap
@@ -4438,33 +5166,19 @@ class RecorderController:
         self._playing = True
 
         if platform == 'android':
-            try:
-                from jnius import autoclass
-                MediaPlayer = autoclass('android.media.MediaPlayer')
-                mp = MediaPlayer()
-                if self.db.is_uri:
-                    Uri = autoclass('android.net.Uri')
-                    PythonActivity = autoclass(
-                        'org.kivy.android.PythonActivity')
-                    mp.setDataSource(
-                        PythonActivity.mActivity, Uri.parse(path))
-                else:
-                    mp.setDataSource(path)
-                mp.prepare()
-                mp.start()
-                self._player = mp  # keep reference alive
-                # Clear _playing after duration elapses
-                duration_ms = mp.getDuration()
-                if duration_ms > 0:
-                    Clock.schedule_once(
-                        lambda dt: setattr(self, '_playing', False),
-                        duration_ms / 1000.0 + 0.1)
-                else:
-                    Clock.schedule_once(
-                        lambda dt: setattr(self, '_playing', False), 2.0)
-            except Exception as ex:
-                self._playing = False
-                print(f'Android play error: {ex}')
+            # MediaPlayer.prepare() blocks the calling thread; on
+            # URI projects it calls ContentResolver.openFileDescriptor
+            # under the hood, which is a daemon round-trip and can
+            # stall for seconds if the daemon's project_lock is held
+            # by an incoming LAN receive-pack. Run prepare on a
+            # worker so the UI thread doesn't freeze; marshal start
+            # back to main via Clock so widget state mutation
+            # (_player, _playing timer) stays main-thread-only.
+            import threading
+            threading.Thread(
+                target=self._play_android_worker,
+                args=(path,), daemon=True,
+                name='play-prepare').start()
         elif platform == 'ios':
             try:
                 from pyobjus import autoclass
@@ -4512,6 +5226,49 @@ class RecorderController:
             except Exception as ex:
                 self._playing = False
                 print(f'Desktop play error: {ex}')
+
+    def _play_android_worker(self, path):
+        """Off-main-thread MediaPlayer setup. setDataSource + prepare
+        block on ContentResolver.openFileDescriptor for URI projects;
+        under LAN-merge lock contention this can stall for seconds.
+        Worker does the prep; start + lifecycle bookkeeping marshal
+        to the main thread via Clock so Kivy widget state stays
+        single-threaded."""
+        try:
+            from jnius import autoclass
+            MediaPlayer = autoclass('android.media.MediaPlayer')
+            mp = MediaPlayer()
+            if self.db.is_uri:
+                Uri = autoclass('android.net.Uri')
+                PythonActivity = autoclass(
+                    'org.kivy.android.PythonActivity')
+                mp.setDataSource(
+                    PythonActivity.mActivity, Uri.parse(path))
+            else:
+                mp.setDataSource(path)
+            mp.prepare()
+        except Exception as ex:
+            self._playing = False
+            print(f'Android play prepare error: {ex}')
+            return
+
+        def _start_on_main(dt):
+            try:
+                mp.start()
+                self._player = mp
+                duration_ms = mp.getDuration()
+                if duration_ms > 0:
+                    Clock.schedule_once(
+                        lambda dt: setattr(self, '_playing', False),
+                        duration_ms / 1000.0 + 0.1)
+                else:
+                    Clock.schedule_once(
+                        lambda dt: setattr(self, '_playing', False), 2.0)
+            except Exception as ex:
+                self._playing = False
+                print(f'Android play start error: {ex}')
+
+        Clock.schedule_once(_start_on_main, 0)
 
     def clear_audio(self):
         """Mark entry for re-recording without deleting the existing file."""
@@ -4955,7 +5712,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.50.2'
+__version__ = '1.55.17'
 
 
 class LIFTRecorderApp(App):
@@ -4971,8 +5728,25 @@ class LIFTRecorderApp(App):
     version_string = StringProperty(
         f'v{__version__} · '
         f'client {azt_collab_client.__version__}')
+    # BooleanProperty so KV bindings (the gear button's disabled
+    # / opacity hooks) react when the project loads. Set True at
+    # the end of ``load_lift``; flipped False if the recorder
+    # ever clears (project switch in progress, etc.). Keeping the
+    # gear off until True prevents the user from reaching the
+    # Settings page in the no-project state — and dodges the
+    # _hide_box_tree path entirely.
+    has_project = BooleanProperty(False)
     recorder: RecorderController = None
     config_screen: ConfigScreen = None
+    # App-level cache of the last successfully-applied
+    # split state. Survives RecorderController swaps (which
+    # happen on every _reload_and_restore — ContentObserver
+    # wakeup, sync result, etc.) so the transient-zero guard
+    # in _populate_split_state_apply has a real "previous"
+    # value even when a fresh controller has split_team_size=0.
+    # Reset in load_lift so a new project starts from blank.
+    _last_known_team_size = 0
+    _last_known_my_slot = ''
 
     # Expose _() to KV templates as app._()
     @staticmethod
@@ -5442,7 +6216,16 @@ class LIFTRecorderApp(App):
         # Cache the langcode so _register_current_project doesn't
         # re-derive — the daemon just told us authoritatively.
         self._current_langcode = langcode
-        self.load_lift(project.lift_path)
+        # Show a loading overlay while the synchronous LIFT parse +
+        # queue rebuild runs; without it the recorder screen sits
+        # blank (top bar only) for the duration of the parse and
+        # users couldn't tell whether the app was busy or wedged.
+        # Defer load_lift by one frame so the overlay paints before
+        # the parse blocks the main thread.
+        self._show_loading_overlay(
+            _tr('Loading {name}…').format(name=_lang_display_name(langcode)))
+        Clock.schedule_once(
+            lambda dt: self.load_lift(project.lift_path), 0)
 
     def _run_bootstrap(self):
         """Drive the suite-wide install/update workflow.
@@ -6168,39 +6951,66 @@ class LIFTRecorderApp(App):
             # pre-0.41.21 path working (active-progress branch).
             offline = bool(status.get('offline'))
             circuit_open = bool(status.get('circuit_open'))
+            # Per-source telemetry (daemon 0.50.21+, contract § 10
+            # "Per-source telemetry"). Default-zero / empty on
+            # pre-0.50.21 daemons; `last_source` drives the inline
+            # "via LAN" / "via Internet" tag so the user can verify
+            # the NOTES #3 LAN-share path is producing hits.
+            from_lan = int(status.get('from_lan') or 0)
+            from_upstream = int(status.get('from_upstream') or 0)
+            from_cache = int(status.get('from_cache') or 0)
+            last_source = str(status.get('last_source') or '')
             # Log only on state change so a 1 Hz poll doesn't fill
             # logcat with identical lines (contract § 10). State
-            # includes the flags so a flag flip still produces one
-            # log even when the counts didn't move.
+            # includes the flags AND last_source so a source flip
+            # still produces one log even when the counts didn't
+            # move. Source counters get delta-logged separately so
+            # the size of the LAN-share win is visible at a glance.
             last = getattr(self, '_cache_status_last',
-                           (-1, -1, False, False))
-            key = (cached, total, offline, circuit_open)
+                           (-1, -1, False, False, ''))
+            key = (cached, total, offline, circuit_open, last_source)
             if key != last:
+                prev_lan, prev_wan, prev_cache = getattr(
+                    self, '_cache_source_last', (0, 0, 0))
                 print(f'[cache-status] cached={cached} total={total} '
                       f'offline={offline} circuit_open={circuit_open} '
+                      f'last_source={last_source!r} '
+                      f'Δlan={from_lan - prev_lan} '
+                      f'Δwan={from_upstream - prev_wan} '
+                      f'Δcache={from_cache - prev_cache} '
                       f'image_repo={status.get("image_repo")!r}')
                 self._cache_status_last = key
+                self._cache_source_last = (
+                    from_lan, from_upstream, from_cache)
             Clock.schedule_once(
-                lambda dt, c=cached, t=total, o=offline, x=circuit_open:
-                    self._apply_cache_status(c, t, o, x), 0)
+                lambda dt, c=cached, t=total, o=offline, x=circuit_open,
+                       src=last_source:
+                    self._apply_cache_status(c, t, o, x, src), 0)
             self._cache_tick_in_flight = False
         threading.Thread(target=_worker, daemon=True).start()
 
     def _apply_cache_status(self, cached, total,
-                            offline=False, circuit_open=False):
+                            offline=False, circuit_open=False,
+                            last_source=''):
         """Render the indicator (or hide it) based on the latest
         cached / total counts plus the `offline` / `circuit_open`
-        flags. Cancels the polling Clock event once the cache
-        catches up. Diagnostic prints fire only on the first
-        occurrence of each terminal state — _tick already rate-
-        limits per-tick logs.
+        flags and `last_source` (daemon 0.50.21+). Cancels the
+        polling Clock event once the cache catches up.
 
         Polling continues during offline / circuit_open per contract
         § 10 — the daemon's scheduler watcher fires
         `cawl.on_online_edge()` on the offline→online transition
         which re-fires `auto_prefetch`; the running 1 Hz poll is
         what lets the banner flip back to live progress
-        automatically when that happens."""
+        automatically when that happens.
+
+        ``last_source`` distinguishes the channel serving bytes
+        right now: ``'lan'`` (paired peer's cache via the NOTES #3
+        share path — free), ``'upstream'`` (GitHub — metered if
+        cellular), ``'cache'`` (local disk — free), or ``''``
+        (initial / no successful fetch yet, or pre-0.50.21 daemon).
+        Drives the "via LAN" / "via Internet" tag so the user can
+        see whether the LAN-share is producing hits."""
         # Defence in depth: if a worker started before cancel ran is
         # arriving late with cached>=total, drop it so we don't print
         # "cache warm" twice or re-hide an already-hidden indicator.
@@ -6243,10 +7053,26 @@ class LIFTRecorderApp(App):
                 '(paused — connectivity lost)'
             ).format(cached=cached, total=total)
         else:
-            msg = _tr(
-                'Caching images: {cached} / {total} '
-                '(network in use — please stay online)'
-            ).format(cached=cached, total=total)
+            # Active-progress branch + per-source tag per
+            # CLIENT_INTEGRATION.md § 10 "Per-source telemetry".
+            # LAN serves bytes for free; GitHub costs cellular if
+            # that's the active link — the user needs to see which
+            # one is running. Pre-0.50.21 daemons leave last_source
+            # empty and fall through to the no-tag wording.
+            if last_source == 'lan':
+                msg = _tr(
+                    'Caching images: {cached} / {total} · via LAN'
+                ).format(cached=cached, total=total)
+            elif last_source == 'upstream':
+                msg = _tr(
+                    'Caching images: {cached} / {total} · via Internet '
+                    '(please stay online)'
+                ).format(cached=cached, total=total)
+            else:
+                msg = _tr(
+                    'Caching images: {cached} / {total} '
+                    '(network in use — please stay online)'
+                ).format(cached=cached, total=total)
         self._show_cache_indicator(msg)
 
     def _show_cache_indicator(self, text):
@@ -6317,7 +7143,22 @@ class LIFTRecorderApp(App):
         lbl.opacity = 0
 
     def load_lift(self, path):
-        self._dismiss_loading_overlay()
+        # Three-phase load:
+        #   Phase 1 (this method, main thread): cheap path resolution,
+        #       stale-cache sweep, baseline resets, capture authoritative
+        #       / pending langcodes, then spawn the worker.
+        #   Phase 2 (_load_lift_worker, off main): the expensive bit —
+        #       LIFTDatabase XML parse, db setup, RecorderController
+        #       construction, initial rebuild_queue. A 4 MB LIFT on a
+        #       slow MTK chip is several seconds of CPU; running it
+        #       inline blocked the touch dispatcher long enough that
+        #       Android could ANR-kill the peer (see the "bee" crash
+        #       report in 1.55.12). Loading overlay stays up across
+        #       phase 2 — the user sees the modal, not a frozen UI.
+        #   Phase 3 (_load_lift_publish, back on main): install
+        #       self.recorder, register with the daemon, transition
+        #       to the recorder screen, schedule _finish_load (which
+        #       flips has_project + dismisses the modal in one tick).
         # The picker can return either a filesystem path (desktop / open
         # file) or a content:// URI (Android server-APK model). Only
         # apply abspath when we genuinely have a filesystem path.
@@ -6339,12 +7180,6 @@ class LIFTRecorderApp(App):
             except OSError as ex:
                 print(f'[load_lift] stale CAWL cache cleanup skipped: '
                       f'{ex}')
-        try:
-            db = LIFTDatabase(path,
-                              image_cache_dir=self._get_image_cache_dir())
-        except Exception as ex:
-            self._show_error(_tr('Could not open file:\n{error}').format(error=ex))
-            return
         # vernlang priority:
         #   1. _current_langcode — server-authoritative langcode for
         #      this project (set by _handle_pick AND by
@@ -6360,23 +7195,6 @@ class LIFTRecorderApp(App):
         # paper over it with a stale cache.
         authoritative = getattr(self, '_current_langcode', '')
         pending = getattr(self, '_pending_vernlang', '')
-        if authoritative:
-            db.set_vernlang(authoritative)
-        elif pending:
-            db.set_vernlang(pending)
-        if pending:
-            try:
-                db.clean_template()
-            except Exception as ex:
-                # _save() inside clean_template writes the LIFT file
-                # — on Android URI projects that goes through the
-                # daemon's ContentProvider and can fail with a stale
-                # URI grant or transient daemon state. clean_template
-                # is best-effort cleanup of template-stub forms; a
-                # failure here must not abort the load (which would
-                # crash the app on the main thread, since Select
-                # Project's _handle_pick → load_lift runs there).
-                print(f'[load_lift] clean_template failed: {ex}')
         self._pending_vernlang = ''
         # Drop any content-advance baselines carried over from a
         # previous project — otherwise the first _update_sync_status
@@ -6387,47 +7205,113 @@ class LIFTRecorderApp(App):
         # surfaces takes over on the next poll.
         self._last_head_sha = None
         self._last_commit_seen = None
-        # Filesystem-side orphan-audio recovery: bind any audio files
-        # whose deterministic basename names an entry with no audiolang
-        # citation form yet. Covers the case where a previous session
-        # recorded the file, queued the LIFT write (daemon hiccup, FS
-        # pressure), then the app was force-killed before the auto-retry
-        # tick fired. URI projects handle the same case via the
-        # persisted ``_pending_lift_saves`` queue restored below.
+        # New project = new split state. Reset the App-level cache so
+        # the transient-zero guard doesn't carry the old project's
+        # team_size / my_slot into this one. The first successful
+        # apply re-populates the cache.
+        self._last_known_team_size = 0
+        self._last_known_my_slot = ''
+        import threading
+        threading.Thread(
+            target=self._load_lift_worker,
+            args=(path, authoritative, pending),
+            daemon=True, name='load-lift').start()
+
+    def _load_lift_worker(self, path, authoritative, pending):
+        """Phase 2: XML parse + db setup + RecorderController +
+        initial rebuild_queue, all off the main thread. None of these
+        touch Kivy widgets or properties, so running them on a worker
+        is safe. UI publishes back via Clock.schedule_once."""
         try:
-            db.bind_orphan_audio()
+            db = LIFTDatabase(
+                path, image_cache_dir=self._get_image_cache_dir())
         except Exception as ex:
-            print(f'[load_lift] orphan-audio bind raised: {ex}')
-        self.recorder = RecorderController(
-            db, langcode=(authoritative or pending or ''))
-        # Apply persisted show-past-work preference (default: hide past work)
-        show_past = bool(peer_pref('show_past_work', False))
-        self.recorder.only_unrecorded = not show_past
-        self.recorder.rebuild_queue()
-        # Register this project with the sync backend so future ops can
-        # be addressed by langcode.
+            Clock.schedule_once(
+                lambda _dt, e=ex: self._load_lift_error(e), 0)
+            return
+        try:
+            if authoritative:
+                db.set_vernlang(authoritative)
+            elif pending:
+                db.set_vernlang(pending)
+            if pending:
+                try:
+                    db.clean_template()
+                except Exception as ex:
+                    # _save() inside clean_template writes the LIFT
+                    # file — on Android URI projects that goes through
+                    # the daemon's ContentProvider and can fail with a
+                    # stale URI grant or transient daemon state.
+                    # Best-effort cleanup of template-stub forms; a
+                    # failure here must not abort the load.
+                    print(f'[load_lift] clean_template failed: {ex}')
+            # Filesystem-side orphan-audio recovery: bind any audio
+            # files whose deterministic basename names an entry with
+            # no audiolang citation form yet. Covers the case where a
+            # previous session recorded the file, queued the LIFT
+            # write, then the app was force-killed before the auto-
+            # retry tick fired. URI projects handle the same case via
+            # the persisted _pending_lift_saves queue.
+            try:
+                db.bind_orphan_audio()
+            except Exception as ex:
+                print(f'[load_lift] orphan-audio bind raised: {ex}')
+            rec = RecorderController(
+                db, langcode=(authoritative or pending or ''))
+            # Apply persisted show-past-work preference (default: hide
+            # past work). peer_pref is an RPC — fine from a worker.
+            show_past = bool(peer_pref('show_past_work', False))
+            rec.only_unrecorded = not show_past
+            rec.rebuild_queue()
+        except Exception as ex:
+            Clock.schedule_once(
+                lambda _dt, e=ex: self._load_lift_error(e), 0)
+            return
+        Clock.schedule_once(
+            lambda _dt: self._load_lift_publish(rec, pending), 0)
+
+    def _load_lift_error(self, ex):
+        """Main-thread error handler for the worker. Dismisses the
+        loading overlay and surfaces the error so the user knows the
+        load didn't silently fail."""
+        self._dismiss_loading_overlay()
+        self._show_error(
+            _tr('Could not open file:\n{error}').format(error=ex))
+
+    def _load_lift_publish(self, rec, pending):
+        """Phase 3: install the freshly-built RecorderController,
+        register with the daemon, transition to the recorder screen,
+        and schedule _finish_load (the synchronous-era tail that flips
+        has_project + dismisses the loading overlay in one tick)."""
+        self.recorder = rec
+        # Register this project with the sync backend so future ops
+        # can be addressed by langcode.
         self._register_current_project()
         # ContentObserver subscription (CLIENT_INTEGRATION.md § 17b,
         # v0.47.0+): per-project URI gives sub-second wakeups on
         # daemon-side HEAD advance (incoming LAN receive-pack from a
         # paired peer, scheduler-driven push, post-receive absorb).
-        # Polling stays as a heartbeat floor — § 17b is explicit that
-        # the subscribe-when-foregrounded + poll + on_resume recipe
-        # is the contract. Silent no-op on non-Android (token is None;
-        # polling-only path handles those peers).
+        # Polling stays as a heartbeat floor.
         self._subscribe_project_changes()
         sm = self.root.ids.sm
         sm.transition = SlideTransition(direction='left')
         sm.current = 'recorder'
-        Clock.schedule_once(lambda dt: self.refresh_recorder_ui(), 0.1)
-        # Wordlist-split state per CLIENT_INTEGRATION.md § 21:
-        # read team_size + this device's slot from the project KV
-        # and apply a computed range filter when the filter source
-        # is 'split'. Fires immediately — the RPC reads run on a
-        # worker thread, and the apply step schedules itself onto
-        # the main thread once the daemon responds (no defer
-        # needed for layout settling; the apply is post-render
-        # by construction).
+
+        def _finish_load(_dt):
+            # All three effects fire in the same Clock tick so the
+            # user sees one transition: modal closes ↔ sync + gear
+            # appear ↔ entry data populates. has_project trips the
+            # KV bindings for the sync + gear buttons; refresh paints
+            # the entry image / glosses / progress / sync status;
+            # dismiss closes the modal that's been covering
+            # everything.
+            self.has_project = True
+            self.refresh_recorder_ui()
+            self._dismiss_loading_overlay()
+        Clock.schedule_once(_finish_load, 0.1)
+        # Wordlist-split state per CLIENT_INTEGRATION.md § 21.
+        # _populate_split_state already runs its RPC reads on a
+        # worker; safe to call from main.
         self._populate_split_state()
         # Silently pre-fetch all CAWL images for offline use
         Clock.schedule_once(lambda dt: self._start_image_prefetch(), 1.0)
@@ -6542,19 +7426,27 @@ class LIFTRecorderApp(App):
         isn't in ``list_slots`` (§ 21 hard rule #3).
 
         Worker-thread fetch keeps the UI responsive when the daemon
-        is mid-restart (project_kv_get / list_slots can block for
-        seconds). An in-flight guard drops re-entrant calls while a
-        prior fetch is still running (§ 17c Rule 1 shape) — the
-        running worker covers whatever the new call would have
-        done."""
+        is mid-restart. Queue-at-most-one re-entry: if a fetch is
+        already in flight when a new call lands (e.g. user just
+        bumped team_size and the panel-expand's earlier fetch
+        hasn't returned yet), mark a pending re-fire instead of
+        dropping. The worker checks the flag in its finally and
+        re-spawns a follow-up fetch — guarantees the latest
+        mutation is reflected without piling up parallel workers
+        (§ 17c Rule 1 shape)."""
         if not self.recorder:
             return
         langcode = (getattr(self, '_current_langcode', '') or '').strip()
         if not langcode:
             return
         if getattr(self, '_split_state_in_flight', False):
+            # Worker already running; mark a follow-up so the
+            # mutation that triggered this call still gets
+            # reflected when the running worker exits.
+            self._split_state_pending = True
             return
         self._split_state_in_flight = True
+        self._split_state_pending = False
         import threading
         pending_slot = getattr(self, '_claim_pending_slot', '')
         threading.Thread(
@@ -6597,8 +7489,16 @@ class LIFTRecorderApp(App):
         finally:
             # Clear the guard from the worker (not the apply step)
             # so a slow daemon doesn't strand the flag if the worker
-            # raises before scheduling the apply.
+            # raises before scheduling the apply. If another
+            # _populate_split_state call landed while we were
+            # running, satisfy it now — the queue-at-most-one shape
+            # guarantees the mutation that triggered the re-entry
+            # still gets reflected.
             self._split_state_in_flight = False
+            if getattr(self, '_split_state_pending', False):
+                self._split_state_pending = False
+                Clock.schedule_once(
+                    lambda dt: self._populate_split_state(), 0)
 
     def _populate_split_state_apply(self, langcode, team_size, slots,
                                     my_peer_id, pending_slot):
@@ -6609,6 +7509,28 @@ class LIFTRecorderApp(App):
             return
         if not self.recorder:
             return
+        # Transient-zero guard. The daemon's project_kv_get can
+        # return '' for team_size.txt during a commit cycle (the
+        # data-loss-risk log entries for `.azt/kv/team_size.txt`
+        # are the smoking gun — the file is sometimes uncommittable
+        # and the read races the daemon's own file shuffle).
+        # Without this, team_size briefly drops 4→0→4 between
+        # applies and the modal's ts_row flickers.
+        #
+        # The "previous" value comes from BOTH the current
+        # recorder AND an App-level cache that survives
+        # RecorderController swaps (every _reload_and_restore
+        # creates a fresh controller with split_team_size=0,
+        # which would otherwise blank the guard). The cache is
+        # reset on load_lift so a new project starts fresh.
+        prev_team_size = max(
+            int(getattr(self.recorder, 'split_team_size', 0) or 0),
+            int(getattr(self, '_last_known_team_size', 0) or 0))
+        if prev_team_size and not team_size:
+            print(f'[split] ignoring transient team_size=0 '
+                  f'(prev={prev_team_size}) — daemon read race',
+                  file=sys.stderr)
+            team_size = prev_team_size
         # § 21 Locked semantic #2 (2026-05-28): peer_id is the
         # canonical key; device_name is display-only and can change
         # without invalidating any claim. No device_name fallback —
@@ -6623,23 +7545,69 @@ class LIFTRecorderApp(App):
                     break
         # S1 claim-pending guard: a just-issued claim_slot may not
         # yet have flushed to list_slots. Adopt the pending value
-        # optimistically so the picker doesn't re-fire over a
-        # successful tap. One-shot — the pending token is cleared
-        # at the bottom regardless of whether the daemon caught up,
-        # so a loser of a simultaneous-claim merge (§ 21 Locked
-        # semantic #1: "convergent atomicity, not real-time") sees
-        # the picker again on the next cycle instead of staying
-        # falsely "claimed" forever.
+        # optimistically so the picker doesn't re-fire — AND so
+        # the user's selection doesn't flicker in/out as repeated
+        # populate cycles run before the daemon commit lands.
+        # Persistence rule: pending stays alive across applies
+        # until the daemon-side state is observable — either our
+        # peer_id appears in list_slots (confirmation, handled in
+        # the peer_id loop above) or some claim exists at the
+        # pending slot key with a DIFFERENT peer_id (we lost the
+        # race; drop pending and let the picker fire). Empty
+        # claim at the pending key means the daemon hasn't yet
+        # flushed; keep adopting.
         optimistic = False
+        lost_race = False
         if not my_slot and pending_slot:
-            my_slot = str(pending_slot)
-            optimistic = True
-        if team_size and not my_slot:
+            pending_claim = (slots or {}).get(str(pending_slot)) or {}
+            other_peer = pending_claim.get('peer_id', '')
+            if other_peer and other_peer != my_peer_id:
+                lost_race = True
+                self._claim_pending_slot = ''
+            else:
+                my_slot = str(pending_slot)
+                optimistic = True
+        # Stale-slot detection. team_size can shrink under us (a
+        # teammate dropped a device count, the project switched to
+        # a smaller split, etc.) leaving this device's claim
+        # pointing at a slot beyond the new team_size — e.g. claim
+        # at slot 6, new team_size 4 → "[6/4]" nonsense in the
+        # progress label. Treat as displacement: release the stale
+        # claim daemon-side so other peers don't see a phantom
+        # roster entry, clear my_slot locally, and let the
+        # picker-fire branch below prompt the user to pick a slot
+        # in the new team_size range.
+        stale_slot = False
+        if team_size and my_slot:
+            try:
+                if int(my_slot) > team_size:
+                    stale_slot = True
+            except (TypeError, ValueError):
+                pass
+        if stale_slot:
+            print(f'[split] stale slot {my_slot} exceeds new '
+                  f'team_size {team_size}; releasing and prompting '
+                  f'for a fresh slot', file=sys.stderr)
+            import threading
+            threading.Thread(
+                target=self._release_stale_slot_worker,
+                args=(langcode,), daemon=True,
+                name='release-stale-slot').start()
+            my_slot = ''
+        if team_size and not my_slot and not stale_slot:
             print(f'[split] no slot matched: peer_id={my_peer_id!r} '
                   f'slots_keys={sorted(slots.keys()) if slots else []!r}',
                   file=sys.stderr)
         self.recorder.split_team_size = team_size
         self.recorder.split_my_slot = my_slot
+        # Update the App-level cache so a future
+        # _reload_and_restore (fresh controller, fresh
+        # recorder.split_*) doesn't lose the last-known-good
+        # values to the transient-zero guard.
+        if team_size:
+            self._last_known_team_size = team_size
+        if my_slot:
+            self._last_known_my_slot = my_slot
         if peer_pref('cawl_filter_source', None) == 'split':
             if team_size and my_slot:
                 sorted_nums = self.recorder.sorted_cawl_numbers()
@@ -6665,141 +7633,166 @@ class LIFTRecorderApp(App):
             except Exception as ex:
                 print(f'[split] refresh_split_rows raised: {ex}',
                       file=sys.stderr)
-        # S1 (one-shot): clear the pending token unconditionally —
-        # the optimistic adoption is only good for THIS apply cycle.
-        # If the daemon caught up (my_slot matched on peer_id), the
-        # token clears naturally; if the daemon didn't (we're the
-        # loser of a simultaneous claim), the next populate cycle
-        # sees no pending and routes to the picker.
-        if optimistic:
-            self._claim_pending_slot = ''
-        elif my_slot:
+        # Clear the pending token ONLY when the daemon's state is
+        # observable — peer_id confirmation, or the lost-race
+        # branch above where some other claim now owns the slot.
+        # Keep pending alive across optimistic adoption so the
+        # next populate cycle (often a fast ContentObserver
+        # wakeup after the daemon commits) still adopts the same
+        # value — preventing the user's freshly-picked slot from
+        # flickering off the row before the daemon commit lands.
+        if my_slot and not optimistic:
             self._claim_pending_slot = ''
         if team_size and not my_slot:
-            self._show_slot_picker(team_size, slots)
+            reason = 'team_size_shrunk' if stale_slot else None
+            self._show_slot_picker(
+                team_size, slots, my_peer_id=my_peer_id, reason=reason)
         self.refresh_recorder_ui()
 
-    def _show_slot_picker(self, team_size, slots):
-        """Modal slot picker. Unclaimed slots are tappable by
-        default; a "Show all" button reveals claimed slots
-        (each labelled with the claiming device_name) so a
-        replacement phone can displace a dead device. Tapping a
-        slot calls ``claim_slot``; on CONTRIBUTOR_UNSET we route
-        the user to set their name first (§ 21 hard rule #2)."""
+    def _release_stale_slot_worker(self, langcode):
+        """Daemon-side release of this device's claim when team_size
+        has shrunk below the claimed slot number. Best-effort; the
+        picker that fires in parallel still drives the user toward
+        a fresh valid claim regardless of whether the release
+        landed. § 17c Rule 7 (daemon RPC off the main thread)."""
+        try:
+            from azt_collab_client import release_slot
+            release_slot(langcode)
+        except Exception as ex:
+            print(f'[split] release of stale slot raised: {ex}',
+                  file=sys.stderr)
+
+    def _show_slot_picker(self, team_size, slots,
+                          my_peer_id='', reason=None):
+        """Modal "Which device is this?" picker. Both the available
+        row and the claimed-by-other list are rendered by the
+        shared ``_render_slot_picker_into`` helper — the inline
+        filter-modal slot row uses the same renderer so a fix to
+        one is a fix to both.
+
+        *my_peer_id* — derives own-slot from ``slots`` (this
+        device's existing claim, if any, joins the top row with
+        the accent highlight). The recorder's ``split_my_slot``
+        is empty when this popup fires (that's why it fires), so
+        we derive locally.
+
+        *reason* — ``'team_size_shrunk'`` swaps in the
+        "Team configuration changed" wording; ``None`` is the
+        first-time-join / displacement case."""
         from kivy.uix.popup import Popup
         from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.button import Button
         from kivy.uix.label import Label
         if getattr(self, '_slot_picker_open', False):
-            return  # already showing
+            return
         self._slot_picker_open = True
 
-        taken = {str(s): (c or {}) for s, c in (slots or {}).items()}
+        # Derive my_slot from peer_id match within range. Lets
+        # the shared renderer highlight our own claim if it's
+        # still in slots (e.g., race between stale-slot release
+        # and the popup firing). Stale own-claims outside
+        # [1..team_size] are ignored.
+        my_slot = ''
+        if my_peer_id:
+            for s, c in (slots or {}).items():
+                if (c or {}).get('peer_id', '') != my_peer_id:
+                    continue
+                try:
+                    if 1 <= int(str(s)) <= team_size:
+                        my_slot = str(s)
+                        break
+                except (TypeError, ValueError):
+                    pass
+
+        if reason == 'team_size_shrunk':
+            prompt_text = _tr(
+                'The team size changed. Pick your new recording slot.')
+            prompt_height = dp(56)
+            popup_title = _tr('Team configuration changed')
+        else:
+            prompt_text = _tr('Which device is this?')
+            prompt_height = dp(36)
+            popup_title = _tr('Pick a recording slot')
 
         content = BoxLayout(
             orientation='vertical', padding=dp(12), spacing=dp(10))
         prompt = Label(
-            text=_tr('Which device is this?'),
+            text=prompt_text,
             font_size=sp(15), font_name=_FONT_NAME,
-            size_hint_y=None, height=dp(36),
+            size_hint_y=None, height=prompt_height,
             halign='center', valign='middle')
         prompt.bind(size=lambda w, s: setattr(w, 'text_size', s))
         content.add_widget(prompt)
 
-        slot_row = BoxLayout(
+        available_row = BoxLayout(
             orientation='horizontal', size_hint_y=None,
-            height=dp(56), spacing=dp(6))
-        content.add_widget(slot_row)
+            height=dp(48), spacing=dp(6))
+        content.add_widget(available_row)
+        claimed_column = BoxLayout(
+            orientation='vertical', size_hint_y=None,
+            height=0, spacing=dp(4))
+        content.add_widget(claimed_column)
 
-        state = {'show_all': False}
-
-        # Only offer the override when something is actually
-        # claimed — for a fresh team_size where no one's picked,
-        # the button is meaningless and adds visual noise.
-        has_taken = bool(taken)
-        toggle_btn = Button(
-            text=_tr('Show claimed slots too'),
-            font_size=sp(13), size_hint_y=None,
-            height=dp(40) if has_taken else 0,
-            opacity=1 if has_taken else 0,
-            disabled=not has_taken)
-        content.add_widget(toggle_btn)
-
-        popup = Popup(
-            title=_tr('Pick a recording slot'),
-            content=content,
-            size_hint=(0.9, None),
-            height=dp(220) if has_taken else dp(180),
-            auto_dismiss=False,
-        )
+        # Use an Object holder so on_pick can close the popup
+        # before it's even constructed (popup ref filled in
+        # below after we have height).
+        popup_ref = [None]
 
         def _on_pick(slot_str):
             from azt_collab_client import (
                 claim_slot as _claim_slot, get_contributor)
-            # § 21 hard rule #2: claim refuses with
-            # CONTRIBUTOR_UNSET if no contributor name is set.
-            # Check upfront so the failure routes to the right
-            # surface (settings) rather than a silent False.
+            popup = popup_ref[0]
             if not (get_contributor() or '').strip():
-                popup.dismiss()
+                if popup:
+                    popup.dismiss()
                 self._slot_picker_open = False
                 self._show_contributor_required_for_slot()
                 return
             langcode = (getattr(self, '_current_langcode', '')
                         or '')
             if not langcode:
-                popup.dismiss()
+                if popup:
+                    popup.dismiss()
                 self._slot_picker_open = False
                 return
             self._claim_pending_slot = str(slot_str)
             ok = _claim_slot(langcode, slot_str)
-            popup.dismiss()
+            if popup:
+                popup.dismiss()
             self._slot_picker_open = False
             if not ok:
-                # Could be transport failure or daemon refusal.
-                # Re-trigger populate (and thus picker) on next
-                # sync — for now just log.
                 self._claim_pending_slot = ''
                 print(f'[split] claim_slot({slot_str}) returned '
                       f'False; will retry on next sync',
                       file=sys.stderr)
                 return
             set_peer_pref('cawl_filter_source', 'split')
+            # Optimistic mirror — same fix as the inline picker.
+            # Worker apply confirms via peer_id; lost-race rolls
+            # back to '' and re-fires the picker.
+            if self.recorder is not None:
+                self.recorder.split_my_slot = str(slot_str)
             self._populate_split_state()
 
-        def _render(*_):
-            slot_row.clear_widgets()
-            for k in range(1, team_size + 1):
-                k_str = str(k)
-                claim = taken.get(k_str)
-                is_taken = claim is not None
-                if is_taken and not state['show_all']:
-                    continue
-                if is_taken:
-                    device = (claim.get('device_name', '')
-                              or _tr('Unknown'))
-                    label = f'{k}/{team_size}\n({device})'
-                else:
-                    label = f'{k}/{team_size}'
-                btn = Button(
-                    text=label, font_size=sp(13),
-                    font_name=_FONT_NAME)
-                btn.bind(on_release=lambda b, s=k_str: _on_pick(s))
-                slot_row.add_widget(btn)
+        # Render via the shared renderer. state=None — the popup
+        # is single-shot; widgets get GC'd when popup dismisses.
+        _render_slot_picker_into(
+            available_row, claimed_column,
+            team_size, my_slot, slots, _on_pick, state=None)
 
-        def _toggle_show_all(*_):
-            # One-shot: reveal claimed slots, then collapse the
-            # toggle so it doesn't sit in the popup looking
-            # half-functional. User reopens the picker if they
-            # want to flip back.
-            state['show_all'] = True
-            toggle_btn.height = 0
-            toggle_btn.opacity = 0
-            toggle_btn.disabled = True
-            _render()
-
-        toggle_btn.bind(on_release=_toggle_show_all)
-        _render()
+        # Compute popup height from the now-known row sizes.
+        base_h = dp(120) + (prompt_height - dp(36))
+        if available_row.height:
+            base_h += available_row.height + dp(10)
+        if claimed_column.height:
+            base_h += claimed_column.height + dp(10)
+        popup = Popup(
+            title=popup_title,
+            content=content,
+            size_hint=(0.9, None),
+            height=min(base_h, Window.height * 0.92),
+            auto_dismiss=False,
+        )
+        popup_ref[0] = popup
         popup.open()
 
     def _show_contributor_required_for_slot(self):
@@ -6882,10 +7875,14 @@ class LIFTRecorderApp(App):
             self.recorder.gloss_search,
             self.recorder.only_unrecorded,
             self.recorder.active_gloss_langs[:],
+            self.recorder.split_team_size,
+            self.recorder.split_my_slot,
         )
         self.recorder = RecorderController(db, langcode=authoritative)
-        self.recorder.cawl_filter, self.recorder.gloss_search, \
-            self.recorder.only_unrecorded, self.recorder.active_gloss_langs = old_settings
+        (self.recorder.cawl_filter, self.recorder.gloss_search,
+         self.recorder.only_unrecorded, self.recorder.active_gloss_langs,
+         self.recorder.split_team_size,
+         self.recorder.split_my_slot) = old_settings
         self.recorder.rebuild_queue()
         if guid:
             for i, e in enumerate(self.recorder.queue):
@@ -7248,9 +8245,14 @@ class LIFTRecorderApp(App):
         group of changes. The peer's job is to mark the boundary
         between meaningful chunks of work (one swipe = one entry's
         worth of changes); the daemon's scheduler-drain loop decides
-        when to push (online + post_online_grace_s + !work_offline).
-        Commit happens regardless of connectivity. The UI refreshes
-        its sync indicator after a short delay.
+        when to push.
+
+        Runs on a worker thread per § 17c Rule 7. The daemon's
+        ``project_lock`` can be held by an incoming LAN receive-pack
+        for seconds; calling ``commit_project`` synchronously on
+        the swipe path would freeze the UI until the merge finished.
+        With the worker the swipe returns immediately; the commit
+        debounces and runs whenever the daemon's lock clears.
 
         Per CLIENT_INTEGRATION.md § 17b (0.43.0+): this RPC NEVER
         emits PUSHED — push is daemon-driven. Peer surface for
@@ -7265,19 +8267,23 @@ class LIFTRecorderApp(App):
         # § 17c Rule 1 — share the in-flight guard with do_sync. While
         # sync_project holds the daemon-side project_lock, a parallel
         # commit_project would hit S.BUSY and the peer would pile up
-        # redundant calls. Drop, do NOT queue — commit_project is a
-        # debounced boundary marker; the next swipe's commit will
-        # cover whatever this one would have done. (The flag clears
-        # within milliseconds for the commit_project-only case since
-        # the RPC returns a job_id immediately.)
+        # redundant calls. Drop, do NOT queue.
         in_flight = getattr(self, '_sync_in_flight', {})
         if in_flight.get(langcode):
             return
         in_flight[langcode] = True
         self._sync_in_flight = in_flight
+        import threading
+        threading.Thread(
+            target=self._auto_commit_sync_worker,
+            args=(langcode,),
+            daemon=True,
+            name='auto-commit').start()
+
+    def _auto_commit_sync_worker(self, langcode):
         try:
-            from azt_collab_client import commit_project, ServerUnavailable
-            # § 12: contributor is daemon-owned, no longer on the wire.
+            from azt_collab_client import (
+                commit_project, ServerUnavailable)
             job_id = commit_project(langcode)
             # Stash for the data-loss-risk poller in
             # _update_sync_status. commit_project is fire-and-forget,
@@ -7289,25 +8295,22 @@ class LIFTRecorderApp(App):
             if job_id:
                 self._latest_sync_job_id = job_id
         except ServerUnavailable as ex:
-            # Per azt_collab_client/CLAUDE.md "Peer contract: routing
-            # on sync results", auto-sync on SERVER_UNAVAILABLE /
-            # SERVER_ERROR is **silent** — log only, no UI surface.
-            # Daemon will be reachable again next time; user is
-            # mid-something-else and shouldn't be derailed.
             print(f'[auto-sync] sync service unavailable: {ex}',
                   file=sys.stderr, flush=True)
             _log_server_crash_if_any('auto_sync')
-            return
         except Exception as ex:
             print(f'[auto-sync] error: {ex}',
                   file=sys.stderr, flush=True)
-            return
         finally:
-            self._sync_in_flight[langcode] = False
-        # Refresh the recorder's sync status indicator slightly after
-        # the debounce window so a successful job's last_sync is in
-        # place.
-        Clock.schedule_once(lambda dt: self._update_sync_status(), 1.5)
+            try:
+                self._sync_in_flight[langcode] = False
+            except Exception:
+                pass
+            # Refresh the recorder's sync status indicator on the
+            # main thread slightly after the debounce window so a
+            # successful job's last_sync is in place.
+            Clock.schedule_once(
+                lambda dt: self._update_sync_status(), 1.5)
 
     def _check_data_loss_risk_async(self):
         """Poll the most recent ``commit_project`` job for
@@ -7415,7 +8418,16 @@ class LIFTRecorderApp(App):
                     set_last_project(langcode)
                 except Exception as ex:
                     print(f'[recent] set_last_project: {ex}')
-            self.load_lift(result['path'])
+            # Loading overlay while the synchronous LIFT parse runs
+            # — same rationale as _auto_load_last_project. Deferred
+            # by one frame so the overlay paints before load_lift
+            # blocks the main thread.
+            name = (_lang_display_name(langcode) if langcode
+                    else os.path.basename(result.get('path', '')))
+            self._show_loading_overlay(
+                _tr('Loading {name}…').format(name=name))
+            Clock.schedule_once(
+                lambda dt: self.load_lift(result['path']), 0)
             return
         err = result.get('error', 'unknown')
         if err == 'cancelled':
@@ -7509,6 +8521,141 @@ class LIFTRecorderApp(App):
     def share_apk(self):
         from azt_collab_client.ui import share_running_apk
         share_running_apk(on_error=self._show_error)
+
+    def check_for_update_explicit(self):
+        """User-initiated update check (Update button in the
+        settings title bar). Always shows a modal with the
+        outcome — the user explicitly asked, so a silent no-op
+        leaves them guessing whether the tap registered, the
+        network is down, or there's just no newer release.
+
+        Distinct from the silent self-update probe in bootstrap,
+        which only surfaces UI when a newer version is available.
+        Calls azt_collab_client.ui.check_for_update which spawns
+        its own worker and marshals callbacks back to the UI
+        thread, so the lambdas below can update the modal's
+        status label directly."""
+        from azt_collab_client.ui import check_for_update
+        # Invalidate the per-process release cache before probing.
+        # _fetch_latest keeps a 5-minute TTL cache so the bootstrap
+        # self-update probe + this explicit tap don't double-pay
+        # GitHub. But that cache makes a cache-hit indistinguishable
+        # from "we just successfully re-fetched" — so if the user
+        # turns off the network between bootstrap and tapping
+        # Update, the cached release still satisfies the check and
+        # on_no_update fires instead of on_error. Forcing a fresh
+        # probe makes the URLError surface honestly.
+        from azt_collab_client.ui.update import invalidate_release_cache
+        repo = 'kent-rasmussen/azt-recorder'
+        invalidate_release_cache(repo)
+        from kivy.uix.modalview import ModalView
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.label import Label
+        from kivy.uix.button import Button
+
+        def _friendly_error(err):
+            """Prepend a user-readable explanation to
+            check_for_update's raw error string. Errno 7
+            / -2 / 'no address' / 'getaddrinfo' / 'name
+            resolution' all mean DNS couldn't resolve
+            api.github.com — almost always "no internet"
+            on a phone. Keeps the technical detail
+            below so a log / support request still has
+            what failed."""
+            err_str = str(err)
+            low = err_str.lower()
+            if ('errno 7' in low or 'errno -2' in low
+                    or 'no address' in low
+                    or 'name or service' in low
+                    or 'name resolution' in low
+                    or 'getaddrinfo' in low):
+                primary = _tr(
+                    'Could not reach GitHub. Check your '
+                    'internet connection and try again.')
+            elif 'timed out' in low or 'timeout' in low:
+                primary = _tr(
+                    'Update check timed out. The network may be '
+                    'slow or unreachable. Try again later.')
+            elif ('ssl' in low or 'certificate' in low
+                    or 'cert ' in low):
+                primary = _tr(
+                    'Update check failed: SSL certificate error. '
+                    'Check that your device date and time are '
+                    'correct.')
+            elif ('connection refused' in low
+                    or 'connection reset' in low):
+                primary = _tr(
+                    'Connection to GitHub was refused or reset. '
+                    'The network may be blocking it.')
+            else:
+                primary = _tr(
+                    'Could not check for updates. This usually '
+                    'means your device is not connected to the '
+                    'internet.')
+            return (f'{primary}\n\n'
+                    f'{_tr("Detail")}: {err_str}')
+
+        view = ModalView(
+            size_hint=(0.9, None), height=dp(320),
+            background_color=theme.OVERLAY_DARK,
+            auto_dismiss=False,
+        )
+        box = BoxLayout(
+            orientation='vertical',
+            padding=dp(14), spacing=dp(8),
+        )
+        title = Label(
+            text=_tr('Check for updates'),
+            font_size=sp(16), font_name=_FONT_NAME,
+            color=theme.TEXT, bold=True,
+            size_hint_y=None, height=dp(28),
+        )
+        # Status label inside a ScrollView so long error
+        # messages (raw URLError text appended by
+        # _friendly_error's "Detail:") wrap and stay
+        # reachable — without it a multi-line errno string
+        # ran off the bottom of the modal under the close
+        # button.
+        from kivy.uix.scrollview import ScrollView
+        scroll = ScrollView(size_hint=(1, 1))
+        status = Label(
+            text=_tr('Checking for updates…'),
+            font_size=sp(14), font_name=_FONT_NAME,
+            color=theme.TEXT_DIM,
+            halign='left', valign='top',
+            size_hint=(1, None),
+        )
+        status.bind(
+            width=lambda _w, v:
+                setattr(status, 'text_size', (v - dp(4), None)),
+            texture_size=lambda _w, v:
+                setattr(status, 'height', v[1] + dp(8)),
+        )
+        scroll.add_widget(status)
+        close = Button(
+            text=_tr('Close'),
+            font_size=sp(15), font_name=_FONT_NAME,
+            size_hint_y=None, height=dp(44),
+            background_color=theme.SURFACE,
+            background_normal='',
+            color=theme.TEXT,
+        )
+        close.bind(on_release=lambda *_: view.dismiss())
+        box.add_widget(title)
+        box.add_widget(scroll)
+        box.add_widget(close)
+        view.add_widget(box)
+        view.open()
+        check_for_update(
+            repo=repo,
+            current_version=__version__,
+            on_status=lambda msg: setattr(status, 'text', msg),
+            on_no_update=lambda: setattr(
+                status, 'text',
+                _tr('You are running the latest version.')),
+            on_error=lambda err: setattr(
+                status, 'text', _friendly_error(err)),
+        )
 
     def share_log(self):
         """Share the recorder's log file via Android's share sheet.
@@ -8082,6 +9229,28 @@ class LIFTRecorderApp(App):
         show_past_row.add_widget(past_label)
         content.add_widget(show_past_row)
 
+        # "Go outside filter" — one-shot escape hatch for jumping
+        # to an entry beyond the active cawl_filter (e.g. peer in
+        # a split team needs to spot-check an entry outside their
+        # slot). When checked, OK navigates to the entry whether
+        # or not it's in the queue; the next swipe (either
+        # direction) returns to the filtered queue, snapped to
+        # the closest in-filter entry. Default off — leaving
+        # unchecked preserves the existing "closest in current
+        # filter" fallback semantics.
+        outside_row = BoxLayout(
+            orientation='horizontal', size_hint_y=None,
+            height=dp(40), spacing=dp(8))
+        outside_cb = CheckBox(
+            size_hint_x=None, width=dp(40), active=False)
+        outside_label = Label(
+            text=_tr('Go outside filter'), font_size=sp(14),
+            font_name=_FONT_NAME, halign='left', valign='middle')
+        outside_label.bind(size=lambda w, s: setattr(w, 'text_size', s))
+        outside_row.add_widget(outside_cb)
+        outside_row.add_widget(outside_label)
+        content.add_widget(outside_row)
+
         btn_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(12))
         clear_btn = Button(text=_tr('Clear'), font_size=sp(14))
         ok_btn = Button(text=_tr('OK'), font_size=sp(14),
@@ -8093,16 +9262,16 @@ class LIFTRecorderApp(App):
         popup = Popup(
             title=title,
             content=content,
-            size_hint=(0.8, None), height=dp(240),
+            size_hint=(0.8, None), height=dp(284),
             auto_dismiss=True,
         )
 
         def _apply_past_toggle(checkbox, value):
-            """Flipping the goto-popup checkbox mirrors what the
-            Settings UnrecordedToggle does: invert into
-            only_unrecorded, persist, rebuild queue, refresh UI.
-            Visible immediately so the user sees the effect after
-            dismissing the popup."""
+            """Flip the show-past-work pref. Since 1.52.x this is
+            the only surface for the toggle — the Settings-side
+            UnrecordedToggle was pulled in favour of this more
+            accessible spot. Invert into only_unrecorded, persist,
+            rebuild queue, refresh UI."""
             show_past = bool(value)
             r.only_unrecorded = not show_past
             set_peer_pref('show_past_work', show_past)
@@ -8118,14 +9287,64 @@ class LIFTRecorderApp(App):
                 except ValueError:
                     popup.dismiss()
                     return
-                if has_list_numbers:
-                    if n in num_to_idx:
-                        r.index = num_to_idx[n]
-                    else:
-                        closest = min(num_to_idx, key=lambda k: abs(k - n))
-                        r.index = num_to_idx[closest]
-                else:
-                    n = max(1, min(n, total))
+                # Rebuild the cawl→queue-index map against the
+                # *current* queue, not the popup-time snapshot —
+                # flipping the past-work toggle above rebuilds the
+                # queue underneath us, and a stale map would route
+                # `n in num_to_idx` to a 'closest' fallback in the
+                # old filter.
+                live_map = {}
+                for idx, e in enumerate(r.queue):
+                    cawl = e.get('cawl', '')
+                    if not cawl:
+                        continue
+                    try:
+                        live_map.setdefault(int(cawl), idx)
+                    except ValueError:
+                        continue
+                live_total = len(r.queue)
+                outside = bool(outside_cb.active)
+                # In-filter exact match always wins, regardless of
+                # the outside checkbox — the user named a number,
+                # if it's in the queue, go to it.
+                if n in live_map:
+                    r._one_shot_entry = None
+                    r.index = live_map[n]
+                elif outside:
+                    # One-shot outside the filter: look up the
+                    # entry in the unfiltered model. r.current
+                    # returns the one-shot entry until the next
+                    # swipe, which clears it and snaps back to
+                    # the closest in-filter entry.
+                    target_str = f'{n:04d}'
+                    entry = None
+                    for e in r.db.entries:
+                        if e.get('cawl') == target_str:
+                            entry = e
+                            break
+                    if entry is None:
+                        for e in r.db.entries:
+                            try:
+                                if int(e.get('cawl', '') or 0) == n:
+                                    entry = e
+                                    break
+                            except (TypeError, ValueError):
+                                continue
+                    if entry is not None:
+                        r._one_shot_entry = entry
+                    elif live_map:
+                        closest = min(live_map,
+                                      key=lambda k: abs(k - n))
+                        r._one_shot_entry = None
+                        r.index = live_map[closest]
+                elif live_map:
+                    closest = min(live_map,
+                                  key=lambda k: abs(k - n))
+                    r._one_shot_entry = None
+                    r.index = live_map[closest]
+                elif live_total:
+                    r._one_shot_entry = None
+                    n = max(1, min(n, live_total))
                     r.index = n - 1
                 r._pending_rerecord = False
                 r._notify_ui()
@@ -8136,7 +9355,10 @@ class LIFTRecorderApp(App):
             Does NOT clear cawl_filter / gloss_search /
             only_unrecorded — those are project-load-bearing for
             the wordlist-split workflow. Past-work flag is changed
-            only via the explicit checkbox above."""
+            only via the explicit checkbox above. Clears any
+            active one-shot outside-filter entry so the queue
+            view is what the user lands on."""
+            r._one_shot_entry = None
             if r.queue:
                 r.index = 0
                 r._pending_rerecord = False

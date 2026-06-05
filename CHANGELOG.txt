@@ -1,5 +1,904 @@
 CHANGELOG — A-Z+T Recorder
 
+1.55.17
+  Settings page: filter-summary label also gets the
+  MarqueeLabel treatment. Same reasoning as 1.55.16's
+  gloss-summary swap — long combinations (e.g. CAWL
+  range + gloss-search text + "unrecorded only") stay
+  one line and scroll; short summaries stay static
+  (MarqueeLabel._update_animation early-returns when
+  texture_size[0] <= self.width, so no animation
+  overhead for the common case). markup:True dropped
+  (unused — _update_filter_summary only emits comma-
+  joined plain text) along with text_size:self.size.
+
+1.55.16
+  Settings page: gloss-languages summary now uses
+  MarqueeLabel (the widget from the 1.55.5 gloss-row
+  scroll work) instead of a wrapping Label. Long
+  comma-joined lists of selected langs stay on one
+  line and scroll horizontally; short lists stay
+  static, no animation. The label dropped markup:True
+  (it wasn't being used — _update_gloss_summary just
+  comma-joins display names; nothing inserts markup
+  tags) and text_size:self.size (MarqueeLabel handles
+  its own internal sizing).
+
+1.55.14
+  Streaming LIFT parse for low-memory devices.
+
+  Initial load now uses ET.iterparse + el.clear() to
+  populate self.entries with peak parse memory at
+  ~1× source size, down from ~6× (full DOM + entries
+  list). The full ElementTree is not retained — we
+  hand it back at None and rebuild lazily on the first
+  mutation (set_audio / set_illustration / clean_template
+  / _save) via a new _ensure_dom helper. Once rebuilt,
+  the DOM is held for the rest of the session so the
+  constant-write recorder workflow doesn't re-parse on
+  every save.
+
+  Net effect: cold-load peak drops to entries-only;
+  post-first-save steady-state is unchanged. Full
+  memory win (drop the DOM entirely) awaits a surgical
+  audio-set path — proposed as a daemon-side RPC in
+  azt_collab_client/NOTES_TO_DAEMON.md so the same byte-
+  shape result lives in one canonical implementation
+  across recorder + desktop + viewer.
+
+  Other changes in lift.py:
+    - _ensure_dom is thread-safe (double-checked
+      threading.Lock); set_audio runs on the LIFT-write
+      worker so a concurrent first-save mustn't race-
+      build two trees.
+    - clean_template (template-clone path) and _save
+      (every save) explicitly _ensure_dom before
+      touching self._root / self._tree.
+    - _find_entry calls _ensure_dom, which covers
+      set_audio / set_illustration / bind_orphan_audio's
+      set_audio loop.
+    - _parse runs against the on-disk handle (same as
+      before), so clean_template's re-parse after save
+      still works without coordinating with the
+      rebuilt DOM.
+
+  bind_orphan_audio is filesystem-only (URI projects
+  early-return); on Android — the OOM-risk platform —
+  load no longer touches the DOM at all unless and
+  until the user records.
+
+1.55.13
+  load_lift parse off the main thread.
+
+  A 4 MB LIFT (the en-TH-x-anna project in the field) was
+  taking several seconds of CPU on a slow MTK chip — long
+  enough that Android could ANR-kill the peer mid-load
+  (the "bee" silent crash report at 14:53:43 → 14:54:49
+  fresh launch, no Python traceback). The XML parse,
+  LIFTDatabase setup, RecorderController construction,
+  and initial rebuild_queue all ran inline on the main
+  thread inside load_lift; the loading modal we'd added
+  in 1.55.4 was up the whole time but the touch
+  dispatcher was frozen behind it.
+
+  load_lift is now three phases:
+
+  Phase 1 (main thread, cheap) — path resolution, stale
+  .cawl_image_urls.json sweep, baseline + split-cache
+  resets, langcode capture, spawn worker. Returns
+  immediately so the modal can animate and the touch
+  dispatcher stays live.
+
+  Phase 2 (_load_lift_worker, off main) — LIFTDatabase
+  parse, set_vernlang / clean_template / bind_orphan_
+  audio, RecorderController(...), peer_pref read for
+  show-past-work, initial rebuild_queue. None of this
+  touches Kivy widgets, so the worker has nothing to
+  marshal. Exceptions during init or any of the worker
+  steps schedule _load_lift_error on main (dismiss
+  overlay + show error popup) so the user isn't left
+  staring at a stuck modal.
+
+  Phase 3 (_load_lift_publish, main thread) — install
+  self.recorder, _register_current_project, ContentObs
+  subscription, screen transition, _finish_load (the
+  unified-reveal Clock.schedule_once from 1.55.12),
+  _populate_split_state, image prefetch, auto-publish
+  or backup-warning.
+
+  Side benefit: peer_pref('show_past_work', …) is now an
+  off-main RPC instead of inline on the touch path.
+
+1.55.12
+  Project-load sequencing.
+
+  Previously the user saw four distinct UI states during
+  a project load:
+    1. sync button visible
+    2. loading modal appears
+    3. gear/settings button pops in mid-parse
+    4. entry data + (sometimes) backup-warning modal
+       appear
+
+  Steps 1, 3, and 4 should all happen together when the
+  load is complete, hidden behind the modal until then.
+
+  Two changes:
+
+  - Sync button now gates on app.has_project (same KV
+    pattern as the gear). size_hint_x flips to None +
+    width=0 when has_project is False so the adjacent
+    progress_label button absorbs the space. The sync
+    button appears at the same moment the gear does.
+  - has_project = True moved out of load_lift's inline
+    body into a deferred _finish_load (scheduled via
+    Clock.schedule_once on the same 0.1 s tick that
+    already drove refresh_recorder_ui). _finish_load
+    flips has_project, calls refresh_recorder_ui, then
+    dismisses the loading overlay — all in one frame,
+    so the user sees: modal closes ↔ sync + gear
+    appear ↔ entry data populates as a single visible
+    transition. The synchronous LIFT parse + queue
+    rebuild + db setup all run with the modal still
+    covering the partial-load state.
+  - load_lift's leading _dismiss_loading_overlay() is
+    gone — used to dismiss the modal at the START of
+    the parse, defeating the point of showing it for
+    the user.
+
+1.55.11
+  Update modal — readable error messages.
+
+  - Raw URLError strings ("[Errno 7] No address
+    associated with hostname", etc.) ran off the right
+    edge of the modal and meant nothing to non-
+    developers. New _friendly_error helper recognises
+    the common offline / DNS / timeout / SSL /
+    connection-refused patterns and prepends a plain-
+    English explanation; the raw text is kept as a
+    "Detail:" footer so support requests and logcat
+    grep still have it.
+  - Status label now wraps and lives inside a
+    ScrollView, so a long technical detail no longer
+    disappears under the Close button. Width
+    constraint is (v - dp(4), None) so wrapping is
+    width-driven and the texture height grows; the
+    ScrollView holds the modal's body height and lets
+    the user scroll the message if it still overflows.
+  - Modal width bumped to 0.9 (was 0.85) and height
+    to dp(320) (was dp(200)) so the typical wrapped
+    error fits without needing to scroll.
+
+1.55.10
+  Title-bar order correction — share + Update sit
+  right after the version label, not at the start
+  of the bar:
+      [version] [share] [Update]  …open space…  [X]
+  Version label sized to its text (size_hint_x: None,
+  width: texture_size[0] + dp(16) padding), with a
+  spacer Widget after the action buttons taking
+  size_hint_x: 1 so X stays right-anchored. The
+  action buttons sit immediately to the right of
+  the version label so they're not visually crowded
+  against the close X.
+
+1.55.9
+  Two Update-button fixes.
+
+  - "You are running the latest version" was firing even
+    when the network was off. Cause: _fetch_latest in
+    azt_collab_client.ui.update keeps a per-process
+    release cache with a 5-minute TTL, populated by the
+    bootstrap self-update probe at app startup. The
+    cache hit returned the stored release without ever
+    touching the network, so on_no_update fired instead
+    of on_error. Fix: call
+    azt_collab_client.ui.update.invalidate_release_cache
+    for the recorder repo immediately before invoking
+    check_for_update from the explicit-tap path. The
+    bootstrap path still uses the cache; only the
+    user-tapped Update bypasses it, which is correct —
+    a user-initiated check wants ground truth.
+  - Share + Update buttons moved to the left of the
+    title bar (before the version label) per UX
+    request. Title bar now reads:
+        [share] [Update] [version …………] [X]
+    so the two action buttons aren't visually crowded
+    against the close X.
+
+1.55.8
+  Marquee fixes.
+
+  - Edge pauses now actually wait. 1.55.7 expressed them
+    as no-property `Animation(duration=N)` chained into a
+    Sequence, but in some Kivy versions an Animation with
+    nothing to interpolate completes immediately, which
+    collapsed the pause to zero. Switched both START_PAUSE
+    and END_PAUSE to `Clock.schedule_once` — rock-solid
+    timer regardless of Kivy version. Cycle is now an
+    explicit three-step state machine (pause → scroll →
+    pause → reset → pause → scroll …) with one event live
+    at a time, tracked as self._pending so _cancel_all
+    can tear it down when the row is detached.
+  - Velocity calculation documented inline. It IS constant
+    by construction: scroll_x animates 0→1 over
+    scroll_time = (tw - cw) / SCROLL_SPEED, so per-frame
+    pixel displacement is exactly SCROLL_SPEED px/sec
+    regardless of overflow length. A 300 px overflow
+    takes 3× as long to finish as a 100 px overflow, but
+    both move at the same dp(25) px/sec while moving —
+    longer glosses cycle less often, never faster.
+
+1.55.7
+  Marquee tuning. Bounce-back motion swapped for a
+  one-way scroll: pause at the left, scroll right at
+  constant pixel-per-second rate, pause at the right,
+  instant reset to the left, repeat. The direction
+  change in 1.55.5/.6 was dizzying; one-way matches a
+  marquee sign and lets the eye follow comfortably.
+  Re-armed via on_complete (Animation.repeat would
+  restart with scroll_x already at 1 and nothing left
+  to animate); on_parent cancel still tears the
+  recursion down when the row is detached.
+  Speed lowered to dp(25) px/sec (was dp(40)). It was
+  already mathematically constant across rows in
+  1.55.5 — scroll_time scales with overflow — but the
+  bounce made it feel variable; one-way + slower makes
+  the constancy actually visible.
+  Pause split into START_PAUSE (1.5 s) and END_PAUSE
+  (2.0 s) so the user has a bit more time on the
+  right edge before the reset snap, then a comfortable
+  beat back at the left before motion resumes.
+
+1.55.6
+  Settings title bar reshuffle + explicit Update button.
+
+  - Share-this-app moved from a big body button at the
+    top of the settings page to a dp(44) icon-only
+    button in the title bar, sitting between the
+    version label and the new Update / Close buttons.
+    Same on_release: app.share_apk(); same share_dark
+    icon. Frees a row of vertical space in the body.
+  - Crash fix for 1.55.5: MarqueeLabel's __init__ set
+    self.scroll_type = [], which Kivy's OptionProperty
+    rejects (must be one of ['content'], ['bars'],
+    ['bars','content'], ['content','bars']). Dropped
+    the line — do_scroll_x = do_scroll_y = False plus
+    the on_touch_* overrides already block user
+    scrolling, so leaving scroll_type at its default
+    is fine.
+  - New Update button in the title bar (between the
+    share icon and the Close X). User-initiated check
+    that always shows a modal with the outcome, so the
+    user can distinguish "no newer release", "network
+    down", and "we're already on this version" instead
+    of guessing whether the tap registered. Calls
+    azt_collab_client.ui.check_for_update against
+    kent-rasmussen/azt-recorder; modal status label
+    updates from the helper's on_status (during the
+    download path) / on_no_update / on_error callbacks
+    — they marshal to the UI thread inside the helper,
+    so the lambdas can mutate the label directly. The
+    bootstrap path's silent probe is unchanged.
+  - Version label gets shorten:True, shorten_from:right
+    so a long suite version string doesn't push the
+    new buttons off-screen on narrow devices.
+
+1.55.5
+  Marquee scrolling for overflowing glosses. Long glosses
+  used to wrap onto multiple lines and grow the row's
+  height (1.55.2 fix); they now stay single-line at the
+  fixed dp(70) row height and scroll horizontally instead.
+  Short glosses that fit stay completely static — no
+  animation, no overhead.
+  New widget MarqueeLabel (subclass of ScrollView):
+  display-only (overrides on_touch_* to return False so
+  RecorderScreen's swipe handler still sees touches in
+  the gloss_box swipe zone), rasterises text once, drives
+  scroll_x via a kivy.animation.Animation that pauses at
+  each end. The per-frame work is one float-property
+  update (GPU-side transform) — cheaper than a character
+  ticker, which would re-rasterise SDL_ttf/HarfBuzz on
+  every tick. Animation is cancelled in on_parent when
+  the row is detached (gloss_box.clear_widgets runs on
+  every recorder refresh).
+  Mode is selected by the module-level constant
+  GLOSS_USE_MARQUEE near the KV template. Flip to False
+  to restore the 1.55.2 wrap behaviour without touching
+  any other code; GlossRow.__init__ branches on it and
+  either adds a MarqueeLabel (fixed-height row, scroll
+  on overflow) or a wrapping Label (row height grows
+  with texture).
+  KV side: <GlossRow> no longer hard-codes either
+  branch — it provides a gloss_holder BoxLayout
+  placeholder that the Python __init__ populates.
+
+1.55.4
+  Loading overlay during project load. _auto_load_last_project
+  and _handle_pick both ran load_lift synchronously on the
+  main thread, leaving the recorder screen blank (top bar
+  only — sync indicator + gear) for the duration of the LIFT
+  parse + queue rebuild. Users had no way to tell whether
+  the app was busy or wedged.
+  Both call sites now call _show_loading_overlay with
+  "Loading {name}…" (name = _lang_display_name(langcode), so
+  "Lingala (RDC)" rather than "ln-CD") and defer load_lift
+  by one frame via Clock.schedule_once so the modal paints
+  before the synchronous parse blocks the main thread.
+  load_lift's existing _dismiss_loading_overlay at the top
+  closes it once the parse + RecorderController construction
+  + rebuild_queue have all landed — the next refresh paints
+  the first entry directly. Open-file path (no langcode in
+  the picker result) falls back to the LIFT basename.
+
+1.55.3
+  KV brace-escape fix for the 1.55.2 GlossRow change.
+  `pos_hint: {'center_y': 0.5}` crashed at module import
+  with KeyError: "'center_y'" because KV_TEMPLATE goes
+  through .format(font_name=...) — the literal { ... }
+  got consumed by the outer format() pass. Doubled the
+  braces (`{{'center_y': 0.5}}`) so format() emits the
+  single-braced pos_hint that Kivy's KV parser expects.
+
+1.55.2
+  Two field-feedback fixes.
+
+  - Gloss rows now grow with their text. Previously
+    GlossRow had a fixed dp(70) height; a long gloss
+    (often when several glosses are joined with " / ")
+    wrapped onto a second line that was clipped below
+    the row's rounded background. The inner Label now
+    wraps to the row width and reports its texture
+    height; the row height is max(dp(70),
+    label.height + dp(16)) so short glosses keep the
+    same visual rhythm and long ones stay fully inside
+    the surface. pos_hint:{'center_y':0.5} keeps the
+    gloss vertically centred as the row grows.
+
+  - Multi-second freeze between releasing the record
+    button and being able to swipe is gone on Android.
+    MediaRecorder.stop() flushes the encoder + writes
+    the moov atom; on slow MTK chips and over URI-
+    provider FDs it can block for seconds, and that
+    block sat on the Kivy touch dispatcher in
+    stop_recording's inline _stop_native_recording
+    call. Moved to a worker thread (same pattern the
+    start path already uses):
+      stop_recording captures the MediaRecorder + pfd
+      handles, nulls self._recorder so a fresh start
+      can race in, marks _dirty optimistically, and
+      spawns _stop_record_worker_android.
+      The worker stops+releases the native recorder,
+      runs the post-stop file-size validation and
+      silent-input detection, then schedules
+      _publish_stop_finish on the main thread for the
+      LIFT advertise, UI refresh, and playback
+      schedule. The captured entry (not self.current)
+      is what gets the audio_filename, so a swipe
+      that lands during the worker advertises onto
+      the originally-recorded entry, not the new one.
+      The tap-not-hold path (held < _MIN_HOLD_SEC)
+      uses the same handle-capture + worker pattern
+      via _stop_android_handles_only. iOS and desktop
+      keep the existing synchronous path — their stop
+      isn't slow enough to need the worker.
+      KEEP_SCREEN_ON clear extracted into
+      _clear_keep_screen_on_android so both worker
+      entry points reuse it.
+
+1.55.1
+  Transient-zero guard now survives RecorderController
+  swaps. The diagnostic log confirmed the regression:
+      [split] ts_row rebuild: (4, False) -> (0, False)
+      [split] ts_row rebuild: (0, False) -> (4, False)
+  team_size was reading as 0 from the daemon mid-commit
+  cycle (the same .azt/kv/team_size.txt that keeps
+  showing up in [data-loss-risk] log lines on the daemon
+  side), and the guard's "previous" came from
+  recorder.split_team_size — which is reset to 0 on every
+  _reload_and_restore-spawned fresh RecorderController.
+
+  Fix: app-level _last_known_team_size + _last_known_my_slot
+  caches that survive controller swaps. The transient-zero
+  guard now takes max(recorder.split_team_size,
+  _last_known_team_size) as its previous value. Reset on
+  load_lift so a new project starts blank; updated on
+  every successful non-zero apply. _reload_and_restore
+  also carries split_team_size + split_my_slot to the new
+  controller as belt-and-braces.
+
+  Behavioral consequence: the UI no longer flickers
+  through "Which device is this? [empty]" or "Split
+  across X devices → [picker] → Split across X devices"
+  when LAN connectivity makes the daemon's local file
+  reads transiently fail. Matches the user's principle:
+  the local UI shouldn't degrade because the LAN /
+  internet hit a snag.
+
+1.55.0
+  Slot picker unification — the modal popup ("Which device
+  is this?" fired from _populate_split_state_apply) and the
+  inline filter-modal slot row now share a single renderer.
+
+  - New module-level _render_slot_picker_into(available_row,
+    claimed_column, team_size, my_slot, slots, on_pick,
+    state=None). Builds the available row (free + own,
+    own highlighted via theme.ACCENT) and the claimed-by-
+    other column (one button per line, device name) into the
+    two supplied containers. Optional `state` dict carries
+    a button_map + structure key across calls so consecutive
+    rebuilds with the same partition do in-place colour
+    updates rather than tear-down + recreate.
+  - _show_slot_picker now derives my_slot from peer_id +
+    slots (since recorder.split_my_slot is empty when the
+    popup fires) and calls the shared renderer with
+    state=None. Optimistic split_my_slot mirror added to the
+    popup's _on_pick, matching the inline _on_pick's 1.54.5
+    fix — picking a slot in the popup no longer flashes the
+    user's device name into the claimed-by-other list below
+    while the worker apply lands.
+  - _rebuild_slot_row simplified from ~150 lines to ~30:
+    fetches list_slots, dispatches to the shared renderer
+    with self._slot_picker_state for in-place updates.
+  - _show_filter_overlay now puts a horizontal slot_available
+    BoxLayout + a vertical slot_claimed BoxLayout as
+    children of slot_row (in that order) so the shared
+    renderer has the two containers it expects.
+
+  Same rendering code, same fixes: a bug in one is now a
+  bug in both. Future work on the picker (in-place colour
+  updates, idempotence, prompt wording) lives in one place.
+
+1.54.5
+  Two corrections to the team-size + slot picker flow.
+
+  - "Drops the button + shows my name below, then returns"
+    flash on slot pick: _on_pick_slot calls the synchronous
+    _refresh_split_rows immediately after claim_slot, but
+    recorder.split_my_slot is still the old value at that
+    instant — meanwhile list_slots already shows the new
+    claim under our peer_id. The rebuild treats the just-
+    picked slot as "claimed by another device" → device-
+    name flashes into the claimed column for one frame
+    before the worker apply corrects to is_mine. Fix:
+    optimistically set recorder.split_my_slot to the picked
+    value before _refresh_split_rows runs. Worker apply
+    confirms via peer_id (idempotent) or overwrites to '' on
+    a lost race (picker re-fires, same as before).
+  - Team-size picker cancel button: 1.54.1 added a
+    confirmation popup AFTER picking a number — wrong UX.
+    The user wanted a way to back out of [Change] without
+    picking a new number at all. Picker row now renders
+    [2][3][4][5+][Cancel]; tap Cancel to return to summary
+    mode without writing anything. Number taps apply
+    immediately (no confirmation popup).
+    _confirm_team_size_change / _apply_team_size_change
+    removed; _on_pick_team_size runs project_kv_set
+    directly. New _cancel_team_size_editing helper.
+
+  Picker-unification refactor (one renderer shared between
+  the modal popup and the inline filter slot row) is the
+  next step — paused mid-refactor to ship these two
+  corrections first.
+
+1.54.4
+  "Which device is this?" popup now shows the list of
+  already-claimed slots immediately on open — no more
+  "Show claimed slots too" toggle. The user sees the full
+  team roster (available + claimed-by-other, each with
+  device name) at a glance, picks the right slot in
+  context. Popup height adapts to the actual roster size,
+  capped at 92% of window height. The toggle button and
+  its one-shot _reveal_claimed handler are gone.
+
+1.54.3
+  - Slot row button colors now update in place when the
+    structural shape is unchanged (same team_size + same
+    set of available + same set of claimed-by-other
+    devices). Previously every my_slot change triggered a
+    full clear_widgets() + recreate, flashing through a
+    one-frame all-SURFACE state. New _slot_row_buttons map
+    holds widget refs keyed by k_str; the rebuild compares
+    structure-key fingerprints (top_set + claimed_set), and
+    when they match it just rewrites background_color on
+    the existing buttons. Structural changes (team_size
+    flipped, a peer claimed/released) still take the full
+    rebuild path.
+  - Diagnostic [split] ts_row rebuild log line emitted on
+    every team_size_row transition, printing the
+    (prev → new) state-key pair so flicker triggers
+    (transient team_size=0, editing flips, modal first-
+    open) are visible in logcat.
+  - Settings gear button hidden + disabled until a project
+    loads (new app.has_project BooleanProperty, set True
+    at the end of load_lift). Reaching Settings in the
+    no-project state ran _hide_box_tree on db_settings_box;
+    1.54.2 fixed restoration, but blocking access entirely
+    avoids the path. Gear reappears the moment the project
+    is ready.
+
+1.54.2
+  Gloss + Filter toggle buttons (and the rest of
+  db_settings_box) restore correctly when a project loads
+  after the no-project state. _hide_box_tree was zeroing
+  every descendant's height so it couldn't intercept
+  touches while no project was loaded, but nothing put
+  them back when has_db transitioned to True — children
+  stayed at height=0 and minimum_height summed to ~zero,
+  leaving the box visually empty.
+
+  Fix: _hide_box_tree now stashes each descendant's prior
+  (height, opacity) on widget._saved_heights, and a new
+  _show_box_tree restores them. on_enter calls
+  _show_box_tree before applying the
+  has_db=True branch.
+
+  Pre-existing bug — the no-project path predates the
+  filter modal work — but only bites users who reach
+  Settings while no project is loaded, then load a
+  project, then return to Settings.
+
+1.54.1
+  Two fixes.
+
+  - Transient team_size=0 ignored. The daemon's
+    project_kv_get('team_size') was returning '' during
+    commit cycles (matches the [data-loss-risk] log entries
+    for .azt/kv/team_size.txt — the file is sometimes
+    uncommittable and a peer read races the daemon's own
+    rewrite). Each empty read would apply team_size=0,
+    flicker the ts_row from "Split across N devices" to
+    the [2][3][4][5+] picker and back, AND clear the
+    cawl_filter field because the split-compute branch
+    dropped to its no-slot fallback. _populate_split_state_apply
+    now ignores a 0 read when the previous applied
+    team_size was non-zero — the team_size value doesn't
+    transition back to 0 without an explicit unset
+    daemon-side, so a 0 between known non-zero values is
+    a read race.
+  - Confirmation popup before changing team_size. Tapping
+    [Change] then a new number used to commit immediately —
+    one accidental tap reshuffled every device's slot
+    range with no "are you sure?" gate. New
+    _confirm_team_size_change popup shows "Change team
+    size from {prev} to {n}? This updates the slot range
+    for every device on the team." with Cancel + Change
+    buttons. Cancel returns to summary mode without
+    writing; Change runs the daemon project_kv_set and
+    re-populates as before. Tapping the already-current
+    value bounces back to summary mode without showing the
+    popup.
+
+1.54.0
+  Filter words modal rewritten in the gloss-overlay
+  pattern: fresh widgets built each open, no
+  re-parenting of the inline KV widget tree.
+
+  - _show_filter_overlay builds a ModalView with its own
+    CAWL TextInput, gloss-search TextInput, team_size_row
+    BoxLayout, slot_row BoxLayout, and OK button. Widget
+    refs stashed on self._filter_modal_widgets so the
+    daemon-driven rebuild path can target them.
+  - _rebuild_team_size_row / _rebuild_slot_row /
+    _apply_slot_row_height now operate on the modal's
+    widgets (via _filter_modal_widgets) rather than the
+    inline ones (via self.ids). When the modal isn't open
+    they're no-ops — the inline panel is dead weight, the
+    progress-text top-bar reads recorder.split_* directly.
+  - _refresh_split_rows likewise gates on
+    _filter_modal_widgets and only fires the deferred row
+    rebuilds when the modal is open.
+  - on_kv_post still collapses the inline panel so its
+    children's natural heights don't bleed taps into the
+    Filter words button above, but no longer detaches /
+    re-parents anything — every widget stays rooted in
+    its KV-defined position. The 1.53.0/1.53.1/1.53.2
+    WeakRef-GC crashes can't happen because nothing's
+    ever detached.
+  - The Settings page layout no longer reflows when the
+    modal opens or closes (the modal is its own widget
+    tree). The slot-pick flicker the user reported on the
+    inline panel — caused by the
+    BoxLayout-in-ScrollView relayout chase from
+    db_settings_box's minimum_height — is gone.
+
+  Inline KV filter_panel + its children stay in the
+  widget tree but at height=0 / opacity=0 / disabled,
+  never visible or interactive. Removed eventually; kept
+  now to avoid disturbing surrounding KV.
+
+1.53.2
+  Real fix for the 1.53.0/1.53.1 ReferenceError crash on
+  entering Settings. The 1.53.1 strong-ref attribute kept
+  the panel widget itself alive, but Kivy's parent→children
+  strong-ref chain alone doesn't keep descendants alive
+  when the panel is detached — self.ids' WeakRefs to
+  cawl_input / gloss_search_input / slot_row still went
+  dead after GC.
+
+  Durable fix: keep filter_panel rooted in the live widget
+  tree at all times. on_kv_post records the panel's inline
+  anchor (parent + child-index) but does NOT detach it.
+  _open_filter_modal detaches the panel only for the
+  duration of the open modal, and on_dismiss re-attaches it
+  to the recorded anchor before applying filter edits and
+  collapsing heights. The inline-collapse path (the original
+  _collapse_filter_panel, which zeros every child's height
+  to avoid the touch-bleed Kivy quirk) is reinstated for
+  the inline state.
+
+1.53.1
+  Crash fix for 1.53.0's filter modal: navigating to
+  Settings raised ``ReferenceError: weakly-referenced
+  object no longer exists`` from ConfigScreen.on_enter at
+  the ``if cawl_in:`` check.
+
+  Root cause: on_kv_post detached filter_panel from
+  db_settings_box but didn't hold a strong reference. The
+  panel was the only thing keeping its child widgets
+  (cawl_input, gloss_search_input, slot_row, …) alive
+  via the Kivy parent→children strong-ref chain.
+  ``self.ids`` is WeakRef-backed, so after the detach
+  Python GC'd the panel and every ``self.ids.get(...)``
+  returned a dead WeakProxy. The next boolean-check on
+  one of those proxies crashed the app.
+
+  Fix: stash the detached panel on
+  ``self._filter_panel_widget`` so it stays alive between
+  opens. _open_filter_modal uses the strong ref directly
+  when available, falling back to ids.get() defensively.
+
+1.53.0
+  Filter words is a modal now, matching Gloss languages.
+
+  - Tapping "Filter words" opens a ModalView containing the
+    same CAWL input, gloss search, split team_size row, slot
+    row, and OK button as the previous inline panel. The OK
+    button (or tap-outside) dismisses the modal and applies
+    edits.
+  - Implementation: re-parent the existing filter_panel
+    widget into the modal at open and back out at dismiss,
+    rather than rebuild from scratch. Every existing
+    `self.ids.get('cawl_input')` / slot-row id reference
+    keeps working; _refresh_split_rows / _rebuild_slot_row /
+    the on_release bindings on every slot button are
+    unchanged.
+  - filter_panel is detached from db_settings_box in
+    on_kv_post so it lives parent-less from the get-go. No
+    inline-collapse path means no
+    BoxLayout-with-height-0-and-natural-height-children to
+    paper over.
+  - Why: consistency with Gloss languages, OK button feels
+    purposeful at the bottom of a dialog instead of stranded
+    halfway down the settings page, AND no more parent-
+    layout dependency on db_settings_box →
+    no more ScrollView-relayout-quirk that caused taps to
+    land on stale positions / row beneath flickered.
+
+  Removed: toggle_filter_panel's debug prints; the
+  obsolete db_settings_box.height-refresh dance (the modal
+  is its own widget tree, db_settings_box never grows from
+  filter content).
+
+1.52.1
+  Two UI cleanups.
+
+  - Slot-picker flicker fixed. Tapping [k/n] in the
+    "Which device is this?" modal used to tear down and
+    rebuild both the "Split across N devices [Change]"
+    row and the slot row beneath, sometimes twice in
+    rapid succession (once from the immediate pick →
+    populate, once from the ContentObserver wakeup after
+    the daemon commits the slot file). The user's freshly-
+    picked slot would also briefly appear in the row
+    below and then disappear, because the optimistic-
+    claim adoption was being cleared after one apply
+    cycle.
+    Three changes:
+      (a) _rebuild_team_size_row is idempotent — caches
+          (team_size, editing) and skips the tear-down
+          when nothing's changed.
+      (b) _rebuild_slot_row is idempotent — caches a
+          fingerprint of (team_size, my_slot, claims) and
+          skips the tear-down when the visible state
+          matches what's already rendered.
+      (c) Optimistic claim adoption now persists across
+          applies until the daemon-side state is
+          observable: either our peer_id appears in
+          list_slots (confirmation, clears pending) or
+          some other peer's claim now sits at the pending
+          slot key (lost the race, clears pending and
+          fires the picker). Empty claim at the pending
+          key means the daemon hasn't yet flushed —
+          keep adopting.
+
+  - "Show past work" toggle pulled from Settings → Filter
+    panel. The same toggle has lived in the Go-To popup
+    since 1.51.0 and is more accessible there (one tap
+    from the recorder bar versus walking through
+    Settings → Filter words). Removed: the
+    UnrecordedToggle widget instance, the class, the KV
+    root rule, and the toggle_show_past handler. The
+    filter_bottom_row now holds just the OK button.
+
+1.52.0
+  Three things in this batch.
+
+  - Filter words tap not opening / random slot moves (Reasons
+    1 + 2 from 1.51.4's diagnosis). The 1.51.2 slot_row
+    restructure left nested children (the horizontal top sub-
+    row, per-claim buttons) inside slot_row at collapse time;
+    zeroing slot_row.height alone didn't hide them, so they
+    rendered at indeterminate positions and swallowed taps on
+    the toggle buttons above — same failure mode that
+    cawl_label / gloss_search_label zeroing already guards
+    against, just one level deeper.
+    Fix: _collapse_filter_panel now clears slot_row's
+    children; _rebuild_slot_row skips populating when
+    _filter_open is False so a deferred rebuild after collapse
+    doesn't re-introduce the children.
+
+  - Go-To dialog gains a "Go outside filter" checkbox. When
+    checked, OK navigates to a CAWL number not present in the
+    current filtered queue (split-team peer spot-checking an
+    entry outside their slot, etc.). The next swipe — either
+    direction — returns to the filtered queue, snapped to the
+    closest in-filter entry by CAWL number. RecorderController
+    grew a _one_shot_entry field; r.current returns it while
+    set; go_next / go_prev clear it via _snap_back_from_one_shot.
+
+  - NOTES_TO_DAEMON: filed a polite question about lan_peer_id
+    reliability — recorder 1.50.2's F1 removal of the
+    device_name fallback (per § 21 Locked semantic #2) is
+    landing on field phones where lan_peer_id() returns '',
+    re-introducing the original [k/n]-missing symptom that
+    1.49.1 fixed. Asks whether the daemon now guarantees a
+    non-empty peer_id post-claim, or what the peer should do
+    in the meantime.
+
+1.51.4
+  Slot-picker modal: when the prompt asks "Which device is
+  this?", this device's existing in-range claim now appears
+  in the available row (highlighted with the accent colour)
+  instead of being buried in the "Show claimed slots too"
+  reveal. Tapping it is idempotent — claim_slot against the
+  same slot just refreshes the timestamp. Stale claims
+  outside the new team_size range are dropped from the
+  picker entirely (the release_stale_slot worker is already
+  cleaning them up daemon-side; showing slot 6 in a 4-team
+  picker would confuse the user). The "Show claimed slots
+  too" reveal now strictly lists other peers' claims, so
+  the toggle no longer appears when this device is the only
+  claimant.
+
+1.51.3
+  Two related fixes that landed together:
+
+  - Stale-slot detection. When team_size shrinks below this
+    device's claimed slot (e.g. claim at slot 6, new
+    team_size 4 → "[6/4]" nonsense in the progress label),
+    the apply step now treats this as displacement. The
+    stale slot is released daemon-side via release_slot
+    (worker thread per § 17c Rule 7), my_slot clears
+    locally, and the slot picker fires with a new prompt
+    "The team size changed. Pick your new recording slot."
+    Previously the recorder rendered the inconsistent state
+    silently — the user's old claim was invisible (slot 6
+    wasn't iterated in the 1..4 button range), no other
+    claims to list either, and no picker fired because
+    my_slot was still truthy.
+  - Tap-routing bug on the filter panel's slot row + the
+    gloss-languages overlay button. The 1.51.2 restructure
+    of slot_row grew filter_panel by the count of claimed-
+    by-other buttons but db_settings_box's tracked
+    minimum_height didn't propagate the change. Kivy's
+    BoxLayout-inside-ScrollView relayout ordering is touchy
+    (toggle_filter_panel already works around the same
+    quirk). Without the explicit refresh, touch dispatch
+    landed on stale widget positions — the user had to tap
+    multiple times before Kivy's next layout pass settled.
+    _apply_slot_row_height now triggers the same
+    box.height = box.minimum_height refresh after growing
+    filter_panel.
+
+1.51.2
+  Settings → Filter panel slot row no longer crams claimed-by-
+  other-device slots into the same horizontal row as the
+  available ones. Previous behaviour: a 4-device team with
+  3 claimed slots produced a single horizontal row of
+  narrow buttons, device-name labels truncated to "Kim..."
+  and overlapping. The 1.51.0 fix targeted the modal
+  _show_slot_picker (used only on first-time / displacement
+  claim) — wrong code path; the inline row in
+  ConfigScreen's filter panel is what the user actually
+  sees day-to-day.
+
+  - slot_row in KV is now vertical (was horizontal).
+  - _rebuild_slot_row partitions slots into:
+    * top row (horizontal): available slots + this device's
+      own claim if any, tappable for first-time / re-pick.
+    * vertical column underneath: one button per claimed-by-
+      other slot, full-width, device name label intact.
+      Still tappable (dead-device-replacement flow unchanged).
+  - slot_row.height + filter_panel.height adjust dynamically
+    to the count of claimed-by-other rows via a new
+    _apply_slot_row_height helper. Baseline panel-height in
+    _refresh_split_rows remains the dp(48) assumption; the
+    helper applies the delta after the rebuild counts the
+    claimed entries.
+
+1.51.1
+  Per-source cache telemetry (CLIENT_INTEGRATION.md § 10,
+  daemon 0.50.21+). Active-prefetch indicator now shows
+  "· via LAN" or "· via Internet" so the user can see
+  whether the NOTES #3 LAN-share path is producing hits —
+  bytes from a paired peer's cache are free; bytes from
+  GitHub cost cellular on a metered link, and "Caching
+  images: 45/1700" alone doesn't say which.
+
+  Picks up four new fields from cawl_cache_status:
+  from_cache, from_lan, from_upstream, last_source. The
+  state-change log includes the source deltas (Δlan / Δwan
+  / Δcache) so the size of the LAN-share win is visible in
+  logcat. Pre-0.50.21 daemons leave the fields empty and the
+  indicator falls through to the existing "network in use"
+  wording — no behaviour change against older servers.
+
+  Two new sentence-shaped msgids ('Caching images: X / Y
+  · via LAN' / '· via Internet (please stay online)') filed
+  to NOTES_TO_DAEMON.md for inclusion in the client
+  catalog; until they land, non-English peers see the
+  English string when LAN-share is producing hits.
+
+1.51.0
+  UX issues surfaced after LAN sharing landed.
+
+  - Slot picker now lists claimed slots vertically (one per
+    line, labelled with the claiming device) underneath the
+    horizontal row of available slots. Previously every slot
+    rendered in a single horizontal row, so when "Show claimed
+    slots too" was tapped on a 4- or 5-device team the
+    device-name labels collided into an unreadable jumble.
+    Popup height adapts on reveal.
+
+  - "Show past work" toggle in the Go To dialog now actually
+    moves the user to past-work entries when toggled and a
+    number outside the current filter is entered. The cawl→
+    queue-index map is rebuilt against the post-toggle queue
+    inside _go (was captured at popup-open and referenced the
+    stale, pre-toggle queue). Previous behavior: toggling on
+    + entering a past number jumped to the nearest entry in
+    the OLD filter — looked like the toggle was ignored.
+
+  - _populate_split_state's in-flight guard now queues-at-most-
+    one instead of dropping re-entrant calls. team_size changes
+    now persist visually — the prior version dropped the
+    post-mutation populate if a filter-panel-expand populate
+    was still in flight, leaving the displayed split state
+    stuck at the old team_size until the next manual refresh.
+    Worker's finally drains the pending flag and re-fires one
+    follow-up fetch.
+
+  - Swipe-to-next no longer freezes the UI while the daemon's
+    project_lock is held by an incoming LAN receive-pack.
+    _auto_commit_sync moved to a worker thread per § 17c
+    Rule 7; commit_project still debounces and runs whenever
+    the lock clears, but the swipe returns immediately.
+
+  - Record-stop no longer freezes the UI on the LIFT write.
+    set_audio (daemon-bound on URI projects) moved to a
+    worker; the entry dict is updated optimistically so the
+    auto-playback finds the audio without waiting for the
+    LIFT write to land. Failures still queue to
+    _pending_lift_saves for auto-retry, same toast surface.
+
+  - Playback no longer freezes the UI on MediaPlayer.prepare.
+    setDataSource + prepare run on a worker (Android URI
+    projects hit ContentResolver.openFileDescriptor which is
+    a daemon round-trip); mp.start() and the playback-lifetime
+    Clock callbacks marshal back to main so widget state
+    stays single-threaded.
+
 1.50.2
   Contract-conformance pass after re-reading
   CLIENT_INTEGRATION.md § 14a / § 17b / § 17c / § 21.
