@@ -57,22 +57,75 @@ def _lang_display_name(code):
 #             Also tries /sdcard/ (may need MANAGE_EXTERNAL_STORAGE on API 30+).
 # On desktop: ~/azt_recorder.log
 _LOG_PATH = ''  # resolved by _setup_logging; read by App.share_log
+_LOG_RETENTION_DAYS = 3
+_PEER_ID_SHORT_CACHE = None
+
+
+def _peer_id_short_for_log():
+    """Local device's 8-char peer-id tag, or '????????' if the
+    daemon's `lan_peer_id` RPC isn't reachable yet. Real values
+    cache; the fallback doesn't, so the next caller after the
+    daemon comes up picks up the proper tag."""
+    global _PEER_ID_SHORT_CACHE
+    if _PEER_ID_SHORT_CACHE:
+        return _PEER_ID_SHORT_CACHE
+    try:
+        info = azt_collab_client.lan_peer_id() or {}
+        hex_str = (info.get('peer_id') or '')
+        if hex_str:
+            _PEER_ID_SHORT_CACHE = hex_str[:8]
+            return _PEER_ID_SHORT_CACHE
+    except Exception:
+        pass
+    return '????????'
+
+
+def _sweep_old_recorder_logs(directory, retention_days):
+    """Delete azt_recorder-<peer_id>-YYYY-MM-DD_log.txt files
+    older than `retention_days` from `directory`. Matches both
+    real hex tags and the '????????' fallback in the peer-id
+    slot, and accepts both `_log.txt` (new) and `.log` (legacy
+    1.57.0) suffixes so a peer upgrading from 1.57.0 doesn't
+    leak its old files."""
+    import re
+    import datetime as _dt
+    pat = re.compile(
+        r'^azt_recorder-[A-Za-z0-9?]{8}-'
+        r'(\d{4}-\d{2}-\d{2})(?:_log\.txt|\.log)$')
+    cutoff = _dt.date.today() - _dt.timedelta(days=retention_days)
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        m = pat.match(name)
+        if not m:
+            continue
+        try:
+            d = _dt.date.fromisoformat(m.group(1))
+        except ValueError:
+            continue
+        if d < cutoff:
+            try:
+                os.remove(os.path.join(directory, name))
+            except OSError:
+                pass
 
 
 def _setup_logging():
     global _LOG_PATH
+    import datetime as _dt
     _on_android = os.path.exists('/system/build.prop')
-    candidates = []
+    dir_candidates = []
     if _on_android:
-        # ANDROID_PRIVATE is set by p4a bootstrap, e.g. /data/user/0/org.x.y/files
-        # This is the app's private filesDir — exists on every
-        # Android install regardless of SD card presence.
+        # ANDROID_PRIVATE is set by p4a bootstrap, e.g.
+        # /data/user/0/org.x.y/files — app's private filesDir,
+        # exists on every Android install regardless of SD card.
         android_private = os.environ.get('ANDROID_PRIVATE', '')
         if android_private:
-            candidates.append(os.path.join(android_private, 'azt_recorder.log'))
-        # Defensive fallback when ANDROID_PRIVATE somehow isn't set:
-        # query Context.getFilesDir() via jnius directly. Always works
-        # on Android, doesn't depend on env-var plumbing.
+            dir_candidates.append(android_private)
+        # Defensive fallback when ANDROID_PRIVATE somehow isn't
+        # set: query Context.getFilesDir() via jnius directly.
         try:
             from jnius import autoclass
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
@@ -80,49 +133,86 @@ def _setup_logging():
             if activity is not None:
                 files_dir = str(activity.getFilesDir().getAbsolutePath())
                 if files_dir:
-                    candidates.append(
-                        os.path.join(files_dir, 'azt_recorder.log'))
+                    dir_candidates.append(files_dir)
         except Exception:
             pass
-        # /sdcard fallback. Unreliable on API 30+ (scoped storage)
-        # but cheap to try; the env-var path above is the normal one.
-        candidates.append('/sdcard/azt_recorder.log')
+        dir_candidates.append('/sdcard')
     else:
-        candidates += [os.path.join(os.path.expanduser('~'), 'azt_recorder.log')]
+        dir_candidates.append(os.path.expanduser('~'))
+
+    pid = _peer_id_short_for_log()
+    today = _dt.date.today().isoformat()
+    filename = f'azt_recorder-{pid}-{today}_log.txt'
+
     fh = None
-    for path in candidates:
+    chosen_dir = None
+    for d in dir_candidates:
+        path = os.path.join(d, filename)
         try:
-            # Rotate the previous session's log out of the way before
-            # truncating — `<path>.prev` keeps the prior session
-            # available after a crash + relaunch, so the user can still
-            # share the log that captures the original failure.
-            if os.path.exists(path):
-                prev = path + '.prev'
-                try:
-                    if os.path.exists(prev):
-                        os.remove(prev)
-                    os.replace(path, prev)
-                except OSError:
-                    pass
-            fh = open(path, 'w', buffering=1, encoding='utf-8')
+            fh = open(path, 'a', buffering=1, encoding='utf-8')
             _LOG_PATH = path
+            chosen_dir = d
             break
         except OSError:
             continue
     if fh is None:
         return  # nowhere to write; rely on adb logcat
 
+    _sweep_old_recorder_logs(chosen_dir, _LOG_RETENTION_DAYS)
+
     class _Tee:
-        """Write to both the original stream and the log file."""
+        """Tee writes to the original stream + today's log file,
+        line-buffered, with `[YYYY-MM-DD HH:MM:SS,mmm <peer_id>]`
+        prepended at line starts. Re-checks the date on every
+        write so a long session rolls into a new per-day file at
+        local midnight."""
         def __init__(self, original):
             self._orig = original
+            self._buf = ''
+            self._cur_fh = fh
+            self._cur_date = today
+        def _maybe_roll(self):
+            now_date = _dt.date.today().isoformat()
+            if now_date == self._cur_date:
+                return
+            new_name = (
+                f'azt_recorder-{_peer_id_short_for_log()}-'
+                f'{now_date}_log.txt')
+            new_path = os.path.join(chosen_dir, new_name)
+            try:
+                new_fh = open(new_path, 'a', buffering=1,
+                              encoding='utf-8')
+            except OSError:
+                return
+            try: self._cur_fh.close()
+            except Exception: pass
+            self._cur_fh = new_fh
+            self._cur_date = now_date
+            global _LOG_PATH
+            _LOG_PATH = new_path
+            _sweep_old_recorder_logs(chosen_dir, _LOG_RETENTION_DAYS)
+        def _prefix(self):
+            now = _dt.datetime.now()
+            ms = now.microsecond // 1000
+            return (f'[{now.strftime("%Y-%m-%d %H:%M:%S")},'
+                    f'{ms:03d} {_peer_id_short_for_log()}]')
         def write(self, data):
-            try: fh.write(data)
-            except Exception: pass
-            try: self._orig.write(data)
-            except Exception: pass
+            if not data:
+                return
+            self._buf += data
+            if '\n' not in self._buf:
+                return
+            self._maybe_roll()
+            lines = self._buf.split('\n')
+            self._buf = lines[-1]
+            for line in lines[:-1]:
+                stamped = f'{self._prefix()} {line}\n'
+                try: self._cur_fh.write(stamped)
+                except Exception: pass
+                try: self._orig.write(stamped)
+                except Exception: pass
         def flush(self):
-            try: fh.flush()
+            try: self._cur_fh.flush()
             except Exception: pass
             try: self._orig.flush()
             except Exception: pass
@@ -138,7 +228,9 @@ def _setup_logging():
         _orig_hook(etype, evalue, etb)
     sys.excepthook = _hook
 
-    print(f'[LOG] azt_recorder starting — log: {path}', flush=True)
+    print(f'[LOG] azt_recorder starting — log: {_LOG_PATH}',
+          flush=True)
+
 
 _setup_logging()
 
@@ -4193,6 +4285,22 @@ class RecorderController:
         #     event doesn't flip our state machine.
         self._recording_poll_event = None
         self._max_amplitude_seen = 0
+        self._min_amp_nonzero = None
+        # Silent-input diagnostic counters (1.55.25+). Reset on
+        # every start_recording; read in the stop worker so the
+        # toast suffix + logcat can distinguish broken
+        # getMaxAmplitude vs poll starvation vs OS mic-mute vs
+        # peripheral routing — see CHANGELOG.
+        self._poll_count = 0
+        self._poll_zero_count = 0
+        # 1.55.27 calibration instrumentation: keep every per-poll
+        # amplitude so the stop worker can compute percentiles
+        # (p5/p10/p20/p30/p40/median/mean) and we can pick the
+        # statistic that best discriminates silent / handover /
+        # whisper / speech in field data. Memory is bounded:
+        # 50 ms polling × 60 s cap → ~1200 ints.
+        self._poll_amps = []
+        self._mic_mute_start = None
 
         # Gloss languages — `all_gloss_langs` is what the LIFT
         # actually has; `active_gloss_langs` is the user's pick. The
@@ -4525,14 +4633,37 @@ class RecorderController:
     # — a silent failure mode observed on flaky MediaTek HAL builds.
     _POST_STOP_MIN_RATIO = 0.25
 
-    # Peak MediaRecorder.getMaxAmplitude (Android, 0-32767)
-    # below which we treat the take as silent input. Speech
-    # routinely peaks in the thousands; a sub-100 ceiling is
-    # well above any real noise floor and well below normal
-    # voice. Used by ``_poll_recording`` + the post-stop
-    # silent-input branch to detect "another app has the mic"
-    # cases (Zoom, phone calls, voice assistants).
-    _SILENT_AMP_THRESHOLD = 100
+    # Hard floor for the silent-input detector. The actual
+    # threshold is computed per-recording as
+    # ``max(_SILENT_AMP_FLOOR, _SILENT_MED_RATIO * median_poll)``
+    # so a device with a high ambient noise floor (e.g. a
+    # tablet reading ~380 on AC-only background) still flags
+    # genuine silent recordings. The floor of 100 covers the
+    # degenerate case where no polls landed or the median is
+    # zero (broken-getMaxAmplitude device). See
+    # ``docs/Signal_to_noise_sampling.md`` for the calibration
+    # data behind the constants.
+    _SILENT_AMP_FLOOR = 100
+    # Multiplier over the per-recording median amplitude. Picked
+    # as the geometric mean of the calibration data's silent /
+    # pass boundary ratios (16.0 and 44.6 at 25 ms polling),
+    # ≈ 26.7, rounded to 27 for equal proportional margin on
+    # both sides. See ``docs/Signal_to_noise_sampling.md``.
+    _SILENT_MED_RATIO = 27
+    # Hard ceiling on max_amp for considering a recording
+    # silent at all. Above this peak the recording is assumed
+    # to be real audio regardless of median — the linear
+    # `27 × med` rule is only data-supported up to the
+    # calibration's worst silent max of 4614 (tablet#2). 7000
+    # sits 52 % above that, well below the lowest-max pass
+    # case where the ratio rule still does the work, and
+    # avoids the 1214-median cliff where `27 × med` would
+    # otherwise exceed the 16-bit PCM amplitude cap of 32767.
+    # Production trigger: a field user's good recording with
+    # max=30582 / med=2036 (ratio 15) was false-positive
+    # flagged because `27 × 2036 = 54972` was vacuously > any
+    # achievable max. See ``docs/Signal_to_noise_sampling.md``.
+    _SILENT_MAX_CEILING = 7000
 
     # Backstop for ``setMaxDuration(60_000)``: MediaRecorder
     # stops itself at the cap, but the peer state machine
@@ -4710,8 +4841,24 @@ class RecorderController:
         # concerns: amplitude tracking (for silent-input
         # detection) and the setMaxDuration backstop.
         self._max_amplitude_seen = 0
+        # _min_amp_nonzero stays None until we see a non-zero
+        # getMaxAmplitude reading; on broken-API devices that
+        # always return 0 we keep it None and fall back to the
+        # fixed floor at silent-check time.
+        self._min_amp_nonzero = None
+        self._poll_count = 0
+        self._poll_zero_count = 0
+        self._poll_amps = []
+        self._mic_mute_start = self._read_mic_mute()
+        # 25 ms native polling — 1.55.29 calibration. The stop
+        # worker also computes coalesced views at n=2 (50 ms
+        # equivalent) and n=4 (100 ms equivalent) by taking
+        # max over consecutive groups, since getMaxAmplitude
+        # is itself a max-over-window operation: max(max(w1),
+        # max(w2)) = max over (w1 ∪ w2). One run captures all
+        # three sample-rate worlds for a clean comparison.
         self._recording_poll_event = Clock.schedule_interval(
-            self._poll_recording, 0.5)
+            self._poll_recording, 0.025)
         # Diagnostic — incident logs (e.g. 1.46.43 "60 s
         # wedge" report) couldn't tell whether the worker had
         # reached this point without a marker.
@@ -4803,6 +4950,14 @@ class RecorderController:
         if platform == 'android' and self._recorder is not None:
             try:
                 amp = self._recorder.getMaxAmplitude()
+                self._poll_count += 1
+                self._poll_amps.append(amp)
+                if amp == 0:
+                    self._poll_zero_count += 1
+                else:
+                    if (self._min_amp_nonzero is None
+                            or amp < self._min_amp_nonzero):
+                        self._min_amp_nonzero = amp
                 if amp > self._max_amplitude_seen:
                     self._max_amplitude_seen = amp
             except Exception:
@@ -4940,12 +5095,23 @@ class RecorderController:
         record_ok = self._record_ok
         entry = self.current
         guid = (entry.get('guid', '') if entry else '')
+        poll_count = self._poll_count
+        poll_zero_count = self._poll_zero_count
+        min_amp_nonzero = self._min_amp_nonzero
+        poll_amps = self._poll_amps
+        # Hand the list off — recorder allocates a fresh empty
+        # list at the next start so this one is owned by the
+        # worker from here on.
+        self._poll_amps = []
+        mic_mute_start = self._mic_mute_start
         self._record_started_at = None
         import threading
         threading.Thread(
             target=self._stop_record_worker_android,
             args=(recorder, pfd, held, audio_path, profile_key,
-                  max_amp, record_ok, entry, guid),
+                  max_amp, record_ok, entry, guid,
+                  poll_count, poll_zero_count, min_amp_nonzero,
+                  poll_amps, mic_mute_start),
             daemon=True, name='stop-record').start()
 
     def _stop_android_handles_only(self, recorder, pfd):
@@ -4972,10 +5138,39 @@ class RecorderController:
 
     def _stop_record_worker_android(self, recorder, pfd, held,
                                     audio_path, profile_key, max_amp,
-                                    record_ok, entry, guid):
+                                    record_ok, entry, guid,
+                                    poll_count=0, poll_zero_count=0,
+                                    min_amp_nonzero=None,
+                                    poll_amps=None,
+                                    mic_mute_start=None):
         """Run the blocking native stop + post-stop checks off the
         main thread. Publishes back to main thread via
         _publish_stop_finish for the LIFT advertise + UI work."""
+        active_mic = self._read_active_mic(recorder)
+        # Adaptive silent threshold: max(floor, ratio * median
+        # of all per-poll amplitudes). Median picked over min
+        # /percentile after the 1.55.26-29 calibration sweep —
+        # see ``docs/Signal_to_noise_sampling.md``. Falls back
+        # to the floor when median is 0 or no polls landed
+        # (broken-API devices, very short holds).
+        stats = self._poll_amp_stats(poll_amps or [])
+        med = stats['med']
+        if med is None or med == 0:
+            silent_threshold = self._SILENT_AMP_FLOOR
+        else:
+            silent_threshold = max(
+                self._SILENT_AMP_FLOOR,
+                self._SILENT_MED_RATIO * med)
+        print(f'[record] stop: max_amp={max_amp} held={held:.2f}s '
+              f'profile={profile_key} threshold={silent_threshold} '
+              f'(floor={self._SILENT_AMP_FLOOR} '
+              f'ratio={self._SILENT_MED_RATIO}× '
+              f'med={med} mean={stats["mean"]} '
+              f'ceiling={self._SILENT_MAX_CEILING}) '
+              f'min_nz={min_amp_nonzero} '
+              f'polls={poll_count} zeros={poll_zero_count} '
+              f'mic_mute_start={mic_mute_start} mic={active_mic}',
+              file=sys.stderr, flush=True)
         if recorder:
             try:
                 recorder.stop()
@@ -5020,13 +5215,19 @@ class RecorderController:
                     self._degrade_profile(profile_key)
         # Silent-input detection (the encoder produces a correctly-
         # sized M4A even when the mic input is silence, so the file-
-        # size check above passes).
+        # size check above passes). The ceiling guard short-circuits
+        # the ratio rule outside its data-supported regime — see the
+        # _SILENT_MAX_CEILING comment + Signal_to_noise_sampling.md.
         silent = (record_ok and held > 1.0
-                  and max_amp < self._SILENT_AMP_THRESHOLD)
+                  and max_amp < silent_threshold
+                  and max_amp < self._SILENT_MAX_CEILING)
         if silent:
             print(f'[record] silent-input detected: peak '
                   f'amplitude={max_amp} over {held:.2f}s '
-                  f'(threshold {self._SILENT_AMP_THRESHOLD})',
+                  f'(threshold {silent_threshold} '
+                  f'= max({self._SILENT_AMP_FLOOR}, '
+                  f'{self._SILENT_MED_RATIO} × med={med}); '
+                  f'ceiling={self._SILENT_MAX_CEILING})',
                   file=sys.stderr, flush=True)
             record_ok = False
             if audio_path and not self.db.is_uri:
@@ -5036,10 +5237,17 @@ class RecorderController:
                     pass
         Clock.schedule_once(
             lambda dt: self._publish_stop_finish(
-                record_ok, audio_path, entry, guid, silent), 0)
+                record_ok, audio_path, entry, guid, silent,
+                max_amp, poll_count, poll_zero_count,
+                med, silent_threshold,
+                mic_mute_start, active_mic), 0)
 
     def _publish_stop_finish(self, record_ok, audio_path, entry,
-                             guid, silent):
+                             guid, silent, max_amp=None,
+                             poll_count=None, poll_zero_count=None,
+                             med=None,
+                             silent_threshold=None,
+                             mic_mute_start=None, active_mic=None):
         """Main-thread continuation after
         _stop_record_worker_android. Updates self._record_ok,
         advertises audio onto the captured entry's dict + LIFT,
@@ -5049,13 +5257,21 @@ class RecorderController:
         entry."""
         self._record_ok = record_ok
         if silent:
+            mic_mute_stop = self._read_mic_mute()
             from kivy.app import App as _App
             _app = _App.get_running_app()
             if _app is not None:
+                diag = (f' [amp={max_amp}/{silent_threshold} '
+                        f'med={med} '
+                        f'polls={poll_count} '
+                        f'zeros={poll_zero_count} '
+                        f'mute={mic_mute_start}>{mic_mute_stop} '
+                        f'mic={active_mic}]')
                 _app._show_toast(
                     _tr('No audio detected — another app may '
                         'have the microphone. Close any '
-                        'recording / call apps and try again.'))
+                        'recording / call apps and try again.')
+                    + diag)
         if audio_path and record_ok and entry is not None:
             filename = os.path.basename(audio_path)
             entry['audio_filename'] = filename
@@ -5073,6 +5289,99 @@ class RecorderController:
             # entry's audio over the freshly-loaded next entry
             # would be confusing.
             Clock.schedule_once(lambda dt: self.play_audio(), 0.5)
+
+    @staticmethod
+    def _poll_amp_stats(amps):
+        """Return {p5, p10, p20, p30, p40, med, mean} for the
+        1.55.27+ calibration log. Includes zero polls so the
+        distribution reflects the recording as a whole. Returns
+        None values when no polls landed."""
+        empty = {'p5': None, 'p10': None, 'p20': None,
+                 'p30': None, 'p40': None, 'med': None,
+                 'mean': None}
+        if not amps:
+            return empty
+        s = sorted(amps)
+        n = len(s)
+
+        def pct(p):
+            # Nearest-rank percentile: ceil(p/100 * n) - 1, clamped.
+            idx = max(0, min(n - 1, (p * n + 99) // 100 - 1))
+            return s[idx]
+
+        return {
+            'p5': pct(5), 'p10': pct(10), 'p20': pct(20),
+            'p30': pct(30), 'p40': pct(40), 'med': pct(50),
+            'mean': sum(s) // n,
+        }
+
+    @staticmethod
+    def _coalesce_amps(amps, n):
+        """Return [max(amps[0:n]), max(amps[n:2n]), ...] — the
+        equivalent of having polled at n× the window size, since
+        getMaxAmplitude is itself a max-over-window operation
+        and max distributes over union. Trailing partial group
+        is included as max of whatever's there."""
+        if n <= 1 or not amps:
+            return list(amps)
+        out = []
+        for i in range(0, len(amps), n):
+            out.append(max(amps[i:i + n]))
+        return out
+
+    def _read_mic_mute(self):
+        """Return AudioManager.isMicrophoneMute() as a bool, or None
+        on non-Android / failure. Used to disambiguate the silent-
+        input toast: True means the OS-level Mic-off privacy
+        toggle is on (Android 12+ Quick Settings tile) — the API
+        returns silence rather than rejecting MediaRecorder."""
+        if platform != 'android':
+            return None
+        try:
+            from jnius import autoclass
+            Context = autoclass('android.content.Context')
+            PythonActivity = autoclass(
+                'org.kivy.android.PythonActivity')
+            ctx = PythonActivity.mActivity
+            audio_mgr = ctx.getSystemService(Context.AUDIO_SERVICE)
+            return bool(audio_mgr.isMicrophoneMute())
+        except Exception as ex:
+            print(f'[record] isMicrophoneMute query failed: {ex}',
+                  file=sys.stderr, flush=True)
+            return None
+
+    # AudioDeviceInfo TYPE_* constants used by MicrophoneInfo.getType().
+    _MIC_TYPE_LABELS = {
+        2: 'builtin-speaker',  # TYPE_BUILTIN_SPEAKER (shouldn't appear)
+        3: 'wired',            # TYPE_WIRED_HEADSET
+        4: 'wired-hp',         # TYPE_WIRED_HEADPHONES
+        7: 'bt-sco',           # TYPE_BLUETOOTH_SCO
+        11: 'usb-dev',         # TYPE_USB_DEVICE
+        15: 'builtin',         # TYPE_BUILTIN_MIC
+        18: 'telephony',       # TYPE_TELEPHONY
+        22: 'usb-hs',          # TYPE_USB_HEADSET
+    }
+
+    def _read_active_mic(self, recorder):
+        """Return a label for the first MicrophoneInfo from
+        MediaRecorder.getActiveMicrophones() (API 28+). Used to
+        catch silent-input cases where the OS routed audio capture
+        to a connected BT/USB peripheral whose mic is muted or
+        dead. Returns None on non-Android, no recorder, API < 28,
+        or query failure."""
+        if platform != 'android' or recorder is None:
+            return None
+        try:
+            mics = recorder.getActiveMicrophones()
+            if mics is None or mics.size() == 0:
+                return 'none'
+            first = mics.get(0)
+            t = int(first.getType())
+            return self._MIC_TYPE_LABELS.get(t, f'type{t}')
+        except Exception as ex:
+            print(f'[record] getActiveMicrophones failed: {ex}',
+                  file=sys.stderr, flush=True)
+            return None
 
     def _clear_keep_screen_on_android(self):
         """Drop the FLAG_KEEP_SCREEN_ON set by _start_android_recording.
@@ -5103,23 +5412,99 @@ class RecorderController:
 
     def _lift_audio_write_worker(self, guid, filename):
         """Off-main-thread LIFT write for a freshly-recorded audio
-        file. Mirrors the success / failure branches the inline
-        version used to do — success clears any prior pending entry;
-        failure queues for auto-retry. § 17c Rule 7 (daemon-bound
-        write off the main thread)."""
+        file. Routes through the surgical
+        ``azt_collab_client.set_audio`` RPC with
+        ``commit_after=False`` (daemon 0.50.51+,
+        CLIENT_INTEGRATION.md § 11 step 6) so the daemon does NOT
+        commit on the write — the swipe-boundary
+        ``_auto_commit_sync`` is the commit trigger, preserving the
+        "recording is uncommitted until the user accepts it by
+        swiping" UX contract. Falls back to the DOM-rewrite path
+        (``self.db.set_audio``) on RPC-class failures the surgical
+        path can't recover from, so an audio reference is never
+        silently dropped. Failure queues for auto-retry.
+
+        § 17c Rule 7 (daemon-bound write off the main thread)."""
+        ok, transient_err = self._set_audio_surgical(guid, filename)
+        if ok:
+            if self._pending_lift_saves.pop(guid, None) is not None:
+                self._unpersist_pending(guid)
+            return
+        if transient_err:
+            self._queue_pending_audio_save(guid, filename,
+                                           transient_err,
+                                           announce=True)
+            return
+        # Non-transient surgical failure (ENTRY_NOT_FOUND /
+        # LIFT_INVALID / no langcode): fall back to the DOM-rewrite
+        # path. Accepted regression — that path uses commit_after=
+        # True (atomic_open_write has no opt-out kwarg yet), so the
+        # daemon WILL commit immediately on this fallback. Better
+        # than losing the audio reference.
         try:
             self.db.set_audio(guid, filename)
         except Exception as ex:
-            prev = self._pending_lift_saves.get(guid)
-            if prev is not None and prev != filename:
-                print(f'[record] replacing pending LIFT save '
-                      f'for {guid}: {prev!r} → {filename!r}',
-                      file=sys.stderr, flush=True)
-            self._pending_lift_saves[guid] = filename
-            self._persist_pending(guid, filename)
-            print(f'[record] LIFT save failed: {ex} '
-                  f'(queued for auto-retry)',
+            self._queue_pending_audio_save(guid, filename, str(ex),
+                                           announce=True)
+            return
+        if self._pending_lift_saves.pop(guid, None) is not None:
+            self._unpersist_pending(guid)
+
+    def _set_audio_surgical(self, guid, filename):
+        """Try the surgical ``set_audio`` RPC with
+        ``commit_after=False``. Returns ``(True, '')`` on success;
+        ``(False, reason)`` on transient failure the caller should
+        queue for retry; ``(False, '')`` when the caller should
+        fall through to the DOM-rewrite path (non-transient: no
+        langcode wired up, daemon doesn't see the entry,
+        post-splice validation failed)."""
+        langcode = self._langcode or ''
+        vernlang = (self.db.vernlang or '').strip()
+        if not langcode or not vernlang:
+            return False, ''
+        audiolang = self.db.audiolang or (vernlang + '-Zxxx-x-audio')
+        try:
+            from azt_collab_client import set_audio as _rpc, S
+        except ImportError:
+            return False, ''
+        try:
+            result = _rpc(langcode, guid, audiolang, filename,
+                          commit_after=False)
+        except Exception as ex:
+            return False, f'surgical set_audio raised: {ex}'
+        if result.has_any(S.AUDIO_SET, S.AUDIO_SET_NO_CHANGE):
+            # Daemon's bytes are now on disk; the peer's cached DOM
+            # (if any) no longer matches. Next DOM-rewrite save
+            # (clean_template etc.) must re-read or it'll clobber.
+            self.db.invalidate_dom_cache()
+            return True, ''
+        if (result.has(S.SERVER_UNAVAILABLE)
+                or result.has(S.SERVER_ERROR)
+                or result.has(S.BUSY)):
+            codes = ', '.join(s.code for s in result.statuses)
+            return False, f'surgical set_audio transient: {codes}'
+        # ENTRY_NOT_FOUND / LIFT_INVALID — DOM-rewrite fallback can
+        # recover the former (daemon's view may not have caught up
+        # to a freshly-cloned entry yet) and surfaces the latter
+        # via the same exception path.
+        return False, ''
+
+    def _queue_pending_audio_save(self, guid, filename, reason,
+                                  announce):
+        """Park a failed audio LIFT save in the per-project pending
+        queue for the next ``retry_pending_lift_saves`` tick. Shared
+        helper for the surgical RPC and DOM-rewrite fallback paths."""
+        prev = self._pending_lift_saves.get(guid)
+        if prev is not None and prev != filename:
+            print(f'[record] replacing pending LIFT save '
+                  f'for {guid}: {prev!r} → {filename!r}',
                   file=sys.stderr, flush=True)
+        self._pending_lift_saves[guid] = filename
+        self._persist_pending(guid, filename)
+        print(f'[record] LIFT save failed ({reason}); '
+              f'queued for auto-retry',
+              file=sys.stderr, flush=True)
+        if announce:
             from kivy.app import App as _App
             _app = _App.get_running_app()
             if _app is not None:
@@ -5127,12 +5512,6 @@ class RecorderController:
                     lambda dt: _app._show_toast(
                         _tr('Audio captured but reference not '
                             'saved — will retry automatically.')), 0)
-            return
-        # Successful save clears any prior failed attempt for the
-        # same entry — e.g. user retried by re-recording before
-        # the auto-retry tick fired.
-        if self._pending_lift_saves.pop(guid, None) is not None:
-            self._unpersist_pending(guid)
 
     def play_audio(self):
         # Defensive: tear down any stale player from a previous tap
@@ -5679,26 +6058,42 @@ class RecorderController:
         """Retry any LIFT saves stranded by a transient daemon
         hiccup. Driven from the App's 10 s _update_sync_status
         tick. Idempotent: set_audio against an entry that
-        already carries the reference is a no-op (the inner
-        ``_find_entry`` / ``find('form')`` re-resolve to the
-        same nodes), so a retry that races a recovered first
-        attempt costs nothing.
+        already carries the reference is a no-op
+        (S.AUDIO_SET_NO_CHANGE), so a retry that races a recovered
+        first attempt costs nothing.
 
-        Failures stay in the queue for the next tick. On
-        success for the currently-displayed entry, mirror the
-        write back onto ``self.current`` and schedule a UI
-        refresh so playback works without a re-load."""
+        Goes through the surgical RPC with ``commit_after=False``
+        (same UX rule as the first attempt — the retry must NOT
+        commit out of band; the next swipe-boundary
+        ``_auto_commit_sync`` carries this entry's commit). Falls
+        back to the DOM-rewrite path on non-transient surgical
+        failures, accepting the commit-on-fallback regression for
+        recoverability (see ``_lift_audio_write_worker``).
+
+        Failures stay in the queue for the next tick. On success
+        for the currently-displayed entry, mirror the write back
+        onto ``self.current`` and schedule a UI refresh so
+        playback works without a re-load."""
         if not self._pending_lift_saves:
             return
         current_guid = (self.current.get('guid', '')
                         if getattr(self, 'current', None) else '')
         for guid in list(self._pending_lift_saves.keys()):
             filename = self._pending_lift_saves[guid]
-            try:
-                self.db.set_audio(guid, filename)
-            except Exception as ex:
+            ok, transient_err = self._set_audio_surgical(guid, filename)
+            if not ok and not transient_err:
+                try:
+                    self.db.set_audio(guid, filename)
+                    ok = True
+                except Exception as ex:
+                    print(f'[record] retry LIFT save for {guid} '
+                          f'(DOM fallback) still failing: {ex}',
+                          file=sys.stderr, flush=True)
+            elif not ok:
                 print(f'[record] retry LIFT save for {guid} still '
-                      f'failing: {ex}', file=sys.stderr, flush=True)
+                      f'failing: {transient_err}',
+                      file=sys.stderr, flush=True)
+            if not ok:
                 continue
             self._pending_lift_saves.pop(guid, None)
             self._unpersist_pending(guid)
@@ -5712,7 +6107,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.55.18'
+__version__ = '1.58.4'
 
 
 class LIFTRecorderApp(App):
@@ -6423,13 +6818,39 @@ class LIFTRecorderApp(App):
         Clock.schedule_once(lambda dt: view.dismiss(), duration)
 
     def _show_error(self, msg):
+        """Modal that wraps long text + scrolls if it overflows
+        the dialog. Previously a bare Label which truncated long
+        exception strings off the right edge of the screen — see
+        the FileProvider ClassNotFoundException debugging in 1.58."""
         from kivy.uix.popup import Popup
         from kivy.uix.label import Label
-        popup = Popup(
-            title=_tr('Error'),
-            content=Label(text=msg, font_size=sp(14)),
-            size_hint=(0.8, None), height=dp(180),
+        from kivy.uix.scrollview import ScrollView
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.button import Button
+        popup_w = Window.width * 0.85
+        # Label wraps when text_size width is constrained; height
+        # set from texture_size so the ScrollView can scroll past
+        # the visible region.
+        lbl = Label(
+            text=msg, font_size=sp(14),
+            size_hint_y=None, halign='left', valign='top',
+            text_size=(popup_w - dp(40), None),
         )
+        lbl.bind(texture_size=lambda inst, val:
+                 setattr(inst, 'height', val[1]))
+        sv = ScrollView(size_hint=(1, 1))
+        sv.add_widget(lbl)
+        root = BoxLayout(orientation='vertical', spacing=dp(8),
+                         padding=dp(8))
+        root.add_widget(sv)
+        close = Button(text=_tr('OK'), size_hint_y=None,
+                       height=dp(44))
+        root.add_widget(close)
+        popup = Popup(
+            title=_tr('Error'), content=root,
+            size_hint=(0.85, 0.7),
+        )
+        close.bind(on_release=popup.dismiss)
         popup.open()
 
     def _project_has_remote(self):
@@ -8185,14 +8606,49 @@ class LIFTRecorderApp(App):
         DATA_LOSS_RISK statuses per § 17 — commit_project is
         fire-and-forget so this is the only seam where the
         eventual Result becomes observable for the auto-commit
-        context."""
-        self._check_data_loss_risk_async()
-        # Retry any LIFT saves stranded by a transient daemon
-        # hiccup. Idempotent + silent on success; failures stay
-        # queued for the next tick.
-        if self.recorder:
-            self.recorder.retry_pending_lift_saves()
-        text, _last_sync, last_commit, head_sha = self._sync_status_info()
+        context.
+
+        Both ``project_status`` and ``poll_job`` go through the
+        daemon's HTTP/ContentProvider transport and BLOCK the caller
+        until the daemon responds. The daemon holds ``project_lock``
+        during the debounced auto-commit that fires after every
+        LIFT/audio write (CLIENT_INTEGRATION.md § 11 step 6), so on a
+        slow device this method — when called from the post-record
+        ``refresh_recorder_ui`` chain — would park the main thread
+        for seconds and drop swipe touches.
+
+        Fix: run the daemon round-trips on a worker, marshal the
+        label-set + content-advance check back via Clock. Cheap
+        in-flight guard so cascaded ``refresh_recorder_ui`` calls
+        don't spawn redundant ``project_status`` RPCs."""
+        if getattr(self, '_sync_status_in_flight', False):
+            return
+        self._sync_status_in_flight = True
+        import threading
+        threading.Thread(
+            target=self._update_sync_status_worker,
+            daemon=True, name='sync-status').start()
+
+    def _update_sync_status_worker(self):
+        try:
+            self._check_data_loss_risk_async()
+            # Retry any LIFT saves stranded by a transient daemon
+            # hiccup. Idempotent + silent on success; failures stay
+            # queued for the next tick. Also a daemon round-trip
+            # (set_audio), so off-main is the right thread.
+            if self.recorder:
+                self.recorder.retry_pending_lift_saves()
+            info = self._sync_status_info()
+        finally:
+            self._sync_status_in_flight = False
+        Clock.schedule_once(
+            lambda dt, i=info: self._apply_sync_status(*i), 0)
+
+    def _apply_sync_status(self, text, _last_sync, last_commit, head_sha):
+        """Main-thread continuation: set the label and run the
+        content-advance check / reload. Pure widget + state work; no
+        daemon RPCs here. See ``_update_sync_status`` for why this
+        is split out."""
         sm = self.root.ids.sm
         rec_screen = sm.get_screen('recorder')
         lbl = rec_screen.ids.get('sync_status_label')
@@ -8658,21 +9114,128 @@ class LIFTRecorderApp(App):
         )
 
     def share_log(self):
-        """Share the recorder's log file via Android's share sheet.
-
-        Delegates to ``azt_collab_client.ui.share.share_log_file``
-        (shipped daemon-side 0.41.19). The helper bundles the
-        current session plus the rotated `<path>.prev` previous
-        session into one text/plain blob, inserts via MediaStore
-        Downloads, and dispatches ACTION_SEND."""
-        # Imported via the module path because share_log_file isn't
-        # re-exported from azt_collab_client.ui.__init__ yet — keeps
-        # this peer-side call working independent of when the daemon
-        # team adds the convenience re-export.
-        from azt_collab_client.ui.share import share_log_file
-        share_log_file(
-            log_path=_LOG_PATH,
-            prev_path=(_LOG_PATH + '.prev') if _LOG_PATH else None,
+        """Bundle every per-day recorder log + every per-day daemon
+        log (via ``get_daemon_log_files``) into a single zip and
+        ship that zip via Android's share sheet as one
+        ``ACTION_SEND`` attachment served by the recorder's own
+        FileProvider. Signal-compatible per
+        CLIENT_INTEGRATION.md § 14b-iii — single item +
+        non-MediaStore URI = the only multi-file share shape
+        Signal accepts for non-image/non-video content."""
+        from kivy.utils import platform
+        if platform != 'android':
+            self._show_error(_tr(
+                'Log sharing is only available on Android.'))
+            return
+        import zipfile
+        import uuid
+        import shutil
+        import datetime as _dt
+        from azt_collab_client.ui.share import share_files
+        from azt_collab_client import get_daemon_log_files
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass(
+                'org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            cache_dir = str(activity.getCacheDir().getAbsolutePath())
+            package = str(activity.getPackageName())
+        except Exception as ex:
+            self._show_error(_tr(
+                'Could not prepare log share:\n{error}'
+            ).format(error=ex))
+            return
+        # FileProvider declared in the recorder's manifest at
+        # `<package>.fileprovider` (see android/file_provider_paths.xml
+        # and buildozer.spec's manifest plumbing). Serves cacheDir/shares/.
+        authority = f'{package}.fileprovider'
+        shares_root = os.path.join(cache_dir, 'shares')
+        try:
+            os.makedirs(shares_root, exist_ok=True)
+        except OSError as ex:
+            self._show_error(_tr(
+                'Could not prepare log share:\n{error}'
+            ).format(error=ex))
+            return
+        # Sweep stale share dirs (>1h old) — same TTL the daemon
+        # uses for its own .shares/<token>/ staging.
+        import time as _time
+        now = _time.time()
+        try:
+            for n in os.listdir(shares_root):
+                sub = os.path.join(shares_root, n)
+                try:
+                    if (os.path.isdir(sub)
+                            and (now - os.path.getmtime(sub)) > 3600):
+                        shutil.rmtree(sub, ignore_errors=True)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        token = uuid.uuid4().hex
+        share_dir = os.path.join(shares_root, token)
+        try:
+            os.makedirs(share_dir, exist_ok=True)
+        except OSError as ex:
+            self._show_error(_tr(
+                'Could not prepare log share:\n{error}'
+            ).format(error=ex))
+            return
+        stamp = _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+        zip_name = f'azt_recorder_diagnostics_{stamp}.zip'
+        zip_path = os.path.join(share_dir, zip_name)
+        # Build the zip: recorder per-day logs (real files) first,
+        # daemon per-day logs (RPC content) second.
+        try:
+            with zipfile.ZipFile(zip_path, 'w',
+                                 compression=zipfile.ZIP_DEFLATED) as zf:
+                if _LOG_PATH:
+                    log_dir = os.path.dirname(_LOG_PATH)
+                    try:
+                        names = sorted(os.listdir(log_dir))
+                    except OSError:
+                        names = []
+                    for name in names:
+                        if name.startswith('azt_recorder-') and (
+                                name.endswith('_log.txt')
+                                or name.endswith('.log')):
+                            try:
+                                zf.write(os.path.join(log_dir, name),
+                                         arcname=name)
+                            except OSError:
+                                pass
+                bundle = get_daemon_log_files() or {}
+                for entry in bundle.get('files') or []:
+                    content = entry.get('content') or ''
+                    if not content:
+                        continue
+                    name = entry.get('filename') or (
+                        f'daemon_{entry.get("date") or "unknown"}_log.txt')
+                    zf.writestr(name, content)
+        except OSError as ex:
+            self._show_error(_tr(
+                'Could not prepare log share:\n{error}'
+            ).format(error=ex))
+            return
+        # Hand the zip to FileProvider to get a content:// URI
+        # under our own authority. Signal accepts URIs from the
+        # sender's authority but rejects MediaStore URIs.
+        try:
+            FileProvider = autoclass(
+                'androidx.core.content.FileProvider')
+            File = autoclass('java.io.File')
+            uri = FileProvider.getUriForFile(
+                activity, authority, File(zip_path))
+            uri_str = str(uri.toString())
+        except Exception as ex:
+            self._show_error(_tr(
+                'Could not prepare log share:\n{error}'
+            ).format(error=ex))
+            return
+        share_files(
+            items=[{'uri': uri_str, 'display_name': zip_name}],
+            mime_type='application/zip',
+            chooser_title=_tr('Share logs'),
             on_error=self._show_error,
         )
 

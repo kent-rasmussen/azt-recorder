@@ -89,10 +89,14 @@ android.archs = arm64-v8a, armeabi-v7a
 # env vars instead (see header at top of file).
 android.release_artifact = apk
 
-p4a.branch = master
+p4a.branch = ${P4A_BRANCH}
+p4a.commit = ${P4A_COMMIT}
 # The hook + local recipes live in a sibling repo (buildozer_tweaks/)
 # that maintainers check out next to the AZT suite. Set the env vars
 # P4A_HOOK and P4A_LOCAL_RECIPES; build.sh substitutes here.
+# For the recorder, P4A_HOOK should point at the local
+# p4a_hook_recorder.py (in this directory) so the FileProvider
+# declaration gets injected; setup_from_nuke.sh warns if not.
 p4a.hook = ${P4A_HOOK}
 p4a.local_recipes = ${P4A_LOCAL_RECIPES}
 android.api = 36
@@ -105,6 +109,16 @@ android.ndk = 29
 #android.release_armeabi_v7a = True
 
 android.add_src = android/src/main/java
+
+# AndroidX dep so share_log() can call
+# androidx.core.content.FileProvider.getUriForFile (used by the
+# Signal-compatible share path; see CLIENT_INTEGRATION.md
+# § 14b-iii). Without these two lines the FileProvider class
+# isn't on the runtime classpath and the share button raises
+# ClassNotFoundException.
+android.useandroidx = True
+android.gradle_dependencies = androidx.core:core:1.13.1
+
 # Allow reading files from external storage (shared LIFT files)
 android.allow_backup = False
 
@@ -138,7 +152,12 @@ android.presplash_color = #1a1612
 # shared `../azt-collab/android/` tree stays untouched. Other
 # peers wanting the same get their own `presplash_variants/`
 # directory + the same add_resources line.
-android.add_resources = %(source.dir)s/presplash_variants:.
+# android/res/ ships the xml/file_provider_paths.xml resource used
+# by the recorder's FileProvider (declared via p4a_hook_recorder.py).
+# The provider's <meta-data> reference (@xml/file_provider_paths)
+# resolves to this file at runtime; without it FileProvider raises
+# ResourceNotFound at getUriForFile.
+android.add_resources = %(source.dir)s/presplash_variants:., %(source.dir)s/android/res:.
 
 [buildozer]
 log_level = 2

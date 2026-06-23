@@ -860,6 +860,20 @@ class LIFTDatabase:
         # Save
         self._save()
 
+    def invalidate_dom_cache(self):
+        """Drop the cached ElementTree so the next mutation path
+        re-reads the file from disk. Call this after an out-of-band
+        surgical mutation (azt_collab_client.set_audio /
+        set_illustration with commit_after=False) has updated the
+        backing file: the daemon's bytes are on disk but the peer's
+        cached _tree is now stale. A subsequent DOM-rewrite save
+        (e.g. clean_template) without this invalidation would
+        serialize the stale DOM and clobber the surgical change."""
+        with self._dom_lock:
+            self._tree = None
+            self._root = None
+            self._indent_dirty = False
+
     def _ensure_dom(self):
         """Lazy-rebuild the ElementTree DOM for mutation paths.
 

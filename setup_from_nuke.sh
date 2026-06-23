@@ -51,6 +51,29 @@ else
         "$SCRIPT_DIR/manifest_extras.xml"
 fi
 
+# 6b. P4A_HOOK should point at the recorder-local hook
+# (p4a_hook_recorder.py) so the share-log FileProvider gets
+# declared in the rendered AndroidManifest.xml. The local hook
+# delegates to the suite-shared one at /home/kentr/bin/raspy/
+# buildozer_tweaks/p4a_hook.py for everything else (server-APK
+# provider injection, NDK patches, recipe overrides).
+#
+# Without this, the build still succeeds but share_log() raises
+# IllegalArgumentException at runtime when it tries to call
+# FileProvider.getUriForFile against an undeclared authority —
+# caught by the on_error handler, surfaced to the user as
+# "Could not prepare log share: ...".
+#
+# Set in your shell rc:
+#     export P4A_HOOK=$HOME/bin/AZT/azt_recorder/p4a_hook_recorder.py
+if [ -z "${P4A_HOOK:-}" ] || ! echo "$P4A_HOOK" | grep -q "p4a_hook_recorder.py"; then
+    echo ""
+    echo "WARN: P4A_HOOK is not pointing at the recorder-local hook."
+    echo "      For share_log() FileProvider to work, set:"
+    echo "      export P4A_HOOK=$SCRIPT_DIR/p4a_hook_recorder.py"
+    echo ""
+fi
+
 # 7. Clean stale buildozer internals (may have hardcoded paths from another project)
 BUILD_BASE="$SCRIPT_DIR/.buildozer/android/platform/build-arm64-v8a_armeabi-v7a/build"
 HOSTPY="$BUILD_BASE/other_builds/hostpython3"

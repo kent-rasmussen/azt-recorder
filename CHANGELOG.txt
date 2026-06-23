@@ -1,5 +1,413 @@
 CHANGELOG — A-Z+T Recorder
 
+1.58.4
+  Revert 1.58.3's hardcoded `p4a.hook = %(source.dir)s/...`
+  in buildozer.spec.tmpl. Hook activation stays env-var-driven
+  (`P4A_HOOK`) — user owns the env-var setup and wants the
+  indirection preserved. The 1.58.3 hook-pattern rewrite
+  (matching the shared hook's signature + cwd-relative paths +
+  sentinel-comment idempotency + dist_name gate) stands.
+  Setup_from_nuke.sh's P4A_HOOK warning is back so the
+  intended setting is visible at venv-creation time.
+
+1.58.3
+  Two root causes for 1.58.2's still-not-firing hook:
+
+  1. `P4A_HOOK` was still pointing at the suite-shared hook —
+     the setup_from_nuke.sh warning was easy to miss. Replaced
+     the env-var indirection with a hardcoded
+     `p4a.hook = %(source.dir)s/p4a_hook_recorder.py` in
+     buildozer.spec.tmpl so the recorder hook always activates
+     for this build, regardless of how the user has P4A_HOOK
+     set globally. (Re-run `build_buildozer_spec.sh` to
+     refresh buildozer.spec.)
+
+  2. The hook itself wasn't matching the shared hook's pattern.
+     Inspected /home/kentr/bin/raspy/buildozer_tweaks/
+     p4a_hook.py and discovered: it uses single-positional-arg
+     `before_apk_assemble(toolchain)`, the cwd is already the
+     dist dir when the hook fires, it does string-based
+     manifest editing (not XML), and it gates injection on
+     `toolchain.args.dist_name`. Rewrote
+     `p4a_hook_recorder.py` to mirror that pattern exactly —
+     same call signature, same cwd-relative paths, same
+     sentinel-comment idempotency. Dist_name gate set to
+     `'aztrecorder'` so other suite builds that share this
+     code path can't accidentally inherit the FileProvider.
+
+  Also removed the now-redundant P4A_HOOK warning from
+  setup_from_nuke.sh — the buildozer.spec hardcode makes it
+  unnecessary.
+
+1.58.2
+  Two fixes for the share-log path:
+  - 1.58.1's FileProvider class loads at runtime, but its
+    authority isn't declared in the rendered AndroidManifest.xml,
+    so `getUriForFile` raises
+    `IllegalArgumentException: Couldn't find meta-data for
+    provider with authority org.atoznback.aztrecorder.fileprovider`.
+    Root cause: the `before_apk_assemble` hook entry I picked in
+    1.58.0 isn't called by every p4a bootstrap. Updated
+    `p4a_hook_recorder.py` to inject from both `before_apk_build`
+    AND `before_apk_assemble` (idempotent, so dual-fire is
+    harmless), and to walk the dist tree for every
+    `AndroidManifest.xml` rather than assume one canonical
+    relative path. Hook now also writes a marker line to
+    `<dist>/.p4a_hook_recorder.log` per call so we can confirm
+    after a build whether it actually ran.
+  - `_show_error` was a bare Label which truncated long
+    exception strings off the right edge of the screen (the
+    ClassNotFoundException class name was unreadable). Replaced
+    with a wrapped + scrollable popup so any future
+    diagnostic-class modal stays on-screen.
+
+1.58.1
+  Add `android.useandroidx = True` and
+  `android.gradle_dependencies = androidx.core:core:1.13.1` to
+  `buildozer.spec.tmpl`. 1.58.0's `share_log()` calls
+  `androidx.core.content.FileProvider.getUriForFile`; without
+  these two lines the class isn't on the runtime classpath and
+  the share button raises ClassNotFoundException. Re-run
+  `build_buildozer_spec.sh` then a clean rebuild after picking
+  up this change.
+
+1.58.0
+  Rewrite `share_log()` to ship a single zip via the recorder's
+  own FileProvider, matching the server-side button's behaviour
+  per CLIENT_INTEGRATION.md § 14b-iii (Signal compatibility).
+  Daemon team has shipped the working pattern at 0.52.13+; this
+  brings the recorder in line.
+
+  The new path:
+  - Build a zip in the app's `cacheDir/shares/<token>/`
+    containing every per-day recorder log (real files from disk)
+    + every per-day daemon log (RPC content from
+    `get_daemon_log_files`).
+  - Hand the zip to `androidx.core.content.FileProvider.
+    getUriForFile` to get a `content://org.atoznback.aztrecorder.
+    fileprovider/...` URI from the recorder's own authority.
+  - Dispatch via `share_files` with a single item +
+    `mime_type='application/zip'`. Single-item path means
+    `ACTION_SEND`, which Signal accepts; URI from sender's own
+    provider authority means Signal accepts the URI itself.
+
+  Side changes:
+  - Daily file naming switched from `<peer>-YYYY-MM-DD.log` to
+    `<peer>-YYYY-MM-DD_log.txt` to match the daemon's 0.52.20
+    convention (extension stays `.txt` for editor compatibility;
+    "log" remains in the basename for grep/triage). The
+    retention sweep matches both new and 1.57.0-legacy
+    filenames so an upgrade doesn't leak old files.
+  - Stale share-token directories swept on every share dispatch
+    (>1 hour old → deleted), matching the daemon's TTL for its
+    own `$AZT_HOME/.shares/<token>/` staging.
+
+  Build-infra additions to support the new FileProvider:
+  - `android/res/xml/file_provider_paths.xml` — declares the
+    paths the FileProvider serves (only `cacheDir/shares/`).
+  - `p4a_hook_recorder.py` — local p4a hook that delegates to
+    the suite-shared hook at `~/bin/raspy/buildozer_tweaks/
+    p4a_hook.py` AND injects the FileProvider `<provider>`
+    element into the rendered AndroidManifest.xml during
+    `before_apk_assemble`. Buildozer has no native way to add
+    `<provider>` to the `<application>` block, hence the hook.
+  - `buildozer.spec.tmpl` now adds `android/res:.` to
+    `android.add_resources` so the paths XML lands at
+    `res/xml/file_provider_paths.xml`.
+  - `setup_from_nuke.sh` warns if `P4A_HOOK` isn't pointing at
+    the recorder's local hook (the env var setup the user has
+    to do to activate the FileProvider declaration).
+
+1.57.0
+  Peer-side adoption of the unified logging contract the
+  daemon team shipped at 0.52.6 (CLIENT_INTEGRATION.md
+  § 14b). Three changes inside main.py's `_setup_logging`
+  block:
+
+  - Per-day log files. Filename pattern
+    `azt_recorder-<peer_id_short>-YYYY-MM-DD.log` matching
+    the daemon's `daemon-<tag>-YYYY-MM-DD.log` convention.
+    Append mode (a) so a same-day re-launch keeps adding to
+    today's file; previous `'w'` truncate-on-launch and the
+    `.prev` rotation are gone, in line with the daemon side
+    that removed `.prev` in 0.52.5. Retention sweep at 3 days
+    (`_LOG_RETENTION_DAYS`, configurable) drops files outside
+    the window on startup and on each midnight rollover.
+
+  - Line-buffered `_Tee` that prepends
+    `[YYYY-MM-DD HH:MM:SS,mmm <peer_id_short>]` to every
+    stdout / stderr line — matches the daemon's stdio mirror
+    prefix so a grep across the multi-file share bundle hits
+    both processes' timestamps uniformly. Peer-id resolved
+    once via `azt_collab_client.lan_peer_id()` and cached on
+    first success; falls back to `????????` until the daemon
+    is reachable so very early boot lines aren't dropped.
+    Re-checks the date on each write so a long session that
+    crosses local midnight rolls into the new day's file.
+
+  - `share_log()` rewritten as the picker's
+    `share_diagnostics` pattern: gather every
+    `azt_recorder-*.log` in the log directory as path-backed
+    items, plus every entry from `get_daemon_log_files()` as
+    content-backed items, and dispatch via the new
+    `share_files` helper (`ACTION_SEND_MULTIPLE`). The
+    receiver gets each file as a distinct attachment —
+    cleaner triage than the prior single concatenated blob.
+
+  The daemon-team helpers (`share_files`,
+  `get_daemon_log_files`) shipped at 0.52.6; the
+  `set_daemon_log_to_file` toggle was kept (daemon team's
+  reasons not explicit in the contract). Peer-side prefix
+  format alignment between recorder and daemon stdio mirror
+  still needs an empirical verification on the next build.
+
+1.56.3
+  Filed a NOTES_TO_DAEMON entry asking for unified logging
+  alignment: same `[YYYY-MM-DD HH:MM:SS,mmm <peer_id>]` prefix
+  on both peer + daemon, midnight rotation with a configurable
+  retention window (default 3 days), an
+  `get_daemon_log_files()` RPC returning prior-day daemon log
+  content, a multi-file share dispatcher
+  (`ACTION_SEND_MULTIPLE`), removal of the daemon-log on/off
+  toggle if always-on is feasible, and button consolidation
+  so a single "Share log" press ships the full recorder +
+  daemon bundle. Peer-side implementation pending the daemon-
+  team helpers; the recorder's own log format / rotation /
+  share gather can land independently.
+
+1.56.2
+  Add an explicit `_SILENT_MAX_CEILING = 7000` to the silent-
+  input rule so the linear `27 × median` threshold only
+  applies inside its data-supported regime. Triggered by a
+  field user's good recording (max=30582, med=2036) being
+  false-positive flagged: `27 × 2036 = 54972` was vacuously
+  greater than any achievable `max_amp` (16-bit PCM cap at
+  32767), so the comparison `max_amp < threshold` was
+  always true and silent fired on every recording with
+  med > 1214. The linear rule has no physical justification
+  past the calibration regime (worst silent max = 4614);
+  above the 7000 ceiling the recording is treated as real
+  audio regardless of median. New rule:
+      silent = (max_amp < 27 × med) AND (max_amp < 7000)
+  All previous calibration cases continue to classify
+  correctly, and the new failing case now passes via the
+  ceiling. See `docs/Signal_to_noise_sampling.md` for the
+  data + reasoning behind the constant.
+
+1.56.1
+  Log a backlog entry in `docs/Backlog.md` for the "duplicate
+  MOOV + ~1.9 MB junk between" symptom observed in saved
+  M4A files. Strong hypothesis: `_start_android_recording`
+  opens the audio FD with mode `'w'` (no truncate) at
+  `main.py:5670`; re-recording into an entry whose existing
+  audio file was longer than the new take leaves the old
+  MOOV behind. One-character fix (`'w'` → `'wt'`) noted in
+  the backlog item but not applied yet.
+
+1.55.30
+  Promote the calibrated SNR rule to production. Detection is
+  now `max_amp < max(_SILENT_AMP_FLOOR, _SILENT_MED_RATIO ×
+  median_poll)` at 25 ms polling. The picked constants —
+  floor = 100, ratio = 27 — come from the two-device, eight-
+  scenario calibration sweep documented in
+  `docs/Signal_to_noise_sampling.md`. 27 is the geometric
+  mean of the silent-boundary ratio (16.0) and the
+  pass-boundary ratio (44.6) seen at 25 ms, giving equal
+  proportional margin on both sides.
+  - Drops `_SILENT_AMP_RATIO` (the 1.55.26 4×min_nz rule
+    that didn't work because min_nz saturated near zero).
+  - Drops the triple-view 25/50/100 ms calibration logging
+    from 1.55.29; production logs the single-view median +
+    mean alongside max, threshold, min_nz, polls, zeros,
+    mic_mute, and active_mic.
+  - Toast suffix now shows `med=N` instead of `min=N`.
+
+1.55.29
+  Single-build A/B/C of poll rates. Native poll interval set
+  to 25 ms (1/4 of 1.55.27's 50 ms); the stop worker also
+  reports percentile stats over coalesced groups of 2 and 4
+  consecutive readings — mathematically equivalent to having
+  polled natively at 50 ms and 100 ms, because
+  getMaxAmplitude is a max-over-window operation and
+  max(max(w1), max(w2)) = max over (w1 ∪ w2). One run of
+  each scenario captures comparable data at all three rates
+  without the noise of separate test sessions.
+  The `[record] stop:` log line now contains three bracketed
+  groups labelled `[25ms ...]` `[50ms ...]` `[100ms ...]`,
+  each with the same percentile fields as 1.55.27.
+
+1.55.28
+  A/B against 1.55.27. Polling interval flipped from 50 ms
+  back to 100 ms, percentile instrumentation otherwise
+  unchanged. Goal: see how the silent/pass gap ratio
+  (median × 5 rule, derived from 1.55.27 data) holds at the
+  coarser sample rate. The 50 ms rate is essentially free
+  cost-wise (0.1-0.2 % CPU); this is due diligence to confirm
+  100 ms gives equivalent discrimination, in which case we
+  ship 100 ms as the production rate.
+
+1.55.27
+  Calibration pass for the SNR-based silent-input detector.
+  1.55.26's `min_nz` turned out to saturate near zero on
+  every recording (silent / handover / whisper / speech all
+  show min_nz of 2-30) because at fine-grained polling there's
+  almost always at least one inter-syllable quiet window. So
+  4×min_nz collapses to the floor and the adaptive threshold
+  never engages on low-SNR recordings like "hand over mic with
+  hall noise" (max=265 with min_nz=4).
+  This release:
+  - Drops poll interval from 100 ms to 50 ms (20-40 samples
+    on a typical 1-2 s recording).
+  - Keeps every per-poll amplitude in `_poll_amps` (memory
+    bounded by the 60 s setMaxDuration cap → ≤1200 ints).
+  - Computes p5, p10, p20, p30, p40, median, and mean in the
+    stop worker via `_poll_amp_stats` and logs them on the
+    `[record] stop:` line.
+  - Detection behaviour is UNCHANGED — still
+    `max(floor, 4*min_nz)`. The new stats are for picking a
+    real SNR discriminator from field data; once one
+    statistic separates silent / handover / whisper / speech
+    cleanly across the test devices (phone, tablet, Redmi
+    Note 15 Pro+ 5G) we'll wire it up as the production rule
+    in 1.55.28.
+
+1.55.26
+  Replace the fixed `_SILENT_AMP_THRESHOLD = 100` with a
+  per-recording adaptive threshold so the silent-input
+  detector works on devices with high ambient noise floors.
+  A tablet showed `getMaxAmplitude` ~380 on AC-only background
+  noise, well above the old fixed threshold — meaning genuinely
+  silent recordings on that hardware would never trip the
+  detector.
+  New computation in `_stop_record_worker_android`:
+      threshold = max(_SILENT_AMP_FLOOR,
+                      _SILENT_AMP_RATIO * min_amp_nonzero)
+  where `min_amp_nonzero` is the smallest non-zero peak across
+  all `_poll_recording` windows during the recording.
+  `_SILENT_AMP_FLOOR` (100) is the hard minimum so devices with
+  a broken `getMaxAmplitude` (always returns 0 → no non-zero
+  polls → min stays None) still fall back to the previous
+  behavior. `_SILENT_AMP_RATIO` (4) is the headroom over
+  observed quiet-window peaks; real speech has 10-100×
+  peak-to-trough ratios so 4× leaves comfortable margin.
+  Also drops the poll interval from 500 ms to 100 ms so a
+  1-2 s recording samples 10-20 per-window peaks — enough
+  resolution for the min-of-max estimator to converge on the
+  device's actual noise floor when the user pauses at any
+  point in the recording.
+  Toast and `[record] stop:` log line now show `min=N` and the
+  computed threshold (as `amp=X/threshold`) so the value can
+  be validated in the field.
+
+1.55.25
+  Extend the silent-input diagnostic so a single toast value
+  identifies which of the four "max_amp=0" failure modes is
+  in play. The toast and `[record] stop:` log line now
+  include:
+  - `polls=N` — number of `_poll_recording` ticks that
+    fired during the recording (vs the expected
+    `held / 0.5`). Low N → main-thread starvation (hyp #3).
+  - `zeros=Z` — how many of those polls returned 0 from
+    `getMaxAmplitude`. Z=polls with normal cadence and
+    mic=builtin, mute=false → broken `getMaxAmplitude` on
+    that AOSP build (hyp #1).
+  - `mute=start>stop` — `AudioManager.isMicrophoneMute()`
+    sampled at recording start and stop. True at either
+    end → Android 12+ Mic-off privacy toggle (hyp #5).
+  - `mic=builtin|bt-sco|usb-dev|...` —
+    `MediaRecorder.getActiveMicrophones()[0].getType()`
+    (API 28+). Non-builtin → peripheral routing (hyp #4).
+  Field user with Redmi Note 15 Pro+ 5G reporting "no
+  audio detected" on every recording; previous toast
+  showed only amp, which couldn't disambiguate #1/#3/#4/#5.
+
+1.55.24
+  Append `[amp=N]` to the silent-input toast so the field
+  user can read the value back directly without needing
+  logcat access. The suffix is added outside the gettext'd
+  string so the existing `.po`/`.mo` translation is
+  unchanged and no recompile is needed. Threads `max_amp`
+  through `_publish_stop_finish`.
+
+1.55.23
+  Add unconditional `[record] stop:` log line at the top of
+  `_stop_record_worker_android` reporting `max_amp`, `held`,
+  `profile`, and threshold for every Android recording, not
+  just silent-detected ones. Diagnostic for a field user
+  hitting the "No audio detected" toast on every recording —
+  the existing `[record] silent-input detected:` line only
+  prints when the silent branch fires, which doesn't
+  distinguish (a) getMaxAmplitude returning 0 on that
+  device's MediaRecorder build, (b) the 100 threshold being
+  mis-calibrated for that mic's gain, or (c) main-thread
+  starvation causing the 500 ms poll to miss the loud part
+  of the recording. Logging max_amp on every stop separates
+  those cases at a glance.
+
+1.55.22
+  Migrate the audio-write path off the DOM-rewrite save and
+  onto the daemon's surgical `set_audio` RPC with
+  `commit_after=False` (daemon 0.50.51+, CLIENT_INTEGRATION.md
+  § 11 step 6 opt-out). The 1.55.21 NOTES_TO_DAEMON item was
+  resolved by the daemon team in 0.50.51 — they shipped Option
+  A (per-write opt-out flag) on `set_audio` /
+  `set_illustration` / `atomic_commit_bytes` /
+  `atomic_finalize_pending`. With this flip:
+  - `_lift_audio_write_worker` calls the surgical RPC and
+    invalidates `LIFTDatabase`'s DOM cache so a later
+    DOM-rewrite save (clean_template etc.) re-reads the
+    daemon's bytes from disk instead of clobbering them.
+  - `retry_pending_lift_saves` does the same so the 10 s
+    retry tick doesn't commit out of band either.
+  - DOM-rewrite remains as a fallback for non-transient
+    surgical failures (ENTRY_NOT_FOUND, LIFT_INVALID,
+    langcode-unwired). The fallback commits (its
+    `atomic_open_write` has no `commit_after` kwarg yet) —
+    accepted regression to avoid silently dropping an audio
+    reference.
+  Net effect: a recording no longer commits to git history
+  until the user has swiped off the entry. The `R(+n)` badge
+  recovers its "uncommitted edits I haven't pushed yet"
+  meaning for the audio-write path. The image-write path
+  (`_save_remote_image` → `db.set_illustration`) still uses
+  the DOM-rewrite path on swipe, where the surrounding
+  `_auto_commit_sync` provides the commit boundary anyway —
+  no UX win to migrate it in this cut.
+
+  New `LIFTDatabase.invalidate_dom_cache()` method (`lift.py`)
+  is the seam external callers use after a surgical out-of-
+  band mutation.
+
+1.55.21
+  Move the main-thread `project_status` / `poll_job` RPCs
+  out of `_update_sync_status` onto a worker. The post-
+  record refresh chain (_publish_stop_finish → _notify_ui
+  → refresh_recorder_ui → _update_sync_status) was
+  parking the Kivy main thread in a blocking HTTP call to
+  the daemon while the daemon was busy running its
+  debounced auto-commit (CLIENT_INTEGRATION.md § 11
+  step 6) on the LIFT/audio write that the post-stop
+  worker had just shipped. On a slow Android phone that
+  contention dropped ~3 swipes in the window after each
+  recording. Worker fires `project_status` +
+  `_check_data_loss_risk_async` + `retry_pending_lift_saves`
+  off main and Clock-marshals the label set +
+  content-advance check back via `_apply_sync_status`.
+  Cheap `_sync_status_in_flight` guard so cascaded
+  `refresh_recorder_ui` calls don't pile up redundant
+  RPCs.
+
+  Filed `NOTES_TO_DAEMON.md` "Atomic-write auto-commit
+  takes commit timing away from the peer" — daemon now
+  schedules a commit on every atomic_commit/set_audio/
+  set_illustration write (§ 11 step 6), which committed
+  the post-record audio LIFT write into git history
+  before the user had decided whether the take was
+  keepable (the redo path now ships bad takes; the swipe-
+  is-commit-boundary UX is silently gone). Proposed an
+  opt-out flag (`commit_after=False`) or an explicit
+  boundary RPC.
+
 1.55.17
   Settings page: filter-summary label also gets the
   MarqueeLabel treatment. Same reasoning as 1.55.16's
