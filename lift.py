@@ -398,7 +398,7 @@ class LIFTDatabase:
         # to free its subtree before the next entry starts. The full
         # DOM (self._tree / self._root) is NOT retained — it would
         # be ~5× the source size. The DOM gets rebuilt lazily on the
-        # first mutation (set_audio / clean_template / etc.) via
+        # first mutation (set_audio / set_illustration / etc.) via
         # _ensure_dom, and held from then on so subsequent saves
         # don't re-parse. This means the cold-load memory peak is
         # roughly entries-only (~1× source) instead of DOM+entries
@@ -719,47 +719,6 @@ class LIFTDatabase:
         ill_el.set('href', filename)
         self._save()
 
-    # ── Template cleaning ────────────────────────────────────────────────────
-
-    def clean_template(self):
-        """Remove empty non-vernlang forms from citation/definition; ensure vernlang form exists.
-
-        Called once after setting vernlang on a newly-created-from-template file.
-        """
-        if not self.vernlang:
-            return
-        self._ensure_dom()
-        for entry_el in self._root.findall('entry'):
-            for parent_tag in ('citation', 'sense/definition'):
-                for parent_el in entry_el.findall(parent_tag):
-                    self._clean_forms(parent_el)
-        self._save()
-        # Re-parse so in-memory entries reflect the cleaned XML.
-        # _parse runs iterparse against the on-disk file (just-saved
-        # bytes); the DOM we just built remains alongside.
-        self.entries = []
-        self._parse()
-
-    def _clean_forms(self, parent_el):
-        """In *parent_el*, remove empty forms whose lang != vernlang,
-        and ensure a <form lang=vernlang><text/></form> exists."""
-        has_vern = False
-        to_remove = []
-        for form in parent_el.findall('form'):
-            lang = form.get('lang', '')
-            text = self._text(form)
-            if lang == self.vernlang:
-                has_vern = True
-            elif not text and not _is_audio_lang(lang):
-                to_remove.append(form)
-        for form in to_remove:
-            parent_el.remove(form)
-        if not has_vern:
-            vern_form = ET.SubElement(parent_el, 'form')
-            vern_form.set('lang', self.vernlang)
-            ET.SubElement(vern_form, 'text')
-            self._indent_dirty = True
-
     # ── Orphan-audio recovery ──────────────────────────────────────────────
 
     def bind_orphan_audio(self):
@@ -867,7 +826,7 @@ class LIFTDatabase:
         set_illustration with commit_after=False) has updated the
         backing file: the daemon's bytes are on disk but the peer's
         cached _tree is now stale. A subsequent DOM-rewrite save
-        (e.g. clean_template) without this invalidation would
+        (e.g. set_illustration) without this invalidation would
         serialize the stale DOM and clobber the surgical change."""
         with self._dom_lock:
             self._tree = None
@@ -880,7 +839,7 @@ class LIFTDatabase:
         The initial load uses iterparse + clear() to populate
         self.entries with low peak memory and intentionally drops the
         full DOM. Anything that needs to mutate the XML — set_audio,
-        set_illustration, clean_template, bind_orphan_audio's set_audio
+        set_illustration, bind_orphan_audio's set_audio
         loop — calls this first so self._tree / self._root are
         available. Once built we keep the DOM for the rest of the
         session so subsequent saves don't re-parse.
@@ -939,7 +898,7 @@ class LIFTDatabase:
         of re-flowing the whole tree's whitespace on every save."""
         # First-save-after-cold-load lazily builds the DOM that the
         # streaming parse skipped (see _ensure_dom). Mutation entry
-        # points (_find_entry, clean_template, set_illustration) also
+        # points (_find_entry, set_audio, set_illustration) also
         # call this, but _save is the floor — nothing reaches disk
         # without a tree to write.
         self._ensure_dom()

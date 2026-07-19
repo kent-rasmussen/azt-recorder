@@ -2570,12 +2570,11 @@ class ConfigScreen(Screen):
                 self._hide_box_tree(box)
         if not app.recorder:
             return
-        cawl_in = self.ids.get('cawl_input')
-        if cawl_in:
-            cawl_in.text = app.recorder.cawl_filter or ''
-        gs = self.ids.get('gloss_search_input')
-        if gs:
-            gs.text = app.recorder.gloss_search or ''
+        # (The collapsed inline panel's cawl_input /
+        # gloss_search_input are no longer populated here — the
+        # filter modal owns those edits, and stale text in the
+        # dead panel resurrected cleared filters via
+        # apply_and_go.)
         # Restore show-past-work pref (default False). The
         # Settings-side toggle moved into the Go-To popup in
         # 1.52.x; this just keeps the recorder's
@@ -3187,8 +3186,19 @@ class ConfigScreen(Screen):
             change_btn.bind(
                 on_release=lambda *_:
                     self._enter_team_size_editing())
+            remove_btn = Button(
+                text=_tr('remove'),
+                font_size=sp(14), font_name=_FONT_NAME,
+                background_normal='',
+                background_color=theme.BTN_INACTIVE,
+                color=theme.TEXT,
+                size_hint_x=1)
+            remove_btn.bind(
+                on_release=lambda *_:
+                    self._confirm_remove_split())
             ts_row.add_widget(summary)
             ts_row.add_widget(change_btn)
+            ts_row.add_widget(remove_btn)
             return
         # Picker mode.
         for n in (2, 3, 4):
@@ -3320,6 +3330,89 @@ class ConfigScreen(Screen):
         Bound to the Cancel button rendered alongside the
         [2][3][4][5+] options."""
         self._team_size_editing = False
+        self._refresh_split_rows()
+
+    def _confirm_remove_split(self):
+        """[remove] in the split summary row. Confirmation gate —
+        un-splitting writes team_size=0 into the shared project
+        KV, so every device on the team loses its slice, not just
+        this one."""
+        from kivy.uix.popup import Popup
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.button import Button
+        from kivy.uix.label import Label
+
+        box = BoxLayout(
+            orientation='vertical', padding=dp(12), spacing=dp(10))
+        msg = Label(
+            text=_tr('Are you sure? This will stop splitting the '
+                     'word list for the whole team.'),
+            font_size=sp(14), font_name=_FONT_NAME,
+            halign='center', valign='middle')
+        msg.bind(size=lambda w, s: setattr(w, 'text_size', s))
+        box.add_widget(msg)
+        btn_row = BoxLayout(
+            orientation='horizontal', size_hint_y=None,
+            height=dp(48), spacing=dp(8))
+        cancel = Button(text=_tr('Cancel'), font_size=sp(13))
+        ok = Button(
+            text=_tr('Remove'), font_size=sp(13),
+            background_color=theme.ACCENT)
+        btn_row.add_widget(cancel)
+        btn_row.add_widget(ok)
+        box.add_widget(btn_row)
+        popup = Popup(
+            title=_tr('Stop splitting?'),
+            content=box,
+            size_hint=(0.85, None), height=dp(220),
+            auto_dismiss=True)
+        cancel.bind(on_release=lambda *_: popup.dismiss())
+
+        def _confirm(*_):
+            popup.dismiss()
+            self._do_remove_split()
+        ok.bind(on_release=_confirm)
+        popup.open()
+
+    def _do_remove_split(self):
+        """Un-split the project: write an explicit ``team_size=0``
+        to the project KV (a literal '0', distinguishable from the
+        empty read the transient-zero guard absorbs), release this
+        device's slot claim, and optimistically zero the local
+        mirror so the modal row flips immediately. Peers observe
+        the explicit zero on their next populate cycle and release
+        their own claims + clear their split-derived filters (see
+        _populate_split_state_apply)."""
+        app = App.get_running_app()
+        langcode = getattr(app, '_current_langcode', '') or ''
+        if not langcode:
+            return
+        try:
+            from azt_collab_client import project_kv_set
+        except ImportError:
+            return
+        project_kv_set(langcode, 'team_size', 0)
+        # Best-effort daemon-side release of our own claim so the
+        # roster empties for everyone (§ 17c Rule 7 — RPC off the
+        # main thread). Idempotent with the apply-side release.
+        import threading
+        threading.Thread(
+            target=app._release_stale_slot_worker,
+            args=(langcode,), daemon=True,
+            name='release-slot-unsplit').start()
+        # Optimistic local mirror + cache clear, so the transient-
+        # zero guard can't resurrect the old team_size from the
+        # last-known values.
+        app._last_known_team_size = 0
+        app._last_known_my_slot = ''
+        if app.recorder is not None:
+            app.recorder.split_team_size = 0
+            app.recorder.split_my_slot = ''
+        self._team_size_editing = False
+        # populate re-reads the KV ('0' now), clears the split-
+        # derived filter via its team_size-falsy branch, and
+        # refreshes the modal rows + recorder UI on apply.
+        app._populate_split_state()
         self._refresh_split_rows()
 
     def _open_team_size_plus_dialog(self):
@@ -3717,25 +3810,13 @@ class ConfigScreen(Screen):
     def apply_and_go(self):
         app = App.get_running_app()
         if app.recorder:
-            cawl_in = self.ids.get('cawl_input')
-            if cawl_in:
-                text = cawl_in.text.strip()
-                prior = (app.recorder.cawl_filter or '').strip()
-                app.recorder.cawl_filter = text
-                set_peer_pref('cawl_filter', text or None)
-                # § 21: only flip the source flag when the text
-                # actually changed. Closing Settings without
-                # touching the CAWL field should not demote a
-                # split-derived value to 'manual' (which would
-                # suppress [k/n] in progress_text and stop the
-                # filter from auto-recomputing on next sync).
-                if text != prior:
-                    set_peer_pref(
-                        'cawl_filter_source',
-                        'manual' if text else None)
-            gs = self.ids.get('gloss_search_input')
-            if gs:
-                app.recorder.gloss_search = gs.text.strip()
+            # CAWL filter + gloss search are applied by the filter
+            # modal's on_dismiss — the inline cawl_input /
+            # gloss_search_input in self.ids are the collapsed
+            # dead-weight panel and hold stale text from on_enter.
+            # Re-applying them here resurrected cleared filters
+            # when leaving Settings via X (the Android back button
+            # skips this method, hence the X/back asymmetry).
             app.recorder.only_unrecorded = self.only_unrecorded
             app.recorder.rebuild_queue()
             app.go_recorder()
@@ -4488,6 +4569,11 @@ class RecorderController:
     @property
     def progress_text(self):
         if not self.queue:
+            # A filter emptied the queue → the label's tap target
+            # (show_goto_dialog) offers to clear it; hint at that.
+            if (self.cawl_filter.strip() or self.gloss_search.strip()
+                    or self.only_unrecorded):
+                return _tr('No entries — tap to fix')
             return 'No entries'
         cawl = self.current.get('cawl', '')
         cawl_num = cawl.lstrip('0') or '0' if cawl else ''
@@ -5475,7 +5561,7 @@ class RecorderController:
         if result.has_any(S.AUDIO_SET, S.AUDIO_SET_NO_CHANGE):
             # Daemon's bytes are now on disk; the peer's cached DOM
             # (if any) no longer matches. Next DOM-rewrite save
-            # (clean_template etc.) must re-read or it'll clobber.
+            # (set_illustration etc.) must re-read or it'll clobber.
             self.db.invalidate_dom_cache()
             return True, ''
         if (result.has(S.SERVER_UNAVAILABLE)
@@ -6107,7 +6193,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.58.4'
+__version__ = '1.59.0'
 
 
 class LIFTRecorderApp(App):
@@ -7609,7 +7695,10 @@ class LIFTRecorderApp(App):
         #      downstream LIFT writes use the same code the daemon
         #      stores under.
         #   2. _pending_vernlang — set only by new-from-template flows;
-        #      its real semantic is "also run clean_template()."
+        #      a vernlang fallback and the new-project auto-publish gate
+        #      (see _load_lift_publish). Template cleanup no longer keys
+        #      off it — the daemon prunes new templates server-side since
+        #      0.52.32 (CLIENT_INTEGRATION.md § 8a).
         # No third-tier peer-side cache: the recorder never persists
         # daemon-owned state locally. If neither is set we're past a
         # broken load path; let downstream surface that rather than
@@ -7655,17 +7744,6 @@ class LIFTRecorderApp(App):
                 db.set_vernlang(authoritative)
             elif pending:
                 db.set_vernlang(pending)
-            if pending:
-                try:
-                    db.clean_template()
-                except Exception as ex:
-                    # _save() inside clean_template writes the LIFT
-                    # file — on Android URI projects that goes through
-                    # the daemon's ContentProvider and can fail with a
-                    # stale URI grant or transient daemon state.
-                    # Best-effort cleanup of template-stub forms; a
-                    # failure here must not abort the load.
-                    print(f'[load_lift] clean_template failed: {ex}')
             # Filesystem-side orphan-audio recovery: bind any audio
             # files whose deterministic basename names an entry with
             # no audiolang citation form yet. Covers the case where a
@@ -7887,8 +7965,14 @@ class LIFTRecorderApp(App):
             raw = project_kv_get(langcode, 'team_size', default='') or ''
             try:
                 team_size = int(raw) if raw else 0
+                # A stored literal '0' is a deliberate un-split
+                # (the Remove button) — distinct from the empty
+                # read ('') the transient-zero guard absorbs as a
+                # daemon read race.
+                explicit_zero = bool(raw) and team_size == 0
             except (TypeError, ValueError):
                 team_size = 0
+                explicit_zero = False
             try:
                 slots = list_slots(langcode) or {}
             except Exception as ex:
@@ -7902,7 +7986,7 @@ class LIFTRecorderApp(App):
             Clock.schedule_once(
                 lambda dt: self._populate_split_state_apply(
                     langcode, team_size, slots, my_peer_id,
-                    pending_slot),
+                    pending_slot, explicit_zero=explicit_zero),
                 0)
         except Exception as ex:
             print(f'[split] worker project_kv_get failed: {ex}',
@@ -7922,7 +8006,8 @@ class LIFTRecorderApp(App):
                     lambda dt: self._populate_split_state(), 0)
 
     def _populate_split_state_apply(self, langcode, team_size, slots,
-                                    my_peer_id, pending_slot):
+                                    my_peer_id, pending_slot,
+                                    explicit_zero=False):
         # Project switched while the worker was in flight — drop
         # the apply rather than write a previous project's split
         # state onto the new one.
@@ -7947,11 +8032,21 @@ class LIFTRecorderApp(App):
         prev_team_size = max(
             int(getattr(self.recorder, 'split_team_size', 0) or 0),
             int(getattr(self, '_last_known_team_size', 0) or 0))
-        if prev_team_size and not team_size:
+        if prev_team_size and not team_size and not explicit_zero:
             print(f'[split] ignoring transient team_size=0 '
                   f'(prev={prev_team_size}) — daemon read race',
                   file=sys.stderr)
             team_size = prev_team_size
+        if explicit_zero:
+            # Deliberate un-split (KV holds a literal '0'). Clear
+            # the last-known caches so the guard above can't
+            # resurrect the old size on a later '' read race.
+            if prev_team_size:
+                print(f'[split] explicit team_size=0 — project '
+                      f'un-split (prev={prev_team_size})',
+                      file=sys.stderr)
+            self._last_known_team_size = 0
+            self._last_known_my_slot = ''
         # § 21 Locked semantic #2 (2026-05-28): peer_id is the
         # canonical key; device_name is display-only and can change
         # without invalidating any claim. No device_name fallback —
@@ -7964,6 +8059,21 @@ class LIFTRecorderApp(App):
                 if (claim or {}).get('peer_id', '') == my_peer_id:
                     my_slot = str(slot)
                     break
+        if explicit_zero and (my_slot or pending_slot):
+            # Team un-split while this device still holds (or is
+            # mid-claiming) a slot. Release daemon-side so the
+            # roster empties for every peer, and drop the claim
+            # locally — the team_size-falsy branch below then
+            # clears any split-derived filter.
+            if my_slot:
+                import threading
+                threading.Thread(
+                    target=self._release_stale_slot_worker,
+                    args=(langcode,), daemon=True,
+                    name='release-slot-unsplit').start()
+            my_slot = ''
+            pending_slot = ''
+            self._claim_pending_slot = ''
         # S1 claim-pending guard: a just-issued claim_slot may not
         # yet have flushed to list_slots. Adopt the pending value
         # optimistically so the picker doesn't re-fire — AND so
@@ -8858,14 +8968,12 @@ class LIFTRecorderApp(App):
                 # registry key so _register_current_project can skip
                 # the derive_langcode round-trip.
                 #
-                # We deliberately do NOT also set _pending_vernlang
-                # here. _pending_vernlang is the "this is a fresh
-                # template clone, run clean_template" signal — set by
-                # the langpicker UI before the new-from-template flow
-                # reaches the picker (langpicker.py _on_continue).
-                # Overwriting it on every pick caused existing-project
-                # opens to run a full clean_template + re-parse + save
-                # round-trip on every load.
+                # New-from-template projects need no peer-side handling
+                # beyond this: the daemon prunes the template to the
+                # chosen vernacular server-side in create_from_template
+                # (CLIENT_INTEGRATION.md § 8a, since 0.52.32), so the
+                # recorder just load_lifts whatever the picker returns —
+                # same path as an existing-project open.
                 self._current_langcode = langcode
                 # Suite-wide "last opened project" state: any peer
                 # opening next lands here too.
@@ -9115,8 +9223,8 @@ class LIFTRecorderApp(App):
 
     def share_log(self):
         """Bundle every per-day recorder log + every per-day daemon
-        log (via ``get_daemon_log_files``) into a single zip and
-        ship that zip via Android's share sheet as one
+        log (via ``get_daemon_log_files``) into a single ``.tar.gz``
+        and ship that archive via Android's share sheet as one
         ``ACTION_SEND`` attachment served by the recorder's own
         FileProvider. Signal-compatible per
         CLIENT_INTEGRATION.md § 14b-iii — single item +
@@ -9127,12 +9235,14 @@ class LIFTRecorderApp(App):
             self._show_error(_tr(
                 'Log sharing is only available on Android.'))
             return
-        import zipfile
         import uuid
         import shutil
         import datetime as _dt
         from azt_collab_client.ui.share import share_files
         from azt_collab_client import get_daemon_log_files
+        from azt_collab_client.diagnostics import (
+            build_diagnostics_targz, diagnostics_archive_name,
+            DIAGNOSTICS_MIME)
         try:
             from jnius import autoclass
             PythonActivity = autoclass(
@@ -9182,42 +9292,51 @@ class LIFTRecorderApp(App):
             ).format(error=ex))
             return
         stamp = _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
-        zip_name = f'azt_recorder_diagnostics_{stamp}.zip'
-        zip_path = os.path.join(share_dir, zip_name)
-        # Build the zip: recorder per-day logs (real files) first,
-        # daemon per-day logs (RPC content) second.
+        # Format (gzipped tar), filename, and MIME come from the shared
+        # azt_collab_client.diagnostics helper — CLIENT_INTEGRATION.md
+        # § 14b-iii (since 0.52.27) MUST: a peer building its own
+        # diagnostics bundle uses the helper so the container format
+        # can't drift from the daemon's (the zip→tar.gz change once
+        # shipped stale here because the format was hand-rolled).
+        # Collection + staging + dispatch stay recorder-side: the daemon
+        # can't see the recorder's own per-day log files, and on Android
+        # the two live in separate APK sandboxes (this FileProvider vs.
+        # the daemon's ContentProvider).
+        archive_name = diagnostics_archive_name(slug='recorder', stamp=stamp)
+        archive_path = os.path.join(share_dir, archive_name)
+        # recorder-private per-day log FILES → file_items (real files).
+        file_items = []
+        if _LOG_PATH:
+            log_dir = os.path.dirname(_LOG_PATH)
+            try:
+                names = sorted(os.listdir(log_dir))
+            except OSError:
+                names = []
+            for name in names:
+                if name.startswith('azt_recorder-') and (
+                        name.endswith('_log.txt')
+                        or name.endswith('.log')):
+                    file_items.append((name, os.path.join(log_dir, name)))
+        # daemon per-day logs pulled via RPC → content_items (in-memory).
+        content_items = []
+        for entry in (get_daemon_log_files() or {}).get('files') or []:
+            content = entry.get('content') or ''
+            if not content:
+                continue
+            name = entry.get('filename') or (
+                f'daemon_{entry.get("date") or "unknown"}_log.txt')
+            content_items.append((name, content))
         try:
-            with zipfile.ZipFile(zip_path, 'w',
-                                 compression=zipfile.ZIP_DEFLATED) as zf:
-                if _LOG_PATH:
-                    log_dir = os.path.dirname(_LOG_PATH)
-                    try:
-                        names = sorted(os.listdir(log_dir))
-                    except OSError:
-                        names = []
-                    for name in names:
-                        if name.startswith('azt_recorder-') and (
-                                name.endswith('_log.txt')
-                                or name.endswith('.log')):
-                            try:
-                                zf.write(os.path.join(log_dir, name),
-                                         arcname=name)
-                            except OSError:
-                                pass
-                bundle = get_daemon_log_files() or {}
-                for entry in bundle.get('files') or []:
-                    content = entry.get('content') or ''
-                    if not content:
-                        continue
-                    name = entry.get('filename') or (
-                        f'daemon_{entry.get("date") or "unknown"}_log.txt')
-                    zf.writestr(name, content)
+            build_diagnostics_targz(
+                archive_path,
+                file_items=file_items,
+                content_items=content_items)
         except OSError as ex:
             self._show_error(_tr(
                 'Could not prepare log share:\n{error}'
             ).format(error=ex))
             return
-        # Hand the zip to FileProvider to get a content:// URI
+        # Hand the archive to FileProvider to get a content:// URI
         # under our own authority. Signal accepts URIs from the
         # sender's authority but rejects MediaStore URIs.
         try:
@@ -9225,7 +9344,7 @@ class LIFTRecorderApp(App):
                 'androidx.core.content.FileProvider')
             File = autoclass('java.io.File')
             uri = FileProvider.getUriForFile(
-                activity, authority, File(zip_path))
+                activity, authority, File(archive_path))
             uri_str = str(uri.toString())
         except Exception as ex:
             self._show_error(_tr(
@@ -9233,8 +9352,8 @@ class LIFTRecorderApp(App):
             ).format(error=ex))
             return
         share_files(
-            items=[{'uri': uri_str, 'display_name': zip_name}],
-            mime_type='application/zip',
+            items=[{'uri': uri_str, 'display_name': archive_name}],
+            mime_type=DIAGNOSTICS_MIME,
             chooser_title=_tr('Share logs'),
             on_error=self._show_error,
         )
@@ -9365,6 +9484,17 @@ class LIFTRecorderApp(App):
                 _stale_msg = translate_status(stale)
                 Clock.schedule_once(
                     lambda dt, m=_stale_msg: self._show_toast(m), 0)
+            # INVITE_ACCEPTED (0.52.24+): daemon auto-accepted a pending
+            # GitHub invite for this repo — transient, NOT an error. Per
+            # § 17 routing, brief toast + no return: access should work
+            # now and the next daemon drain retries, so fall through to
+            # the success path so project_status still refreshes.
+            invite = next((s for s in result.statuses
+                           if s.code == S.INVITE_ACCEPTED), None)
+            if invite is not None:
+                _inv_msg = translate_status(invite)
+                Clock.schedule_once(
+                    lambda dt, m=_inv_msg: self._show_toast(m), 0)
 
             if result.has_any(S.NOT_A_REPO, S.NO_REMOTE):
                 Clock.schedule_once(lambda dt: self.go_collab(), 0)
@@ -9410,6 +9540,25 @@ class LIFTRecorderApp(App):
                 else:
                     Clock.schedule_once(
                         lambda dt: self.go_collab(), 0)
+                return
+            if result.has(S.REPO_NO_ACCESS):
+                # REPO_NO_ACCESS (0.52.24+): daemon hit a 404 with no
+                # pending invite it could auto-accept. This is the
+                # user-initiated sync path, so per § 17 routing send
+                # the user to the client's repo-access popup (Open
+                # GitHub → accept an invite / request access). The
+                # auto-commit path stays silent (banner-only via
+                # project_status.last_sync_error) — not handled here.
+                # Status params carry owner_repo + url.
+                _sc = next((s for s in result.statuses
+                            if s.code == S.REPO_NO_ACCESS), None)
+                _owner_repo = _sc.params.get('owner_repo', '') if _sc else ''
+                _url = _sc.params.get('url', '') if _sc else ''
+                from azt_collab_client.ui.popups import repo_access_popup
+                Clock.schedule_once(
+                    lambda dt: repo_access_popup(
+                        owner_repo=_owner_repo, url=_url,
+                        font_name=_FONT_NAME), 0)
                 return
             if result.has_any(S.SERVER_UNAVAILABLE, S.SERVER_ERROR):
                 _unavail_msg = translate_result(result)
@@ -9707,6 +9856,92 @@ class LIFTRecorderApp(App):
         if self.recorder:
             self.recorder.clear_audio()
 
+    def _offer_clear_empty_filters(self):
+        """Tapping the progress label while the queue is empty.
+        If a client-side filter emptied it, name the filters and
+        offer a one-tap clear; with no filters active the wordlist
+        itself is empty and there's nothing to offer."""
+        r = self.recorder
+        if not r:
+            return
+        parts = []
+        if (r.cawl_filter or '').strip():
+            parts.append(f'CAWL: {r.cawl_filter.strip()}')
+        if (r.gloss_search or '').strip():
+            parts.append(f'gloss: "{r.gloss_search.strip()}"')
+        if r.only_unrecorded:
+            parts.append(_tr('unrecorded only'))
+        if not parts:
+            return
+        from kivy.uix.popup import Popup
+        from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.button import Button
+        from kivy.uix.label import Label
+
+        box = BoxLayout(
+            orientation='vertical', padding=dp(12), spacing=dp(10))
+        msg = Label(
+            text=_tr('No entries match the current filter '
+                     '({filters}).').format(filters=', '.join(parts)),
+            font_size=sp(14), font_name=_FONT_NAME,
+            halign='center', valign='middle')
+        msg.bind(size=lambda w, s: setattr(w, 'text_size', s))
+        box.add_widget(msg)
+        btn_row = BoxLayout(
+            orientation='horizontal', size_hint_y=None,
+            height=dp(48), spacing=dp(8))
+        cancel = Button(text=_tr('Cancel'), font_size=sp(13))
+        clear = Button(
+            text=_tr('Clear filter'), font_size=sp(13),
+            background_color=theme.ACCENT)
+        btn_row.add_widget(cancel)
+        btn_row.add_widget(clear)
+        box.add_widget(btn_row)
+        popup = Popup(
+            title=_tr('No entries'),
+            content=box,
+            size_hint=(0.85, None), height=dp(220),
+            auto_dismiss=True)
+        cancel.bind(on_release=lambda *_: popup.dismiss())
+
+        def _clear(*_):
+            popup.dismiss()
+            self._clear_empty_filters()
+        clear.bind(on_release=_clear)
+        popup.open()
+
+    def _clear_empty_filters(self):
+        """Release filters until the queue is non-empty, least
+        disruptive first: past-work (the common cause — the slice
+        is fully recorded), then gloss search, then the CAWL range
+        (split-derived or manual) last, so a split-team device
+        keeps its slice whenever a lighter clear suffices."""
+        r = self.recorder
+        if not r:
+            return
+        if r.only_unrecorded:
+            # Persist, mirroring the go-to dialog's past-work
+            # toggle — an in-memory-only flip would resurrect the
+            # empty queue on the next project reload.
+            r.only_unrecorded = False
+            set_peer_pref('show_past_work', True)
+            r.rebuild_queue()
+        if not r.queue and (r.gloss_search or '').strip():
+            r.gloss_search = ''
+            r.rebuild_queue()
+        if not r.queue and (r.cawl_filter or '').strip():
+            r.cawl_filter = ''
+            set_peer_pref('cawl_filter', None)
+            set_peer_pref('cawl_filter_source', None)
+            r.rebuild_queue()
+        cs = getattr(self, 'config_screen', None)
+        if cs is not None:
+            try:
+                cs._update_filter_summary()
+            except Exception:
+                pass
+        self.refresh_recorder_ui()
+
     def show_goto_dialog(self):
         """Popup to jump to a specific entry by its list number (the same
         number shown in the progress label, e.g. SILCAWL). Falls back to
@@ -9721,6 +9956,10 @@ class LIFTRecorderApp(App):
         r = self.recorder
         total = len(r.queue)
         if total == 0:
+            # 'No entries' in the progress label — a go-to dialog
+            # over an empty queue is useless. Offer to clear the
+            # filter that emptied it instead.
+            self._offer_clear_empty_filters()
             return
 
         # Map list-number → queue index for entries that carry one.

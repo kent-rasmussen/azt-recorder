@@ -1,5 +1,85 @@
 CHANGELOG — A-Z+T Recorder
 
+1.59.0
+  Two UI gaps closed:
+  - Un-split a project: the split summary row in the filter modal
+    ("Split across N devices  [change]") gains a [remove] button
+    behind an are-you-sure popup ("this will stop splitting the
+    word list for the whole team"). Confirming writes an explicit
+    team_size=0 to the project KV (a literal '0', distinguishable
+    from the empty read the transient-zero guard absorbs as a
+    daemon read race), releases this device's slot claim, and
+    zeroes the local mirror + last-known caches. Peers observe the
+    explicit zero on their next populate cycle, release their own
+    claims, and clear their split-derived CAWL filters via the
+    existing team_size-falsy branch. _populate_split_state_worker
+    now passes explicit_zero through to the apply step; the
+    transient-zero guard only fires on non-explicit zeros.
+  - 'No entries' is now active like the filter button: tapping the
+    progress label over an empty queue (previously a dead tap —
+    show_goto_dialog returned on total==0) names the active
+    filters and offers a one-tap "Clear filter". Clearing is
+    staged least-disruptive-first — past-work (persisted via
+    show_past_work, mirroring the go-to dialog's toggle), then
+    gloss search, then the CAWL range last — so a split-team
+    device keeps its slice whenever a lighter clear restores
+    entries. The label reads "No entries — tap to fix" when a
+    filter is responsible; plain "No entries" (genuinely empty
+    wordlist) stays inert.
+
+1.58.11
+  Fix: clearing "Filter words" didn't persist when leaving Settings
+  via the X button (Android back was fine). apply_and_go (X) was
+  re-applying the collapsed inline panel's cawl_input /
+  gloss_search_input — dead-weight widgets that on_enter had filled
+  with the filter values from Settings-entry time — so a filter
+  cleared in the modal was silently resurrected (and its source
+  demoted to 'manual'). The filter modal's on_dismiss is the sole
+  application point now; apply_and_go no longer touches the CAWL /
+  gloss fields, and on_enter no longer populates the dead panel.
+
+1.58.9
+  Conform to CLIENT_INTEGRATION.md § 8a (0.52.32): the daemon now
+  prunes new-project templates server-side in create_from_template,
+  so peers must not run their own cleaner. Removed the recorder's
+  clean_template / _clean_forms (lift.py) and its only call site in
+  the load-lift worker (main.py). The _pending_vernlang signal stays
+  — it still gates new-project auto-publish and is a vernlang
+  fallback; only the clean_template call hung off it. (The cleaner
+  never fired on the picker path anyway — _pending_vernlang is set
+  inside the daemon's picker subprocess, not in-process here.) Fixed
+  stale comment references to the removed method.
+
+1.58.8
+  share_log now builds its bundle via the shared
+  azt_collab_client.diagnostics helper (build_diagnostics_targz /
+  diagnostics_archive_name / DIAGNOSTICS_MIME) instead of
+  hand-rolling the tarfile — CLIENT_INTEGRATION.md § 14b-iii
+  (0.52.27) MUST. The daemon team shipped the helper (the
+  NOTES_TO_DAEMON refactor request), so the container format is
+  now single-sourced and can't drift as it did in 1.58.6.
+  Collection (recorder-private logs + daemon logs via RPC),
+  FileProvider staging, and dispatch stay recorder-side.
+
+1.58.7
+  Conform to CLIENT_INTEGRATION.md § 17 (0.52.24+): route the
+  user-initiated sync codes REPO_NO_ACCESS and INVITE_ACCEPTED.
+  REPO_NO_ACCESS now opens the client's repo_access_popup
+  (owner_repo + url from the status params) instead of falling
+  through to the success path silently; INVITE_ACCEPTED shows a
+  brief non-error toast and falls through so project_status still
+  refreshes. (0.52.26 QR "valid while displayed" needs no change
+  — the recorder has no own-QR screen; it uses the client popup.)
+
+1.58.6
+  share_log now bundles diagnostics as `.tar.gz`
+  (application/gzip) instead of `.zip`, mirroring the daemon's
+  0.52.23 share fix. The recorder rolls its own archive (it
+  bundles recorder-private per-day logs the daemon can't see),
+  so the tar.gz change had to be mirrored here — it isn't
+  inherited from the symlinked client's share_diagnostics_action.
+  Dodges a field email server that silently strips .zip.
+
 1.58.4
   Revert 1.58.3's hardcoded `p4a.hook = %(source.dir)s/...`
   in buildozer.spec.tmpl. Hook activation stays env-var-driven
