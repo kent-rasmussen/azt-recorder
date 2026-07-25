@@ -4569,11 +4569,6 @@ class RecorderController:
     @property
     def progress_text(self):
         if not self.queue:
-            # A filter emptied the queue → the label's tap target
-            # (show_goto_dialog) offers to clear it; hint at that.
-            if (self.cawl_filter.strip() or self.gloss_search.strip()
-                    or self.only_unrecorded):
-                return _tr('No entries — tap to fix')
             return 'No entries'
         cawl = self.current.get('cawl', '')
         cawl_num = cawl.lstrip('0') or '0' if cawl else ''
@@ -6193,7 +6188,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.59.0'
+__version__ = '1.62.2'
 
 
 class LIFTRecorderApp(App):
@@ -6502,6 +6497,14 @@ class LIFTRecorderApp(App):
             # try/except; if on_done didn't fire, bootstrap is still
             # parked on its own popup and the user hasn't yet given
             # us a daemon to talk to.
+            # Presplash-hold release (contract § "Presplash hold"):
+            # the widget tree is built, so drop the native splash on
+            # the next frame — scheduled BEFORE bootstrap so the FIFO
+            # next-frame queue clears the splash before any bootstrap
+            # popup opens. Nothing slower than first-screen
+            # construction may sit between hold() and this release.
+            from azt_collab_client.ui import presplash_hold
+            Clock.schedule_once(lambda dt: presplash_hold.release(), 0)
             Clock.schedule_once(lambda dt: self._run_bootstrap(), 0)
             # Shared decisions watcher (CLIENT_INTEGRATION.md § 20a).
             # The single canonical surface for inbound LAN decisions
@@ -8619,8 +8622,10 @@ class LIFTRecorderApp(App):
         user can see them elsewhere in the UI.
 
         Returned tuple's other elements drive non-rendering
-        logic: ``last_sync`` for do_sync()'s never-pushed →
-        go_collab routing; ``last_commit`` for the legacy
+        logic: ``last_sync`` stays in the tuple for shape
+        compatibility (do_sync's never-pushed pre-gate that read
+        it was removed in 1.62.0 — routing rides sync result
+        codes now); ``last_commit`` for the legacy
         content-advance fallback; ``head_sha`` for the primary
         HEAD-advance signal in _update_sync_status.
         """
@@ -9366,17 +9371,16 @@ class LIFTRecorderApp(App):
         langcode = self._current_langcode_or_register()
         if not langcode:
             return
-        # If nothing has ever been pushed (last_sync == 0), the
-        # user's tap on the sync indicator is really asking to set
-        # up backup, not to sync. Route to the server's collab UI
-        # directly so they land where Publish lives. (Pre-v0.47.0
-        # the badge surfaced "not backed up" wording for this
-        # state; the v0.47.0 model encodes it as a WAN-N count
-        # instead, but the routing trigger is unchanged.)
-        _, last_sync, _last_commit, _head_sha = self._sync_status_info()
-        if not last_sync:
-            self.go_collab()
-            return
+        # No never-pushed pre-gate here anymore. Pre-1.62.0 a
+        # last_sync == 0 tap skipped sync_project entirely and went
+        # straight to the collab UI — which meant a LAN/USB-only
+        # project (never WAN-pushed by design) could never fire the
+        # LAN fan-out the daemon runs inside the sync RPC since
+        # 0.54.40. Now the RPC always fires; setup routing rides the
+        # typed result codes below (NOT_A_REPO / NO_REMOTE /
+        # AUTH_REQUIRED), which land in the same collab UI when
+        # setup is genuinely missing. Bonus: drops a blocking
+        # project_status RPC from the tap path (§ 17c Rule 7).
         # CLIENT_INTEGRATION.md § 17c Rule 3 — peer-side debounce on
         # the Sync button (250 ms). sync_project is NOT debounced
         # server-side, so a fast double-tap fires two parallel calls;
@@ -9407,9 +9411,28 @@ class LIFTRecorderApp(App):
         # (retried=True) and that invocation's finally does the release.
         _keep_held = [False]
 
-        def _on_sync_done(result, retried=False):
+        def _lan_armed_for_routing(result):
+            """Worker-thread helper: when the WAN leg refused with a
+            setup-class code, decide whether the gesture was still
+            carried by LAN. Since daemon 0.54.40 the sync RPC fires
+            the LAN fan-out BEFORE any WAN gate, so AUTH_REQUIRED /
+            NO_REMOTE are informational for a LAN-armed project —
+            the room synced; only the internet backup is absent.
+            Reads the daemon-owned lan_allow_sync toggle off
+            ProjectStatus (§ 17b), the sanctioned peer surface — no
+            peer-side guessing about what the daemon did."""
+            if not result.has_any(S.AUTH_REQUIRED, S.NO_REMOTE):
+                return False
             try:
-                _on_sync_done_inner(result, retried)
+                from azt_collab_client import project_status
+                status = project_status(langcode)
+                return bool(getattr(status, 'lan_allow_sync', False))
+            except Exception:
+                return False
+
+        def _on_sync_done(result, retried=False, lan_armed=False):
+            try:
+                _on_sync_done_inner(result, retried, lan_armed)
             finally:
                 # § 17c Rule 1 — clear the in-flight flag on the "post"
                 # branch unless we just spawned a JOB_INTERRUPTED retry;
@@ -9419,7 +9442,7 @@ class LIFTRecorderApp(App):
                     self._sync_in_flight[langcode] = False
                 _keep_held[0] = False
 
-        def _on_sync_done_inner(result, retried=False):
+        def _on_sync_done_inner(result, retried=False, lan_armed=False):
             print(f'[do_sync] {translate_result(result)}')
             # Structure per azt_collab_client/CLAUDE.md "Peer contract:
             # routing on sync results" (do_sync example, lines 389-430):
@@ -9438,8 +9461,13 @@ class LIFTRecorderApp(App):
             #    warning must surface before any routing branch
             #    consumes the result.
             # 2. Routing branches (elif chain) on the primary code:
-            #    NOT_A_REPO/NO_REMOTE  → publish settings
-            #    AUTH_REQUIRED         → GitHub Connect
+            #    NOT_A_REPO            → publish settings
+            #    NO_REMOTE /
+            #    AUTH_REQUIRED         → toast + stay when LAN is
+            #                            armed (daemon 0.54.40 fanned
+            #                            out before the WAN gate);
+            #                            else publish settings /
+            #                            GitHub Connect
             #    APP_NOT_INSTALLED /
             #    APP_SUSPENDED /
             #    REPO_NOT_AUTHORIZED   → open params['url']
@@ -9496,10 +9524,22 @@ class LIFTRecorderApp(App):
                 Clock.schedule_once(
                     lambda dt, m=_inv_msg: self._show_toast(m), 0)
 
-            if result.has_any(S.NOT_A_REPO, S.NO_REMOTE):
+            if result.has(S.NOT_A_REPO):
                 Clock.schedule_once(lambda dt: self.go_collab(), 0)
                 return
-            if result.has(S.AUTH_REQUIRED):
+            if result.has_any(S.NO_REMOTE, S.AUTH_REQUIRED):
+                if lan_armed:
+                    # Daemon 0.54.40: the LAN fan-out already fired
+                    # before the WAN gate refused — the gesture DID
+                    # sync with the room. Keep the user in place;
+                    # the code is informational ("no internet
+                    # backup"), not a dead-end. Refresh so the LAN
+                    # count moves.
+                    _msg = translate_result(result)
+                    Clock.schedule_once(
+                        lambda dt, m=_msg: self._show_toast(m), 0)
+                    self._update_sync_status()
+                    return
                 Clock.schedule_once(lambda dt: self.go_collab(), 0)
                 return
             if result.has(S.CONTRIBUTOR_UNSET):
@@ -9579,9 +9619,11 @@ class LIFTRecorderApp(App):
                     # § 12: contributor is daemon-owned.
                     try:
                         r = sync_project(langcode)
+                        _armed = _lan_armed_for_routing(r)
                         Clock.schedule_once(
-                            lambda dt, rr=r:
-                                _on_sync_done(rr, retried=True),
+                            lambda dt, rr=r, a=_armed:
+                                _on_sync_done(rr, retried=True,
+                                              lan_armed=a),
                             0)
                     except Exception as ex:
                         # Same belt-and-suspenders as the initial
@@ -9613,7 +9655,10 @@ class LIFTRecorderApp(App):
             # § 12: contributor is daemon-owned, no longer on the wire.
             try:
                 result = sync_project(langcode)
-                Clock.schedule_once(lambda dt: _on_sync_done(result), 0)
+                _armed = _lan_armed_for_routing(result)
+                Clock.schedule_once(
+                    lambda dt: _on_sync_done(result, lan_armed=_armed),
+                    0)
             except Exception as ex:
                 # Belt-and-suspenders: if sync_project raises something
                 # the client didn't wrap into a Result, _on_sync_done
@@ -9651,23 +9696,34 @@ class LIFTRecorderApp(App):
     def nav_prev(self):
         if not self.recorder:
             return
-        # Only bake images and trigger a sync if the user actually
-        # changed something on the current entry. Pure browse swipes
-        # are free.
-        if self.recorder._dirty:
-            self._save_remote_image()
-            self._auto_commit_sync()
-            self.recorder._dirty = False
+        self._flush_entry_on_swipe()
         self.recorder.go_prev()
 
     def nav_next(self):
         if not self.recorder:
             return
+        self._flush_entry_on_swipe()
+        self.recorder.go_next()
+
+    def _flush_entry_on_swipe(self):
+        """Commit boundary for a swipe, two triggers:
+
+        - The user changed something on the current entry this
+          session (recorder._dirty): bake the image and mark the
+          boundary, as always.
+        - Backfill: the entry already has recorded audio but its
+          displayed image never made it into the project (bake
+          failed in an earlier session, older APK, ...). The
+          audio gate + idempotency checks inside _save_remote_image
+          make this a cheap no-op on audio-less and on healthy
+          entries, so pure browse stays free; the commit only fires
+          when a save was actually initiated."""
         if self.recorder._dirty:
             self._save_remote_image()
             self._auto_commit_sync()
             self.recorder._dirty = False
-        self.recorder.go_next()
+        elif self._save_remote_image():
+            self._auto_commit_sync()
 
     def _save_image_for_entry(self, pil_img, entry, fmt='PNG'):
         """Write *pil_img* as *entry*'s canonical illustration into the
@@ -9753,33 +9809,43 @@ class LIFTRecorderApp(App):
 
     def _save_remote_image(self):
         """Bake the current entry's displayed image into the project so
-        it commits with the surrounding swipe. No-op if no image is
-        displayed, if the entry already has its canonical project image
-        (idempotency), or if a usable image source can't be obtained.
-        Called from nav_next / nav_prev only when the recorder is
-        dirty — pure browse never invokes this."""
+        it commits with the surrounding swipe. No-op if the entry has
+        no recorded audio, if no image is displayed, if the entry
+        already has its canonical project image (idempotency), or if a
+        usable image source can't be obtained. Called from
+        _flush_entry_on_swipe on every swipe — the audio gate and the
+        idempotency checks are what keep pure browse free. Returns
+        True only when a save was actually initiated, so the caller
+        knows whether a commit boundary is warranted."""
         if not self.recorder:
-            return
+            return False
         entry = self.recorder.current
         if not entry:
-            return
+            return False
+        # Audio gate: never bake images for entries the user hasn't
+        # recorded — browse-only entries display CAWL images that
+        # don't belong in the project. This also stops the dirty
+        # re-arm from _save_image_for_entry's worker turning the
+        # *next* swipe (from an untouched entry) into a spurious bake.
+        if not entry.get('audio_filename'):
+            return False
         # Go through the lazy property so an unresolved image_path
         # gets filled in here on first access, not by parse.
         img_path = self.recorder.image_path
         if not img_path:
-            return  # no image
+            return False  # no image
         db = self.recorder.db
         filename = db.imagename(entry)
         # Idempotency: if the entry already references the canonical
         # project filename, the image is already in the repo. Skip.
         if entry.get('illustration_href') == filename:
-            return
+            return False
         # On filesystem projects we can also short-circuit on a
         # direct path match.
         if not getattr(db, 'is_uri', False) and db.images_dir:
             dest_fs = os.path.join(db.images_dir, filename)
             if img_path.startswith(db.images_dir) or os.path.exists(dest_fs):
-                return
+                return False
         # Stage 2: img_path is always a local file now (project's own
         # images/, an Android URI-project pull-through, or a CAWL
         # pull-through tmpfile from the daemon). Two paths remain:
@@ -9794,7 +9860,7 @@ class LIFTRecorderApp(App):
             threading.Thread(
                 target=self._copy_cached_to_images,
                 args=(img_path, filename, entry), daemon=True).start()
-            return
+            return True
         # Texture-fallback for the race where the pull-through file
         # vanished between display and save.
         sm = self.root.ids.sm
@@ -9809,6 +9875,8 @@ class LIFTRecorderApp(App):
                 target=self._save_texture_to_file,
                 args=(pixels, w, h, filename, entry, needs_flip),
                 daemon=True).start()
+            return True
+        return False
 
     def _copy_cached_to_images(self, src, filename, entry):
         """Worker: read a cached image from *src* (local file path),
@@ -9856,92 +9924,6 @@ class LIFTRecorderApp(App):
         if self.recorder:
             self.recorder.clear_audio()
 
-    def _offer_clear_empty_filters(self):
-        """Tapping the progress label while the queue is empty.
-        If a client-side filter emptied it, name the filters and
-        offer a one-tap clear; with no filters active the wordlist
-        itself is empty and there's nothing to offer."""
-        r = self.recorder
-        if not r:
-            return
-        parts = []
-        if (r.cawl_filter or '').strip():
-            parts.append(f'CAWL: {r.cawl_filter.strip()}')
-        if (r.gloss_search or '').strip():
-            parts.append(f'gloss: "{r.gloss_search.strip()}"')
-        if r.only_unrecorded:
-            parts.append(_tr('unrecorded only'))
-        if not parts:
-            return
-        from kivy.uix.popup import Popup
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.button import Button
-        from kivy.uix.label import Label
-
-        box = BoxLayout(
-            orientation='vertical', padding=dp(12), spacing=dp(10))
-        msg = Label(
-            text=_tr('No entries match the current filter '
-                     '({filters}).').format(filters=', '.join(parts)),
-            font_size=sp(14), font_name=_FONT_NAME,
-            halign='center', valign='middle')
-        msg.bind(size=lambda w, s: setattr(w, 'text_size', s))
-        box.add_widget(msg)
-        btn_row = BoxLayout(
-            orientation='horizontal', size_hint_y=None,
-            height=dp(48), spacing=dp(8))
-        cancel = Button(text=_tr('Cancel'), font_size=sp(13))
-        clear = Button(
-            text=_tr('Clear filter'), font_size=sp(13),
-            background_color=theme.ACCENT)
-        btn_row.add_widget(cancel)
-        btn_row.add_widget(clear)
-        box.add_widget(btn_row)
-        popup = Popup(
-            title=_tr('No entries'),
-            content=box,
-            size_hint=(0.85, None), height=dp(220),
-            auto_dismiss=True)
-        cancel.bind(on_release=lambda *_: popup.dismiss())
-
-        def _clear(*_):
-            popup.dismiss()
-            self._clear_empty_filters()
-        clear.bind(on_release=_clear)
-        popup.open()
-
-    def _clear_empty_filters(self):
-        """Release filters until the queue is non-empty, least
-        disruptive first: past-work (the common cause — the slice
-        is fully recorded), then gloss search, then the CAWL range
-        (split-derived or manual) last, so a split-team device
-        keeps its slice whenever a lighter clear suffices."""
-        r = self.recorder
-        if not r:
-            return
-        if r.only_unrecorded:
-            # Persist, mirroring the go-to dialog's past-work
-            # toggle — an in-memory-only flip would resurrect the
-            # empty queue on the next project reload.
-            r.only_unrecorded = False
-            set_peer_pref('show_past_work', True)
-            r.rebuild_queue()
-        if not r.queue and (r.gloss_search or '').strip():
-            r.gloss_search = ''
-            r.rebuild_queue()
-        if not r.queue and (r.cawl_filter or '').strip():
-            r.cawl_filter = ''
-            set_peer_pref('cawl_filter', None)
-            set_peer_pref('cawl_filter_source', None)
-            r.rebuild_queue()
-        cs = getattr(self, 'config_screen', None)
-        if cs is not None:
-            try:
-                cs._update_filter_summary()
-            except Exception:
-                pass
-        self.refresh_recorder_ui()
-
     def show_goto_dialog(self):
         """Popup to jump to a specific entry by its list number (the same
         number shown in the progress label, e.g. SILCAWL). Falls back to
@@ -9955,16 +9937,16 @@ class LIFTRecorderApp(App):
 
         r = self.recorder
         total = len(r.queue)
-        if total == 0:
-            # 'No entries' in the progress label — a go-to dialog
-            # over an empty queue is useless. Offer to clear the
-            # filter that emptied it instead.
-            self._offer_clear_empty_filters()
-            return
 
         # Map list-number → queue index for entries that carry one.
+        # With an empty (filtered-out) queue, fall back to the
+        # unfiltered model so the dialog still opens with a sane
+        # range — its past-work / outside-filter controls are how
+        # the user un-empties the queue. The index values in the
+        # fallback map are never read: _go rebuilds a live map
+        # against the current queue at OK time.
         num_to_idx = {}
-        for idx, e in enumerate(r.queue):
+        for idx, e in enumerate(r.queue if total else r.db.entries):
             cawl = e.get('cawl', '')
             if not cawl:
                 continue
@@ -9988,9 +9970,12 @@ class LIFTRecorderApp(App):
                 label=list_label, lo=lo, hi=hi)
             hint = f'{lo}-{hi}'
         else:
+            # Empty filtered queue: show the unfiltered count so
+            # the range isn't a nonsensical "1-0".
+            shown_total = total or len(r.db.entries)
             initial = str(r.index + 1)
-            title = _tr('Go to entry (1-{total})').format(total=total)
-            hint = f'1-{total}'
+            title = _tr('Go to entry (1-{total})').format(total=shown_total)
+            hint = f'1-{shown_total}'
 
         from kivy.uix.checkbox import CheckBox
         from kivy.uix.label import Label
@@ -10329,4 +10314,11 @@ class LIFTRecorderApp(App):
 
 
 if __name__ == '__main__':
+    # Keep the native splash up until the first screen can respond
+    # (CLIENT_INTEGRATION.md § "Presplash hold", client 0.54.17):
+    # Kivy drops it at first frame, long before the recorder is
+    # usable. Idempotent no-op off Android; the helper's 45 s
+    # watchdog guarantees release even on a failed load path.
+    from azt_collab_client.ui import presplash_hold
+    presplash_hold.hold()
     LIFTRecorderApp().run()

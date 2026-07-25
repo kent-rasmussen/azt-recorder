@@ -83,6 +83,24 @@ def _(message: str) -> str:
     return _current.gettext(message)
 
 
+def _on_client_language_change(lang: str) -> None:
+    """Re-create the recorder catalog whenever the client catalog
+    re-languages (required since client 0.43.1). Language changes can
+    originate outside this module's ``set_language`` — bootstrap's
+    daemon-pref sync and the client-owned settings UI both call
+    ``client.i18n.set_language`` directly. Without this hook,
+    ``_current`` (and the client translation object captured by its
+    ``add_fallback``) stays frozen at import-time language, so
+    client-owned strings regress to English msgids after a change."""
+    global _current
+    _current = _load_recorder_catalog(lang)
+
+
+# Idempotent (the client dedupes callbacks); fires after the client
+# catalog has been swapped and the preference persisted.
+_client_i18n.subscribe_language_change(_on_client_language_change)
+
+
 # ── auto-init ──────────────────────────────────────────────────────────────
 # Adopt whatever the client has already applied at import.
 _current = _load_recorder_catalog(_client_i18n.current_language())

@@ -1,5 +1,64 @@
 CHANGELOG — A-Z+T Recorder
 
+1.62.0
+  Sync button now reaches LAN-only teams (peer half of daemon
+  0.54.40 "user Sync fires LAN regardless of github"):
+  - Removed do_sync's never-pushed pre-gate: last_sync == 0 used
+    to skip sync_project entirely and route to the collab UI, so
+    a LAN/USB-only project (never WAN-pushed by design) could
+    never fire the LAN fan-out the daemon now runs inside the
+    sync RPC. The RPC always fires; genuine setup gaps still land
+    in the collab UI via the typed result codes. Also removes a
+    blocking project_status RPC from the tap path (§ 17c Rule 7).
+  - AUTH_REQUIRED / NO_REMOTE routing is LAN-aware: when the
+    project's LAN sync is armed (ProjectStatus.lan_allow_sync),
+    these are informational — the room already synced — so the
+    recorder toasts and refreshes the sync badge instead of
+    yanking the user to the collab settings screen. LAN off keeps
+    the old go-to-setup routing. NOT_A_REPO still always routes
+    to setup.
+
+1.61.0
+  Client-contract catch-up (client 0.54.17):
+  - Presplash hold: main entrypoint calls presplash_hold.hold()
+    before App().run() and on_start schedules release() on the
+    next frame (before bootstrap's popup slot), so the native
+    splash stays up until the first screen can actually respond
+    instead of dropping at Kivy's first frame. No-op off Android;
+    45 s watchdog in the client helper backstops failed loads.
+  - i18n: subscribe_language_change wired (required since client
+    0.43.1). i18n.py rebuilds the recorder catalog + its client
+    fallback whenever the client catalog re-languages (bootstrap
+    daemon-pref sync, client settings UI), so client-owned strings
+    no longer regress to English after a language change made
+    outside the recorder's own set_language().
+
+1.60.0
+  Image backfill on swipe: an entry that already has recorded audio
+  but whose displayed image never made it into the project (bake
+  failed in an earlier session, older APK) now gets its image baked
+  + committed when the user swipes past it, not only when a new
+  recording marks the entry dirty. nav_prev/nav_next share a new
+  _flush_entry_on_swipe helper; _save_remote_image reports whether
+  it actually initiated a save so pure browse never triggers a
+  commit. It also gains an audio gate — images are never baked for
+  entries the user hasn't recorded, which additionally stops the
+  dirty re-arm from the image-save worker turning the next browse
+  swipe into a spurious bake of an untouched entry's CAWL image.
+
+1.59.1
+  Rework the 'No entries' half of 1.59.0 per user feedback (the
+  un-split half stands). The intermediate "clear filter" popup and
+  its staged auto-clearing are gone, and the label reads plain
+  "No entries" (no "— tap to fix" suffix). Tapping it now opens
+  the same go-to dialog as a populated queue: its existing
+  "Show past work" and "Go outside filter" controls are the fix —
+  the user sees why the queue is empty and decides what to relax.
+  With an empty queue the dialog's number range falls back to the
+  unfiltered model (the popup-time map's indexes are never read;
+  OK rebuilds a live map), and the entry-count title shows the
+  unfiltered total instead of "1-0".
+
 1.59.0
   Two UI gaps closed:
   - Un-split a project: the split summary row in the filter modal
