@@ -18,4 +18,5 @@ agenda.txt
 # prehook. Not committed.
 presplash_variants/
 !CHANGELOG.txt
+!fonts/README.txt
 agenda/

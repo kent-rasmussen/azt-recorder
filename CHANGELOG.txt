@@ -1,5 +1,16 @@
 CHANGELOG — A-Z+T Recorder
 
+1.62.3
+  Re-recording no longer leaves a duplicate MOOV atom and ~1.9 MB of
+  stale bytes in the M4A. _start_android_recording opened the audio
+  URI with ContentResolver mode 'w', which does not truncate; M4A
+  writes its MOOV atom at the end, so a shorter re-record over the
+  same (deterministic per-entry) filename left the previous take's
+  MOOV past the new end — ffmpeg's "Found duplicated MOOV Atom.
+  Skipped it.", and git storing the bloat. Now opens 'wt'.
+  URI-storage-only; the filesystem branch goes through
+  MediaRecorder.setOutputFile, which truncates.
+
 1.62.0
   Sync button now reaches LAN-only teams (peer half of daemon
   0.54.40 "user Sync fires LAN regardless of github"):

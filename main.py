@@ -5859,7 +5859,14 @@ class RecorderController:
                     'org.kivy.android.PythonActivity')
                 ctx = PythonActivity.mActivity
                 resolver = ctx.getContentResolver()
-                pfd = resolver.openFileDescriptor(Uri.parse(aac_path), 'w')
+                # 'wt' = write + TRUNCATE. Plain 'w' does NOT shrink
+                # the file, and M4A puts its MOOV atom at the END
+                # (duration is only known at stop), so re-recording a
+                # shorter take over a longer one left the old MOOV as
+                # a trailing tail — "Found duplicated MOOV Atom" plus
+                # ~1.9 MB of dead bytes committed to git. Don't drop
+                # the 't'.
+                pfd = resolver.openFileDescriptor(Uri.parse(aac_path), 'wt')
                 if pfd is None:
                     raise IOError(
                         f'openFileDescriptor returned null for {aac_path!r}')
@@ -6188,7 +6195,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.62.2'
+__version__ = '1.62.3'
 
 
 class LIFTRecorderApp(App):
