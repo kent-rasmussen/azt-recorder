@@ -1,5 +1,31 @@
 CHANGELOG — A-Z+T Recorder
 
+1.62.4
+  Two pre-flight gates on start_recording, so the record button
+  stops failing silently. Both run before any state is committed,
+  so a refusal leaves the recorder exactly as it was — no
+  _start_pending to unwind, no watchdog to cancel.
+  - RECORD_AUDIO deny is no longer silent. request_permissions at
+    import time registered no callback, so on Deny MediaRecorder
+    .start() threw and the user saw nothing happen. New
+    _mic_permission_ok() checks the permission and, when it's
+    missing, says so and names the Settings path. Shape follows the
+    CAMERA gate in _take_photo_android, with two deliberate
+    differences: it does NOT re-launch recording from the callback
+    (push-to-talk — the finger is long gone by the time a dialog is
+    answered), and it messages BEFORE requesting, because once
+    Android has recorded "don't ask again" the request returns with
+    no dialog and the callback never fires. Off Android, and when
+    the permission API itself is unavailable, it returns True so
+    behaviour is unchanged.
+  - _make_audio_path's os.makedirs no longer dies into a Kivy event
+    lambda. On read-only or ejected storage the OSError was
+    logged-and-swallowed, leaving a dead button; start_recording now
+    catches it and toasts. _make_audio_path keeps raising by design
+    (documented in its docstring) — it is the caller that knows how
+    to abort a recording.
+  Three new msgids, all translated in the French catalog.
+
 1.62.3
   Re-recording no longer leaves a duplicate MOOV atom and ~1.9 MB of
   stale bytes in the M4A. _start_android_recording opened the audio

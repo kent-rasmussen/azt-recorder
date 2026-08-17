@@ -4800,18 +4800,73 @@ class RecorderController:
         self._toast_record_failed(at_floor=False)
         return new_key
 
-    def _toast_record_failed(self, at_floor):
+    def _toast(self, msg):
+        """Marshal a toast onto the Kivy main thread; no-op before the
+        App exists. Callers may be on a worker thread or an Android
+        permission callback, so this must never touch widgets inline."""
         from kivy.app import App as _App
         app = _App.get_running_app()
         if app is None:
             return
+        Clock.schedule_once(lambda dt: app._show_toast(msg), 0)
+
+    def _toast_record_failed(self, at_floor):
         msg = (_tr('Recording failed at the lowest quality. '
                    'Please try again.')
                if at_floor
                else _tr('Recording failed; quality lowered. '
                         'Please try again.'))
-        Clock.schedule_once(
-            lambda dt: app._show_toast(msg), 0)
+        self._toast(msg)
+
+    def _mic_permission_ok(self):
+        """True when RECORD_AUDIO is granted (always, off Android).
+
+        A denied mic makes ``MediaRecorder.start()`` throw, which the
+        user experiences as a dead record button — the point of this
+        gate is to replace "nothing happened" with a sentence saying
+        what to do about it.
+
+        Shape follows the CAMERA gate in ``_take_photo_android``: check,
+        then request. Two deliberate differences. We do NOT re-launch
+        the action from the callback — this is push-to-talk, so the
+        finger is long gone by the time a dialog is answered. And we
+        message BEFORE requesting, because once Android has recorded a
+        "don't ask again" for a permission, ``request_permissions``
+        returns without showing a dialog and the callback never fires;
+        a message that waited on the callback would never arrive."""
+        if platform != 'android':
+            return True
+        try:
+            from android.permissions import (
+                request_permissions, Permission, check_permission)
+            granted = bool(check_permission(Permission.RECORD_AUDIO))
+        except Exception as ex:
+            # Can't ask. Let the recorder try and fail as it did before
+            # rather than blocking a press on our own inability to check.
+            print(f'[record] mic permission check unavailable: {ex}',
+                  file=sys.stderr, flush=True)
+            return True
+        if granted:
+            return True
+        print('[record] RECORD_AUDIO denied — refusing to start',
+              file=sys.stderr, flush=True)
+        self._toast(_tr('The microphone permission is denied, so '
+                        'recording is off. Allow it in Android '
+                        'Settings → Apps → {app} → Permissions.'
+                        ).format(app=APP_NAME))
+        try:
+            request_permissions(
+                [Permission.RECORD_AUDIO],
+                callback=lambda perms, grants: (
+                    self._toast(_tr('Microphone allowed — press and hold '
+                                    'to record.'))
+                    if grants and grants[0] else None
+                ),
+            )
+        except Exception as ex:
+            print(f'[record] request_permissions raised: {ex}',
+                  file=sys.stderr, flush=True)
+        return False
 
     def start_recording(self):
         """Spawn a worker thread to do the blocking JNI setup, return
@@ -4822,7 +4877,22 @@ class RecorderController:
         for the full state machine."""
         if self._recording or self._start_pending or not self.current:
             return
-        path = self._make_audio_path()
+        # Both gates run BEFORE any state is committed, so a refusal
+        # leaves the recorder exactly as it was — no _start_pending to
+        # unwind, no watchdog to cancel.
+        if not self._mic_permission_ok():
+            return
+        try:
+            path = self._make_audio_path()
+        except OSError as ex:
+            # Read-only or ejected storage. Previously this OSError
+            # propagated into the Kivy touch dispatch and was
+            # logged-and-swallowed, so the button just did nothing.
+            print(f'[record] cannot create the audio folder: {ex}',
+                  file=sys.stderr, flush=True)
+            self._toast(_tr('Cannot save audio: the storage is '
+                            'read-only or unavailable.'))
+            return
         # Clear before the attempt so a previous successful flag
         # cannot survive into a now-failing start.
         self._record_ok = False
@@ -5772,6 +5842,11 @@ class RecorderController:
         self._playing = False
 
     def _make_audio_path(self):
+        """Build the audio path, creating ``audio/`` on filesystem-mode
+        projects. Raises ``OSError`` when that folder can't be made
+        (read-only / ejected storage) — deliberately, so the caller can
+        abort the recording and say so; ``start_recording`` is the only
+        caller and does exactly that."""
         e = self.current
         # Filename: {cawl}_{guid}_{en_gloss}.wav (extension is replaced
         # by the platform-specific recorder: .m4a on Android, .flac on
@@ -6195,7 +6270,7 @@ class RecorderController:
 
 # ── Main App ───────────────────────────────────────────────────────────────────
 
-__version__ = '1.62.3'
+__version__ = '1.62.4'
 
 
 class LIFTRecorderApp(App):

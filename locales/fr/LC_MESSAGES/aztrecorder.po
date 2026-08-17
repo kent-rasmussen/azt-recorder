@@ -414,3 +414,34 @@ msgstr ""
 "Définissez votre nom dans les paramètres de synchronisation avant "
 "de revendiquer une tranche d'enregistrement. Touchez « Ouvrir les "
 "paramètres de synchronisation » pour continuer."
+
+# ── v1.62.4 — the two pre-flight gates on start_recording ──────────────────
+
+# Toast when RECORD_AUDIO is denied. Says where to fix it because
+# Android may have recorded "don't ask again", in which case no
+# dialog appears and Settings is the only route. {app} is APP_NAME.
+# The arrow-separated path mirrors the Android Settings labels a
+# French-locale phone actually shows.
+msgid ""
+"The microphone permission is denied, so recording is off. Allow it in "
+"Android Settings → Apps → {app} → Permissions."
+msgstr ""
+"L'autorisation du microphone est refusée, donc l'enregistrement est "
+"désactivé. Autorisez-la dans Paramètres Android → Applications → "
+"{app} → Autorisations."
+
+# Confirmation toast from the permission callback. Restates the
+# push-to-talk gesture because the denial interrupted it — the
+# finger is long gone by the time the dialog is answered, so the
+# recording does NOT resume by itself. Matches the existing
+# "Hold the button to record" phrasing.
+msgid "Microphone allowed — press and hold to record."
+msgstr "Microphone autorisé — maintenez le bouton pour enregistrer."
+
+# Toast when the audio/ folder can't be created (ejected SD card,
+# read-only storage). Previously the OSError vanished into a Kivy
+# event lambda and the button appeared dead.
+msgid "Cannot save audio: the storage is read-only or unavailable."
+msgstr ""
+"Impossible d'enregistrer l'audio : le stockage est en lecture seule "
+"ou indisponible."
