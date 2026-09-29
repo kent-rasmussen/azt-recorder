@@ -371,7 +371,7 @@ CHANGELOG — A-Z+T Recorder
   data + reasoning behind the constant.
 
 1.56.1
-  Log a backlog entry in `docs/Backlog.md` for the "duplicate
+  Log an entry in the recorder backlog for the "duplicate
   MOOV + ~1.9 MB junk between" symptom observed in saved
   M4A files. Strong hypothesis: `_start_android_recording`
   opens the audio FD with mode `'w'` (no truncate) at
@@ -2091,7 +2091,7 @@ CHANGELOG — A-Z+T Recorder
   already-written entry is a no-op) and silent on success.
   The toast on the original failure now reads "...will retry
   automatically." since re-recording is no longer the only
-  retry path. docs/Backlog.md back to empty.
+  retry path. The recorder backlog is back to empty.
 
 1.46.42
   Fix wedged-recording UI after a LIFT save failure
@@ -2106,10 +2106,10 @@ CHANGELOG — A-Z+T Recorder
   audio bytes are preserved; re-recording overwrites the same
   deterministic path and re-runs set_audio, which is the
   natural retry. The residual "retry without re-recording" UX
-  stays in docs/Backlog.md.
+  stays in the recorder backlog.
 
 1.46.41
-  Add docs/Backlog.md flagging the wedged-recording UI after a
+  Start the recorder backlog, flagging the wedged-recording UI after a
   LIFT save failure (main.py:3592-3597 in stop_recording). The
   set_audio call has no try/except, so a transient lift_io.commit
   failure raises before _notify_ui is scheduled — recording flag
